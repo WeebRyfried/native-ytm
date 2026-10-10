@@ -1,0 +1,196 @@
+//! The window: one copy per user, kept alive in the tray while the music
+//! plays, and drawn by egui.
+
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+
+use native_ytm::app::{App, SHOW_REQUESTED};
+use native_ytm::{platform, settings::Paths, theme, ui};
+
+fn main() {
+    let paths = Paths::new();
+    let waker = fastframe_shell::Waker::default();
+    let slot = fastframe_instance::Slot::new("dev.native-ytm.NativeYtm");
+    let wake = waker.clone();
+    let _guard = match slot.claim("show", move |request| match request {
+        "show" => {
+            SHOW_REQUESTED.store(true, Ordering::SeqCst);
+            wake.wake();
+            Some("ok".to_owned())
+        }
+        _ => None,
+    }) {
+        fastframe_instance::Claim::First(guard) => guard,
+        // The running copy shows its window.
+        _ => return,
+    };
+    // Only the running copy logs, so a second launch never replaces its
+    // log file.
+    if let Err(error) = fastframe_log::Logging::new("native-ytm", env!("CARGO_PKG_VERSION"))
+        .filter("warn,native_ytm=info,fastframe_audio=info")
+        .file(paths.logs().join("native-ytm.log"))
+        .panic_log(paths.logs().join("panic.log"))
+        .init()
+    {
+        eprintln!("no logger: {error}");
+    }
+
+    let app = App::new(waker.clone());
+    let config = paths.config.clone();
+    let result = fastframe_shell::Shell::new(app, &waker).run(|lease| {
+        let viewport = egui::ViewportBuilder::default()
+            .with_title("Native YTM")
+            .with_app_id("native-ytm")
+            .with_inner_size([1280.0, 820.0])
+            .with_min_inner_size([880.0, 560.0])
+            .with_icon(Arc::new(theme::app_icon(256)));
+        let options = eframe::NativeOptions {
+            viewport,
+            persist_window: true,
+            persistence_path: Some(config.join("window.ron")),
+            ..eframe::NativeOptions::default()
+        };
+        eframe::run_native(
+            "Native YTM",
+            options,
+            Box::new(move |cc| {
+                let mut app = lease.take(&cc.egui_ctx);
+                app.attach(&cc.egui_ctx);
+                #[cfg(windows)]
+                {
+                    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                    if let Ok(handle) = cc.window_handle()
+                        && let RawWindowHandle::Win32(window) = handle.as_raw()
+                    {
+                        platform::style_title_bar(window.hwnd.get(), theme::SIDEBAR);
+                    }
+                }
+                dev_route(&mut app);
+                let seek = std::env::var("NATIVE_YTM_SEEK").ok().and_then(|v| v.parse().ok());
+                Ok(Box::new(Window { app, shot: Shot::from_env(), seek }))
+            }),
+        )
+    });
+    if let Err(error) = result {
+        log::error!("the window failed: {error}");
+    }
+}
+
+struct Window {
+    app: fastframe_shell::Held<App>,
+    shot: Option<Shot>,
+    /// `NATIVE_YTM_SEEK`: a position to jump to once the song plays.
+    seek: Option<f64>,
+}
+
+/// A screenshot taken on its own and saved, for checking the interface
+/// without a person at the screen: `NATIVE_YTM_SHOT=out.png`, optionally
+/// with `NATIVE_YTM_ROUTE` (search:QUERY, browse:ID, play:VIDEO_ID,
+/// explore, library, settings, queue, lyrics) and `NATIVE_YTM_SHOT_DELAY`
+/// in milliseconds.
+struct Shot {
+    path: std::path::PathBuf,
+    due: std::time::Instant,
+    asked: bool,
+}
+
+impl Shot {
+    fn from_env() -> Option<Self> {
+        let path = std::env::var_os("NATIVE_YTM_SHOT")?;
+        let delay = std::env::var("NATIVE_YTM_SHOT_DELAY")
+            .ok()
+            .and_then(|d| d.parse().ok())
+            .unwrap_or(7000);
+        Some(Self {
+            path: path.into(),
+            due: std::time::Instant::now() + std::time::Duration::from_millis(delay),
+            asked: false,
+        })
+    }
+}
+
+fn dev_route(app: &mut App) {
+    use native_ytm::model::{Action, LibraryTab, Route, SideTab};
+    let Ok(route) = std::env::var("NATIVE_YTM_ROUTE") else {
+        return;
+    };
+    if std::env::var_os("NATIVE_YTM_MUTE").is_some() {
+        app.player.set_volume(0.0);
+    }
+    app.scroll_to = std::env::var("NATIVE_YTM_SCROLL").ok().and_then(|v| v.parse().ok());
+    for step in route.split('|') {
+        let (kind, arg) = step.split_once(':').unwrap_or((step, ""));
+        let action = match kind {
+            "search" => Action::Search(arg.to_owned()),
+            "browse" => Action::Navigate(Route::Browse { browse_id: arg.to_owned(), params: None }),
+            "explore" => Action::Navigate(Route::Explore),
+            "library" => Action::Navigate(Route::Library(LibraryTab::Playlists)),
+            "settings" => Action::Navigate(Route::Settings),
+            "queue" => Action::ShowSidePanel(SideTab::UpNext),
+            "lyrics" => Action::ShowSidePanel(SideTab::Lyrics),
+            "signin" => Action::OpenSignIn,
+            "play" => Action::PlayWatch { video_id: Some(arg.to_owned()), playlist_id: None, params: None, title: None },
+            _ => continue,
+        };
+        app.actions.push(action);
+    }
+}
+
+impl eframe::App for Window {
+    fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.app.background();
+        if std::mem::take(&mut self.app.wants_show) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        if ctx.input(|i| i.viewport().close_requested()) {
+            self.app.on_close_requested();
+        }
+        fastframe_shell::window::recover_offscreen(ctx, frame);
+        if self.seek.is_some() && self.app.playing() && self.app.position() > 0.5 {
+            let to = self.seek.take().unwrap_or_default();
+            self.app.actions.push(native_ytm::model::Action::Seek(to));
+        }
+        if let Some(shot) = &mut self.shot {
+            if !shot.asked && std::time::Instant::now() >= shot.due {
+                shot.asked = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+            }
+            let image = ctx.input(|i| {
+                i.raw.events.iter().find_map(|e| match e {
+                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                    _ => None,
+                })
+            });
+            if let Some(image) = image {
+                let size = image.size;
+                let pixels: Vec<u8> = image.pixels.iter().flat_map(|p| p.to_array()).collect();
+                if let Some(buffer) = image::RgbaImage::from_raw(size[0] as u32, size[1] as u32, pixels) {
+                    let _ = buffer.save(&shot.path);
+                }
+                self.app.quit = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        ui::show(&mut self.app, ui);
+        let actions = std::mem::take(&mut self.app.actions);
+        for action in actions {
+            self.app.apply(action);
+        }
+    }
+
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        theme::BG.to_normalized_gamma_f32()
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.app.save_session();
+    }
+}

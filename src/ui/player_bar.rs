@@ -1,0 +1,289 @@
+//! The bar along the bottom: the seek bar across its top edge, the
+//! transport on the left, the song in the middle, and the rest on the right.
+
+use egui::{Align, Align2, Color32, CornerRadius, CursorIcon, Layout, Rect, Sense, Stroke, Ui, Vec2, pos2, vec2};
+
+use crate::api::model::{Like, format_duration};
+use crate::api::music::Rating;
+use crate::app::App;
+use crate::model::{Action, SideTab};
+use crate::settings::Repeat;
+use crate::theme::{self, Icon};
+use crate::ui::widgets::{self, RowPlace};
+
+pub fn show(app: &mut App, ui: &mut Ui) {
+    let rect = ui.max_rect();
+    seek_bar(app, ui, Rect::from_min_size(rect.min - vec2(0.0, 6.0), vec2(rect.width(), 14.0)));
+    let inner = rect.shrink2(vec2(16.0, 0.0)).translate(vec2(0.0, 3.0));
+    let left_w = 260.0f32.min(inner.width() * 0.3);
+    let right_w = 300.0f32.min(inner.width() * 0.32);
+    let left = Rect::from_min_size(inner.min, vec2(left_w, inner.height()));
+    let right = Rect::from_min_max(pos2(inner.right() - right_w, inner.top()), inner.max);
+    let middle = Rect::from_min_max(pos2(left.right() + 16.0, inner.top()), pos2(right.left() - 16.0, inner.bottom()));
+    transport(app, &mut ui.new_child(egui::UiBuilder::new().max_rect(left).layout(Layout::left_to_right(Align::Center))));
+    now(app, &mut ui.new_child(egui::UiBuilder::new().max_rect(middle).layout(Layout::left_to_right(Align::Center))));
+    extras(app, &mut ui.new_child(egui::UiBuilder::new().max_rect(right).layout(Layout::right_to_left(Align::Center))));
+}
+
+fn seek_bar(app: &mut App, ui: &mut Ui, rect: Rect) {
+    let duration = app.duration();
+    let response = ui.interact(rect, ui.id().with("seek"), Sense::click_and_drag());
+    let active = response.hovered() || response.dragged();
+    let line_y = rect.top() + 6.0;
+    let thickness = if active { 4.0 } else { 2.0 };
+    let painter = ui.painter();
+    let track = Rect::from_min_max(pos2(rect.left(), line_y - thickness / 2.0), pos2(rect.right(), line_y + thickness / 2.0));
+    painter.rect_filled(track, CornerRadius::ZERO, Color32::from_white_alpha(28));
+    let Some(duration) = duration.filter(|d| *d > 0.0) else {
+        if app.busy() {
+            // An indeterminate sweep while the song loads.
+            let t = ui.input(|i| i.time) as f32;
+            let w = rect.width() * 0.25;
+            let x = rect.left() + (t * 0.8).fract() * (rect.width() + w) - w;
+            painter.rect_filled(
+                Rect::from_min_max(pos2(x.max(rect.left()), track.top()), pos2((x + w).min(rect.right()), track.bottom())),
+                CornerRadius::ZERO,
+                theme::ACCENT.gamma_multiply(0.7),
+            );
+            ui.ctx().request_repaint();
+        }
+        return;
+    };
+    let downloaded = app.player.status().downloaded.clamp(0.0, 1.0);
+    if downloaded > 0.0 && app.player.status().token != 0 {
+        painter.rect_filled(
+            Rect::from_min_max(track.min, pos2(rect.left() + rect.width() * downloaded, track.bottom())),
+            CornerRadius::ZERO,
+            Color32::from_white_alpha(30),
+        );
+    }
+    let drag_id = ui.id().with("seek-drag");
+    let mut position = app.position();
+    if let Some(pointer) = response.interact_pointer_pos()
+        && (response.dragged() || response.is_pointer_button_down_on())
+    {
+        let f = ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+        position = f64::from(f) * duration;
+        ui.data_mut(|d| d.insert_temp(drag_id, position));
+    }
+    if response.drag_stopped() || response.clicked() {
+        if let Some(to) = ui.data_mut(|d| d.remove_temp::<f64>(drag_id)) {
+            app.actions.push(Action::Seek(to));
+        }
+    } else if let Some(dragging) = ui.data(|d| d.get_temp::<f64>(drag_id)) {
+        position = dragging;
+    }
+    let f = (position / duration).clamp(0.0, 1.0) as f32;
+    let x = rect.left() + rect.width() * f;
+    painter.rect_filled(
+        Rect::from_min_max(track.min, pos2(x, track.bottom())),
+        CornerRadius::ZERO,
+        theme::ACCENT,
+    );
+    if active {
+        painter.circle_filled(pos2(x, line_y), 7.0, theme::ACCENT);
+        if let Some(hover) = response.hover_pos() {
+            let f = ((hover.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+            let at = (f64::from(f) * duration) as u32;
+            let text = format_duration(at);
+            let galley = painter.layout_no_wrap(text, theme::medium(12.0), theme::TEXT);
+            let bubble = Rect::from_center_size(pos2(hover.x.clamp(rect.left() + 24.0, rect.right() - 24.0), line_y - 18.0), galley.size() + vec2(12.0, 6.0));
+            let layer = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, ui.id().with("seek-tip")));
+            layer.rect_filled(bubble, CornerRadius::same(4), theme::POPUP);
+            layer.galley(bubble.center() - galley.size() / 2.0, galley, theme::TEXT);
+        }
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+}
+
+fn transport(app: &mut App, ui: &mut Ui) {
+    ui.spacing_mut().item_spacing.x = 2.0;
+    if widgets::icon_button(ui, Icon::Previous, 22.0, theme::TEXT, "Previous (Ctrl+Left)").clicked() {
+        app.actions.push(Action::Previous);
+    }
+    // Play or pause, in a white circle, or a spinner while loading.
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(48.0), Sense::click());
+    let response = response.on_hover_cursor(CursorIcon::PointingHand);
+    let playing = app.playing();
+    let busy = app.busy();
+    let fill = if response.hovered() { Color32::from_gray(225) } else { Color32::WHITE };
+    ui.painter().circle_filled(rect.center(), 22.0, fill);
+    if busy {
+        let t = ui.input(|i| i.time) as f32;
+        let start = t * 5.0;
+        let points: Vec<_> = (0..=24)
+            .map(|i| {
+                let a = start + i as f32 / 24.0 * std::f32::consts::PI * 1.4;
+                rect.center() + vec2(a.cos(), a.sin()) * 11.0
+            })
+            .collect();
+        ui.painter().add(egui::Shape::line(points, Stroke::new(2.5, Color32::BLACK)));
+        ui.ctx().request_repaint();
+    } else {
+        let icon = if playing { Icon::Pause } else { Icon::Play };
+        let offset = if playing { 0.0 } else { 1.5 };
+        icon.image(Color32::BLACK, 22.0)
+            .paint_at(ui, Rect::from_center_size(rect.center() + vec2(offset, 0.0), Vec2::splat(22.0)));
+    }
+    if response.on_hover_text(if playing { "Pause (Space)" } else { "Play (Space)" }).clicked() {
+        app.actions.push(Action::TogglePlay);
+    }
+    if widgets::icon_button(ui, Icon::Next, 22.0, theme::TEXT, "Next (Ctrl+Right)").clicked() {
+        app.actions.push(Action::Next);
+    }
+    ui.add_space(12.0);
+    if let Some(duration) = app.duration() {
+        let position = app.position().min(duration);
+        ui.label(
+            egui::RichText::new(format!(
+                "{} / {}",
+                format_duration(position as u32),
+                format_duration(duration as u32)
+            ))
+            .font(theme::regular(12.5))
+            .color(theme::TEXT_DIM),
+        );
+        if app.playing() {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+        }
+    }
+}
+
+fn now(app: &mut App, ui: &mut Ui) {
+    let Some(track) = app.current().cloned() else {
+        return;
+    };
+    let width = ui.available_width();
+    ui.spacing_mut().item_spacing.x = 12.0;
+    let (art, art_response) = ui.allocate_exact_size(Vec2::splat(48.0), Sense::click());
+    let mut cx = app.cx();
+    widgets::paint_art(ui, cx.images, track.thumbnail.as_deref(), art, 4.0, false);
+    let art_response = art_response.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Show the queue");
+    if art_response.clicked() {
+        cx.push(Action::ShowSidePanel(SideTab::UpNext));
+    }
+    // Dislike, like and more: three icon buttons and their gaps.
+    let buttons_w = 3.0 * 38.0 + 2.0 * 12.0 + 12.0;
+    let text_w = (width - 48.0 - 12.0 - buttons_w).max(60.0);
+    ui.allocate_ui_with_layout(vec2(text_w, 44.0), Layout::top_down(Align::Min), |ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        ui.set_width(text_w);
+        widgets::clipped_label(ui, &track.title, theme::medium(15.0), theme::TEXT, text_w, Sense::hover());
+        let mut links = track.artists.clone();
+        if let Some(album) = &track.album {
+            links.push(album.clone());
+        }
+        if links.is_empty() {
+            widgets::clipped_label(ui, track.extra.as_deref().unwrap_or(""), theme::regular(13.0), theme::TEXT_DIM, text_w, Sense::hover());
+        } else {
+            widgets::links(ui, &mut cx, &links, theme::regular(13.0), theme::TEXT_DIM, text_w);
+        }
+    });
+    let like = app.now.like.filter(|_| app.now.video_id == track.video_id);
+    let (dislike_icon, like_icon) = match like {
+        Some(Like::Liked) => (Icon::Dislike, Icon::Liked),
+        Some(Like::Disliked) => (Icon::Disliked, Icon::Like),
+        _ => (Icon::Dislike, Icon::Like),
+    };
+    let mut cx = app.cx();
+    if widgets::icon_button(ui, dislike_icon, 20.0, theme::TEXT, "Dislike").clicked() {
+        cx.push(Action::Rate(
+            track.video_id.clone(),
+            if like == Some(Like::Disliked) { Rating::None } else { Rating::Dislike },
+        ));
+    }
+    if widgets::icon_button(ui, like_icon, 20.0, theme::TEXT, "Like").clicked() {
+        cx.push(Action::Rate(
+            track.video_id.clone(),
+            if like == Some(Like::Liked) { Rating::None } else { Rating::Like },
+        ));
+    }
+    let more = widgets::icon_button(ui, Icon::More, 20.0, theme::TEXT, "More");
+    egui::Popup::menu(&more).show(|ui| {
+        let uid = app.queue.current().map_or(0, |e| e.uid);
+        let mut cx = app.cx();
+        widgets::track_menu(ui, &mut cx, &track, RowPlace::Queue(uid));
+    });
+}
+
+fn extras(app: &mut App, ui: &mut Ui) {
+    ui.spacing_mut().item_spacing.x = 2.0;
+    let lyrics_on = app.settings.side_panel && app.side_tab == SideTab::Lyrics;
+    if widgets::icon_button(ui, Icon::Lyrics, 20.0, if lyrics_on { theme::TEXT } else { theme::TEXT_DIM }, "Lyrics").clicked() {
+        app.actions.push(if lyrics_on { Action::ToggleSidePanel } else { Action::ShowSidePanel(SideTab::Lyrics) });
+    }
+    let queue_on = app.settings.side_panel && app.side_tab == SideTab::UpNext;
+    if widgets::icon_button(ui, Icon::Queue, 20.0, if queue_on { theme::TEXT } else { theme::TEXT_DIM }, "Up next (Q)").clicked() {
+        app.actions.push(if queue_on { Action::ToggleSidePanel } else { Action::ShowSidePanel(SideTab::UpNext) });
+    }
+    let shuffle = app.queue.shuffle;
+    let shuffle_tint = if shuffle { theme::TEXT } else { theme::TEXT_FAINT };
+    let r = widgets::icon_button(ui, Icon::Shuffle, 20.0, shuffle_tint, if shuffle { "Shuffle is on" } else { "Shuffle" });
+    if shuffle {
+        dot(ui, r.rect);
+    }
+    if r.clicked() {
+        app.actions.push(Action::ToggleShuffle);
+    }
+    let (icon, tip, on) = match app.settings.repeat {
+        Repeat::Off => (Icon::Repeat, "Repeat", false),
+        Repeat::All => (Icon::Repeat, "Repeat all", true),
+        Repeat::One => (Icon::RepeatOne, "Repeat one", true),
+    };
+    let r = widgets::icon_button(ui, icon, 20.0, if on { theme::TEXT } else { theme::TEXT_FAINT }, tip);
+    if on {
+        dot(ui, r.rect);
+    }
+    if r.clicked() {
+        app.actions.push(Action::CycleRepeat);
+    }
+    ui.add_space(8.0);
+    volume(app, ui);
+}
+
+/// The small dot under a toggle that is on.
+fn dot(ui: &Ui, rect: Rect) {
+    ui.painter()
+        .circle_filled(pos2(rect.center().x, rect.bottom() - 3.0), 2.0, theme::ACCENT);
+}
+
+fn volume(app: &mut App, ui: &mut Ui) {
+    let (rect, response) = ui.allocate_exact_size(vec2(96.0, 28.0), Sense::click_and_drag());
+    let volume = if app.settings.muted { 0.0 } else { app.settings.volume };
+    let line = Rect::from_min_max(pos2(rect.left() + 4.0, rect.center().y - 2.0), pos2(rect.right() - 4.0, rect.center().y + 2.0));
+    ui.painter().rect_filled(line, CornerRadius::same(2), Color32::from_white_alpha(40));
+    let x = line.left() + line.width() * volume;
+    ui.painter().rect_filled(Rect::from_min_max(line.min, pos2(x, line.bottom())), CornerRadius::same(2), theme::TEXT);
+    if response.hovered() || response.dragged() {
+        ui.painter().circle_filled(pos2(x, line.center().y), 6.0, theme::TEXT);
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    if let Some(pointer) = response.interact_pointer_pos()
+        && (response.dragged() || response.clicked() || response.is_pointer_button_down_on())
+    {
+        let f = ((pointer.x - line.left()) / line.width()).clamp(0.0, 1.0);
+        app.actions.push(Action::SetVolume(f));
+    }
+    if response.hovered() {
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll.abs() > 0.0 {
+            app.actions.push(Action::SetVolume((volume + scroll / 600.0).clamp(0.0, 1.0)));
+        }
+    }
+    if response.drag_stopped() {
+        app.save_settings();
+    }
+    let response = response.on_hover_text(format!("Volume {}%", (volume * 100.0).round()));
+    let _ = response;
+    let icon = if volume == 0.0 {
+        Icon::Mute
+    } else if volume < 0.5 {
+        Icon::VolumeLow
+    } else {
+        Icon::Volume
+    };
+    if widgets::icon_button(ui, icon, 20.0, theme::TEXT, if app.settings.muted { "Unmute (M)" } else { "Mute (M)" }).clicked() {
+        app.actions.push(Action::ToggleMute);
+    }
+    let _ = Align2::CENTER_CENTER;
+}

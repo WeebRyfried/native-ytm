@@ -1,0 +1,154 @@
+//! Settings and the restored session, as JSON in the roaming app data
+//! folder, written atomically so a crash never leaves half a file.
+
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+
+use crate::api::model::Track;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Repeat {
+    #[default]
+    Off,
+    All,
+    One,
+}
+
+impl Repeat {
+    pub fn next(self) -> Self {
+        match self {
+            Repeat::Off => Repeat::All,
+            Repeat::All => Repeat::One,
+            Repeat::One => Repeat::Off,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    pub volume: f32,
+    pub muted: bool,
+    /// Turn loud tracks down to YouTube's target, as the web player does.
+    pub normalize: bool,
+    /// Keep playing related songs when the queue runs out.
+    pub autoplay: bool,
+    pub repeat: Repeat,
+    pub shuffle: bool,
+    /// Closing the window keeps the music playing in the tray.
+    pub close_to_tray: bool,
+    /// The interface language YouTube Music answers in.
+    pub language: String,
+    /// The region for charts and recommendations; YouTube's guess when empty.
+    pub region: String,
+    /// Fall back to yt-dlp when YouTube refuses the native stream request.
+    pub use_ytdlp: bool,
+    /// yt-dlp's path, when it is not on PATH.
+    pub ytdlp_path: String,
+    pub sidebar: bool,
+    pub side_panel: bool,
+    /// Pick up where the last session left off.
+    pub restore_session: bool,
+    /// The interface zoom.
+    pub zoom: f32,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            volume: 0.8,
+            muted: false,
+            normalize: true,
+            autoplay: true,
+            repeat: Repeat::Off,
+            shuffle: false,
+            close_to_tray: true,
+            language: "en".into(),
+            region: String::new(),
+            use_ytdlp: true,
+            ytdlp_path: String::new(),
+            sidebar: true,
+            side_panel: false,
+            restore_session: true,
+            zoom: 1.0,
+        }
+    }
+}
+
+/// What was playing, for the next start.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Session {
+    pub tracks: Vec<Track>,
+    pub current: Option<usize>,
+    pub position_secs: f64,
+    pub playlist_id: Option<String>,
+}
+
+pub struct Paths {
+    pub config: PathBuf,
+    pub cache: PathBuf,
+}
+
+impl Paths {
+    pub fn new() -> Self {
+        let dirs = directories::ProjectDirs::from("", "", "native-ytm");
+        let (config, cache) = match &dirs {
+            Some(dirs) => (dirs.config_dir().to_path_buf(), dirs.cache_dir().to_path_buf()),
+            None => {
+                let base = std::env::temp_dir().join("native-ytm");
+                (base.clone(), base.join("cache"))
+            }
+        };
+        let _ = std::fs::create_dir_all(&config);
+        let _ = std::fs::create_dir_all(&cache);
+        Self { config, cache }
+    }
+
+    pub fn settings(&self) -> PathBuf {
+        self.config.join("settings.json")
+    }
+
+    pub fn session(&self) -> PathBuf {
+        self.config.join("session.json")
+    }
+
+    pub fn account(&self) -> PathBuf {
+        self.config.join("account.bin")
+    }
+
+    pub fn images(&self) -> PathBuf {
+        self.cache.join("images")
+    }
+
+    pub fn logs(&self) -> PathBuf {
+        self.cache.join("logs")
+    }
+}
+
+pub fn load<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> T {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
+            log::warn!("{} is unreadable ({error}); using defaults", path.display());
+            T::default()
+        }),
+        Err(_) => T::default(),
+    }
+}
+
+/// Writes through a temporary file and a rename, so the old file stays
+/// whole until the new one is.
+pub fn save<T: Serialize>(path: &Path, value: &T) {
+    let Ok(json) = serde_json::to_vec_pretty(value) else {
+        return;
+    };
+    write_atomic(path, &json);
+}
+
+pub fn write_atomic(path: &Path, bytes: &[u8]) {
+    let tmp = path.with_extension("tmp");
+    if let Err(error) = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path)) {
+        log::warn!("cannot save {}: {error}", path.display());
+    }
+}

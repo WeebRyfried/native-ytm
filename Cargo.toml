@@ -1,0 +1,69 @@
+[package]
+name = "native-ytm"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+description = "A lightweight native YouTube Music client for Windows"
+publish = false
+
+[[bin]]
+name = "native-ytm"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+directories = "6"
+parking_lot = "0.12"
+fastrand = "2"
+sha1 = "0.10"
+# The whole UI. glow keeps the binary and the dependency tree small; wgpu is
+# not needed for a 2D music client (the same choice Spotifast makes).
+eframe = { version = "0.36", default-features = false, features = ["accesskit", "glow", "default_fonts", "persistence"] }
+egui = "0.36"
+# SVG icons through egui's image loaders.
+egui_extras = { version = "0.36", features = ["svg"] }
+# Spotifast's shared foundation (crmne/fastframe), every crate from one
+# revision: move them together.
+fastframe-audio = { git = "https://github.com/crmne/fastframe", rev = "bb79dbddef01e660f9cfc37ccd9dff1c299a8d47" }
+fastframe-fonts = { git = "https://github.com/crmne/fastframe", rev = "bb79dbddef01e660f9cfc37ccd9dff1c299a8d47" }
+fastframe-icons = { git = "https://github.com/crmne/fastframe", rev = "bb79dbddef01e660f9cfc37ccd9dff1c299a8d47" }
+fastframe-log = { git = "https://github.com/crmne/fastframe", rev = "bb79dbddef01e660f9cfc37ccd9dff1c299a8d47" }
+fastframe-now-playing = { git = "https://github.com/crmne/fastframe", rev = "bb79dbddef01e660f9cfc37ccd9dff1c299a8d47" }
+fastframe-scroll = { git = "https://github.com/crmne/fastframe", rev = "bb79dbddef01e660f9cfc37ccd9dff1c299a8d47" }
+fastframe-shell = { git = "https://github.com/crmne/fastframe", rev = "bb79dbddef01e660f9cfc37ccd9dff1c299a8d47" }
+fastframe-instance = { git = "https://github.com/crmne/fastframe", rev = "bb79dbddef01e660f9cfc37ccd9dff1c299a8d47" }
+fastframe-tray = { git = "https://github.com/crmne/fastframe", rev = "bb79dbddef01e660f9cfc37ccd9dff1c299a8d47" }
+fastframe-text = { git = "https://github.com/crmne/fastframe", rev = "bb79dbddef01e660f9cfc37ccd9dff1c299a8d47" }
+raw-window-handle = "0.6"
+# InnerTube requests, stream downloads and artwork. rustls, so the build
+# needs no OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "gzip", "http2", "stream"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "process"] }
+# Decoding: YouTube's AAC-in-MP4 audio (itag 140).
+symphonia = { version = "0.6", default-features = false, features = ["aac", "isomp4"] }
+# Sample-rate conversion to whatever rate the output device runs at.
+rubato = "5"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+
+[target.'cfg(windows)'.dependencies]
+# DPAPI for the signed-in cookie, the title bar's colours, and message boxes.
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_Graphics_Dwm", "Win32_UI_WindowsAndMessaging", "Win32_System_Memory"] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+opt-level = 3
+panic = "abort"
+
+# Decoding and immediate-mode layout are slow at opt-level 0. Keep
+# dependencies optimised while the app itself builds incrementally.
+[profile.dev.package."*"]
+opt-level = 2
