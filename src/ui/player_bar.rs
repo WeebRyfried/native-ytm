@@ -182,7 +182,7 @@ fn now(app: &mut App, ui: &mut Ui) {
     // its artist there, before its logo.
     let plays = match track.artists.first() {
         Some(artist) if app.lastfm.status() == crate::lastfm::Status::Connected => {
-            Some((app.lastfm.plays(&artist.name, &track.title), artist.name.clone()))
+            Some((app.lastfm.plays(&artist.name, track.romanized_title()), artist.name.clone()))
         }
         _ => None,
     };
@@ -209,7 +209,11 @@ fn now(app: &mut App, ui: &mut Ui) {
     ui.allocate_ui_with_layout(vec2(text_w, 44.0), Layout::top_down(Align::Min), |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
         ui.set_width(text_w);
-        widgets::clipped_label(ui, &track.title, theme::medium(15.0), theme::TEXT, text_w, Sense::hover());
+        let shown = cx.title(&track.title).to_owned();
+        let response = widgets::clipped_label(ui, &shown, theme::medium(15.0), theme::TEXT, text_w, Sense::hover());
+        if shown != track.title {
+            response.on_hover_text(&track.title);
+        }
         let mut links = track.artists.clone();
         if let Some(album) = &track.album {
             links.push(album.clone());
@@ -263,7 +267,7 @@ fn now(app: &mut App, ui: &mut Ui) {
             ));
         }
         if widgets::icon_button(ui, Icon::LastFm, 20.0, theme::TEXT, "Open the song on Last.fm").clicked() {
-            app.actions.push(Action::OpenUrl(crate::lastfm::LastFm::track_url(artist, &track.title)));
+            app.actions.push(Action::OpenUrl(crate::lastfm::LastFm::track_url(artist, track.romanized_title())));
         }
     }
     let mut cx = app.cx();

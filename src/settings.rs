@@ -60,6 +60,9 @@ pub struct Settings {
     pub scrobble: bool,
     /// Signed in, add the songs played to the account's history.
     pub history: bool,
+    /// Titles in Latin letters when YouTube Music has them ("Tsubasa" for
+    /// "ツバサ - Tsubasa").
+    pub romanized_titles: bool,
     pub sidebar: bool,
     pub side_panel: bool,
     /// Pick up where the last session left off.
@@ -89,6 +92,7 @@ impl Default for Settings {
             discord_client_id: String::new(),
             scrobble: true,
             history: true,
+            romanized_titles: true,
             sidebar: true,
             side_panel: false,
             restore_session: true,

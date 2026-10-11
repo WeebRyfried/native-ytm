@@ -26,11 +26,18 @@ pub struct Cx<'a> {
     /// Songs on this PC and downloading, by video id.
     pub offline: &'a HashMap<String, Mark>,
     pub online: bool,
+    /// Show titles in Latin letters when there are some.
+    pub romanized: bool,
 }
 
 impl Cx<'_> {
     pub fn push(&mut self, action: Action) {
         self.actions.push(action);
+    }
+
+    /// A song's title as the settings would have it shown.
+    pub fn title<'t>(&self, title: &'t str) -> &'t str {
+        if self.romanized { romanized_title(title) } else { title }
     }
 }
 
@@ -424,7 +431,11 @@ pub fn track_row(
         explicit_badge(&mut title);
     }
     let title_w = title.available_width();
-    clipped_label(&mut title, &track.title, title_font, title_color, title_w, Sense::hover());
+    let shown = cx.title(&track.title);
+    let label = clipped_label(&mut title, shown, title_font, title_color, title_w, Sense::hover());
+    if shown != track.title {
+        label.on_hover_text(&track.title);
+    }
     let mut line = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(Rect::from_min_size(pos2(x, top + title_h + gap), vec2(text_w, line_h)))
@@ -762,7 +773,8 @@ pub fn card(ui: &mut Ui, cx: &mut Cx<'_>, item: &Item, width: f32) -> Response {
         EguiLayout::top_down(Align::Min)
     }));
     child.spacing_mut().item_spacing.y = 2.0;
-    clipped_label(&mut child, &item.title, theme::medium(14.5), theme::TEXT, width, Sense::hover());
+    let title = if item.track.is_some() { cx.title(&item.title) } else { &item.title };
+    clipped_label(&mut child, title, theme::medium(14.5), theme::TEXT, width, Sense::hover());
     let subtitle = if item.subtitle.is_empty() { item.kind.label().to_owned() } else { item.subtitle.clone() };
     clipped_label(&mut child, &subtitle, theme::regular(13.0), theme::TEXT_DIM, width, Sense::hover());
     if play_clicked {

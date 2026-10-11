@@ -46,6 +46,12 @@ pub struct Track {
 }
 
 impl Track {
+    /// The title as YouTube Music's player shows it, and as Last.fm knows
+    /// the song: "Tsubasa" for "ツバサ - Tsubasa".
+    pub fn romanized_title(&self) -> &str {
+        romanized_title(&self.title)
+    }
+
     pub fn artist_line(&self) -> String {
         if self.artists.is_empty() {
             return self.extra.clone().unwrap_or_default();
@@ -299,9 +305,80 @@ pub fn sized_thumbnail(url: &str, px: u32) -> String {
     url.to_owned()
 }
 
+/// A title in Latin letters, when YouTube Music has one. For songs titled in
+/// Japanese (or Chinese, or Korean) its lists say "original - romanised"
+/// ("ツバサ - Tsubasa", "完全感覚Dreamer - Kanzen Kankaku Dreamer"), while
+/// its player, and so the web player bar and the scrobblers reading it,
+/// says only the second part. Anything else comes back as it is.
+pub fn romanized_title(title: &str) -> &str {
+    let cuts: Vec<usize> = title.match_indices(" - ").map(|(i, _)| i).collect();
+    // The original and its romanised form have the same shape, so with
+    // several dashes the cut is the middle one ("ナンデモナイヤ - movie
+    // ver. - Nandemonaiya - movie ver.").
+    if cuts.len() % 2 == 0 {
+        return title;
+    }
+    let cut = cuts[cuts.len() / 2];
+    let (original, romanised) = (&title[..cut], title[cut + 3..].trim());
+    let latin = romanised.chars().any(|c| c.is_ascii_alphabetic());
+    if !original.chars().any(is_cjk_letter) || romanised.chars().any(is_cjk) || !latin || only_version_words(romanised) {
+        return title;
+    }
+    romanised
+}
+
+/// Kana, kanji or hangul.
+fn is_cjk_letter(c: char) -> bool {
+    matches!(c as u32,
+        0x3040..=0x30FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF | 0xF900..=0xFAFF
+        | 0xFF66..=0xFF9F | 0xAC00..=0xD7AF | 0x1100..=0x11FF | 0x3130..=0x318F)
+}
+
+/// Those, or the full-width punctuation that goes with them.
+fn is_cjk(c: char) -> bool {
+    is_cjk_letter(c) || matches!(c as u32, 0x3000..=0x303F | 0xFF00..=0xFFEF)
+}
+
+/// "TV Size", "Instrumental", "Acoustic Ver.": a version of the song, not
+/// a second name for it.
+fn only_version_words(text: &str) -> bool {
+    const WORDS: [&str; 22] = [
+        "tv", "size", "instrumental", "inst", "off", "vocal", "acoustic", "ver", "version", "remix", "mix", "live",
+        "remaster", "remastered", "edit", "radio", "short", "full", "karaoke", "demo", "piano", "english",
+    ];
+    let mut words = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty() && w.chars().any(char::is_alphabetic))
+        .peekable();
+    words.peek().is_some() && words.all(|w| WORDS.contains(&w.to_lowercase().as_str()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn romanised_titles() {
+        // As YouTube Music's player names them.
+        for (listed, shown) in [
+            ("ツバサ - Tsubasa", "Tsubasa"),
+            ("完全感覚Dreamer - Kanzen Kankaku Dreamer", "Kanzen Kankaku Dreamer"),
+            ("今はいいんだよ。 (Cover) - IMAWA IINDAYO (Cover)", "IMAWA IINDAYO (Cover)"),
+            ("＊〜アスタリスク〜（アルバムバージョン） - *Asterisk", "*Asterisk"),
+            ("ray (超かぐや姫！ Version) - ray (Cosmic Princess Kaguya! Version)", "ray (Cosmic Princess Kaguya! Version)"),
+            ("ナンデモナイヤ - movie ver. - Nandemonaiya - movie ver.", "Nandemonaiya - movie ver."),
+            ("자유 - Freedom", "Freedom"),
+            // Left alone.
+            ("Nandemonaiya - movie ver.", "Nandemonaiya - movie ver."),
+            ("夜に駆ける", "夜に駆ける"),
+            ("紅蓮華 - TV Size", "紅蓮華 - TV Size"),
+            ("Song - Remastered 2011", "Song - Remastered 2011"),
+            ("ブルーバード (いきものがかり) Arrange ver.／ダズビー COVER", "ブルーバード (いきものがかり) Arrange ver.／ダズビー COVER"),
+            ("A - B - C", "A - B - C"),
+        ] {
+            assert_eq!(romanized_title(listed), shown, "{listed}");
+        }
+    }
 
     #[test]
     fn durations() {

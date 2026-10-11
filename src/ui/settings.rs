@@ -213,6 +213,13 @@ fn connections(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
 
 fn appearance(ui: &mut Ui, draft: &mut Settings) {
     card(ui, "Window", |ui| {
+        toggle_row(
+            ui,
+            "Titles in Latin letters",
+            "Japanese, Chinese and Korean titles as YouTube Music's player shows them: \u{201c}Tsubasa\u{201d} rather than \u{201c}ツバサ - Tsubasa\u{201d}. The original shows when you point at one.",
+            &mut draft.romanized_titles,
+        );
+        divider(ui);
         toggle_row(ui, "Keep playing when closed", "Closing the window leaves the music playing, from the icon in the taskbar's corner.", &mut draft.close_to_tray);
         divider(ui);
         row(ui, "Interface size", "Everything larger or smaller.", 230.0, |ui| {

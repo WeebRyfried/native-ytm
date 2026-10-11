@@ -91,6 +91,7 @@ fn browse(app: &mut App, ui: &mut Ui, route: &Route, key: &str) {
         signed_in,
         offline: &app.offline,
         online,
+        romanized: app.settings.romanized_titles,
     };
     let state = pages.get(key).expect("checked");
     match &state.data {
@@ -514,6 +515,7 @@ fn cached(app: &mut App, ui: &mut Ui) {
         signed_in,
         offline: &app.offline,
         online,
+        romanized: app.settings.romanized_titles,
     };
 
     // What is downloading, while anything is.
@@ -630,6 +632,7 @@ fn search(app: &mut App, ui: &mut Ui) {
         signed_in,
         offline: &app.offline,
         online,
+        romanized: app.settings.romanized_titles,
     };
     match &search.results {
         Loadable::Loading => widgets::spinner(ui),

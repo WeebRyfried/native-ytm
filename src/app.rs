@@ -517,6 +517,11 @@ impl App {
         }
     }
 
+    /// A song's title as the settings would have it shown.
+    pub fn shown_title<'t>(&self, track: &'t Track) -> &'t str {
+        if self.settings.romanized_titles { track.romanized_title() } else { &track.title }
+    }
+
     /// Whether the internet is there, as far as the app knows.
     pub fn online(&self) -> bool {
         self.network.online()
@@ -969,7 +974,8 @@ impl App {
         self.audio_cache.note(&entry.track);
         if !self.online() && !self.audio_cache.has_at_least(&video_id, 1) && !self.network.check_now() {
             self.track_info(&video_id);
-            self.offline_skip(&entry.track.title);
+            let title = self.shown_title(&entry.track).to_owned();
+            self.offline_skip(&title);
             return;
         }
         if let Some(stream) = self.best_stream(&video_id) {
@@ -1550,7 +1556,7 @@ impl App {
     /// The current song cannot play: say why, and go on to the next one
     /// (a few times at most).
     fn cannot_play(&mut self, video_id: &str, error: &str) {
-        let title = self.current().map(|t| t.title.clone()).unwrap_or_default();
+        let title = self.current().map(|t| self.shown_title(t).to_owned()).unwrap_or_default();
         log::warn!("cannot play {video_id}: {error}");
         if net::unreachable(error) && !self.network.check_now() {
             self.offline_skip(&title);
@@ -2702,7 +2708,7 @@ impl App {
             playback,
             track: track.map(|t| NpTrack {
                 id: format!("{uid}"),
-                title: t.title.clone(),
+                title: self.shown_title(&t).to_owned(),
                 artists: t.artists.iter().map(|a| a.name.clone()).collect(),
                 album: t.album.as_ref().map(|a| a.name.clone()).unwrap_or_default(),
                 duration,
@@ -2745,7 +2751,7 @@ impl App {
             let start_ms = now_ms - (self.position() * 1000.0) as i64;
             let end_ms = self.duration().map(|d| start_ms + (d * 1000.0) as i64);
             discord::Activity {
-                title: track.title.clone(),
+                title: self.shown_title(track).to_owned(),
                 artist: track.artist_line(),
                 album: track.album.as_ref().map(|a| a.name.clone()),
                 art_url: track
@@ -2795,7 +2801,7 @@ impl App {
         let playing = self.playing();
         let title = self
             .current()
-            .map(|t| format!("{} \u{2014} {}", t.title, t.artist_line()));
+            .map(|t| format!("{} \u{2014} {}", self.shown_title(t), t.artist_line()));
         let Some(tray) = &mut self.tray else {
             return;
         };

@@ -79,7 +79,11 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect, rise: f32) {
     text.multiply_opacity(fade);
     let width = titles.width();
     let title_font = theme::bold(if art_size > 420.0 { 28.0 } else { 22.0 });
-    widgets::clipped_label(&mut text, &track.title, title_font, theme::TEXT, width, Sense::hover());
+    let shown = app.shown_title(&track).to_owned();
+    let response = widgets::clipped_label(&mut text, &shown, title_font, theme::TEXT, width, Sense::hover());
+    if shown != track.title {
+        response.on_hover_text(&track.title);
+    }
     let mut links = track.artists.clone();
     if let Some(album) = &track.album {
         links.push(album.clone());

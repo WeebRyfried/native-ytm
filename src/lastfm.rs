@@ -314,7 +314,9 @@ impl LastFm {
                 uid: current.uid,
                 scrobble: Scrobble {
                     artist,
-                    track: current.track.title.clone(),
+                    // As the web player names it, so a play here counts as
+                    // the same song as one scrobbled from there.
+                    track: current.track.romanized_title().to_owned(),
                     album: current.track.album.as_ref().map(|a| a.name.clone()),
                     duration: current.duration.map(|d| d.round() as u32).or(current.track.duration),
                     timestamp: unix_now() - current.position.max(0.0) as i64,

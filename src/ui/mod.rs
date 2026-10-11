@@ -38,6 +38,7 @@ impl App {
             signed_in: self.signed_in,
             offline: &self.offline,
             online,
+            romanized: self.settings.romanized_titles,
         }
     }
 }
