@@ -177,6 +177,11 @@ plays something at start (`search:QUERY`, `browse:ID`, `play:VIDEO_ID`,
 `NATIVE_YTM_SHOT_DELAY` milliseconds and quits, `NATIVE_YTM_SCROLL` scrolls
 the page, `NATIVE_YTM_SEEK` jumps into the song, `NATIVE_YTM_MUTE` plays
 silently, and `NATIVE_YTM_NO_DISCORD` keeps the run off Discord.
+`NATIVE_YTM_PROFILE=DIR` runs a separate copy beside the real one, with
+its own settings, session and cache in that folder. `NATIVE_YTM_WIGGLE=x,y`
+and `NATIVE_YTM_WHEEL=x,y` make up pointer movement or wheel turns at that
+point (in points), to measure or check what they do, and
+`NATIVE_YTM_NO_FRAME_SKIP` draws identical frames anyway, to compare.
 
 `ytm-probe play VIDEO_ID --cookies cookies.txt --premium` checks the
 account's streams, and `ytm-probe lyrics TITLE ARTIST` the lyrics lookup.
@@ -217,8 +222,9 @@ core, and the GPU's 3D engine:
 | | Memory | CPU | GPU |
 | --- | --- | --- | --- |
 | Idle, window open | 101 MB | 0.2% | 0% |
-| Playing, window open | 110 MB | 4% | 1.6% |
-| Full-window player, synced lyrics moving | 115 MB | 6% | 2.7% |
+| Playing, window open | 110 MB | 3% | 0.6% |
+| Full-window player, synced lyrics moving | 115 MB | 3.3% | 3% |
+| Pointer moving over things that do not change | | 9% | 0.8% |
 | Playing, closed to the tray | 33 MB | 0.5% | none |
 
 A 15 MB executable; the window is up about 0.1 s after launch. What keeps
@@ -229,11 +235,19 @@ it there:
   otherwise be the app's): only the parts glyphs are drawn from are loaded,
   and those are shared with every other program using the fonts. This is
   the one change to the vendored `fastframe-fonts` (in `vendor/`).
-- Frames are drawn only when something changes. Animations the app drives
-  are held to 60 frames a second (egui takes a frame off every delay asked
-  for, which `theme::repaint_in` makes up), the lyrics glide and the
-  breathing dots pace themselves, and nothing spins at the screen's full
-  rate.
+- Frames are drawn only when something changes. egui runs a frame for
+  every pointer movement, and a mouse sends hundreds a second; here the
+  graphics driver did not hold presenting to the screen's rate, so moving
+  the pointer kept a core busy. The vendored eframe (in `vendor/`, search
+  for "native-ytm patch") puts off any frame asked for before the screen
+  could show it, and does not draw or present a frame identical to the one
+  on screen; after such a frame it looks again at 60 Hz until something
+  changes. Moving the pointer went from a whole core and 13% of the GPU to
+  under a tenth of a core and 1%.
+- Animations the app drives are held to 60 frames a second (egui takes a
+  frame off every delay asked for, which `theme::repaint_in` makes up), the
+  lyrics glide and the breathing dots pace themselves, and nothing spins at
+  the screen's full rate.
 - Artwork is kept on the GPU within a 48 MB budget and reloaded from the
   disk cache when drawn again; the media overlay's artwork is read from
   disk without becoming a texture.
@@ -261,7 +275,9 @@ it there:
   [yt-dlp](https://github.com/yt-dlp/yt-dlp): what YouTube Music's API looks
   like, and which clients still get streams.
 - `vendor/fastframe-fonts` is fastframe's font crate (MIT) with its
-  fallback fonts memory-mapped.
+  fallback fonts memory-mapped; `vendor/eframe` is
+  [eframe](https://github.com/emilk/egui) 0.36.2 (MIT or Apache-2.0) with
+  frames paced to the screen and identical frames left undrawn.
 - [libopus](https://opus-codec.org) (BSD), by way of
   [unsafe-libopus](https://github.com/DCNick3/unsafe-libopus), for Opus.
 - [LRCLIB](https://lrclib.net) for synced lyrics, and

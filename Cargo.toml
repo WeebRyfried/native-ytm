@@ -69,6 +69,11 @@ winresource = "0.1"
 [patch."https://github.com/crmne/fastframe"]
 fastframe-fonts = { path = "vendor/fastframe-fonts" }
 
+# eframe, which redraws for every pointer movement, made to skip frames
+# identical to the one on screen (vendor/eframe/Cargo.toml says more).
+[patch.crates-io]
+eframe = { path = "vendor/eframe" }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

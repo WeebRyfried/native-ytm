@@ -108,6 +108,13 @@ pub struct Paths {
 
 impl Paths {
     pub fn new() -> Self {
+        // A profile of its own, for test runs beside the real app (dev).
+        if let Some(dir) = profile() {
+            let (config, cache) = (dir.join("config"), dir.join("cache"));
+            let _ = std::fs::create_dir_all(&config);
+            let _ = std::fs::create_dir_all(&cache);
+            return Self { config, cache };
+        }
         let dirs = directories::ProjectDirs::from("", "", "native-ytm");
         let (config, cache) = match &dirs {
             Some(dirs) => (dirs.config_dir().to_path_buf(), dirs.cache_dir().to_path_buf()),
@@ -145,6 +152,14 @@ impl Paths {
     pub fn scratch(&self) -> PathBuf {
         self.cache.join("scratch")
     }
+}
+
+/// `NATIVE_YTM_PROFILE`: a folder holding a separate set of settings,
+/// session and cache, run as a separate instance (dev).
+pub fn profile() -> Option<PathBuf> {
+    std::env::var_os("NATIVE_YTM_PROFILE")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
 }
 
 pub fn load<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> T {

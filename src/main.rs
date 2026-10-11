@@ -12,7 +12,12 @@ use native_ytm::{platform, settings::Paths, theme, ui};
 fn main() {
     let paths = Paths::new();
     let waker = fastframe_shell::Waker::default();
-    let slot = fastframe_instance::Slot::new("dev.native-ytm.NativeYtm");
+    // A test profile is an instance of its own, beside the real one.
+    let slot_name = match native_ytm::settings::profile() {
+        Some(dir) => format!("dev.native-ytm.NativeYtm.{:x}", fnv(&dir.to_string_lossy())),
+        None => "dev.native-ytm.NativeYtm".to_owned(),
+    };
+    let slot = fastframe_instance::Slot::new(&slot_name);
     let wake = waker.clone();
     let _guard = match slot.claim("show", move |request| match request {
         "show" => {
@@ -39,7 +44,9 @@ fn main() {
 
     // Before the media controls and the window: Windows names the app in
     // its media overlay from this id.
-    platform::register_app_identity(&paths.config);
+    if native_ytm::settings::profile().is_none() {
+        platform::register_app_identity(&paths.config);
+    }
     let app = App::new(waker.clone());
     let config = paths.config.clone();
     let result = fastframe_shell::Shell::new(app, &waker).run(|lease| {
@@ -72,7 +79,7 @@ fn main() {
                 }
                 dev_route(&mut app);
                 let seek = std::env::var("NATIVE_YTM_SEEK").ok().and_then(|v| v.parse().ok());
-                Ok(Box::new(Window { app, shot: Shot::from_env(), seek }))
+                Ok(Box::new(Window { app, shot: Shot::from_env(), seek, simulate: Simulate::from_env() }))
             }),
         )
     });
@@ -86,6 +93,7 @@ struct Window {
     shot: Option<Shot>,
     /// `NATIVE_YTM_SEEK`: a position to jump to once the song plays.
     seek: Option<f64>,
+    simulate: Option<Simulate>,
 }
 
 /// A screenshot taken on its own and saved, for checking the interface
@@ -111,6 +119,32 @@ impl Shot {
             due: std::time::Instant::now() + std::time::Duration::from_millis(delay),
             asked: false,
         })
+    }
+}
+
+fn fnv(s: &str) -> u64 {
+    s.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, b| (hash ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3))
+}
+
+/// Pointer input made up for tests (dev): `NATIVE_YTM_WIGGLE=x,y` moves the
+/// pointer in small circles about that point every frame, as a hand on a
+/// mouse does; `NATIVE_YTM_WHEEL=x,y` rests it there and turns the wheel
+/// down three lines a second.
+enum Simulate {
+    Wiggle(egui::Pos2),
+    Wheel(egui::Pos2, f64),
+}
+
+impl Simulate {
+    fn from_env() -> Option<Self> {
+        let point = |name: &str| {
+            let value = std::env::var(name).ok()?;
+            let (x, y) = value.split_once(',')?;
+            Some(egui::pos2(x.trim().parse().ok()?, y.trim().parse().ok()?))
+        };
+        point("NATIVE_YTM_WIGGLE")
+            .map(Simulate::Wiggle)
+            .or_else(|| point("NATIVE_YTM_WHEEL").map(|p| Simulate::Wheel(p, 0.0)))
     }
 }
 
@@ -143,6 +177,32 @@ fn dev_route(app: &mut App) {
 }
 
 impl eframe::App for Window {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        let time = raw_input.time.unwrap_or(0.0);
+        match &mut self.simulate {
+            Some(Simulate::Wiggle(at)) => {
+                let t = time as f32;
+                let pos = *at + egui::vec2((t * 7.0).sin() * 30.0, (t * 5.0).cos() * 20.0);
+                raw_input.events.push(egui::Event::PointerMoved(pos));
+                ctx.request_repaint();
+            }
+            Some(Simulate::Wheel(at, last)) => {
+                raw_input.events.push(egui::Event::PointerMoved(*at));
+                if time - *last > 1.0 && time > 8.0 {
+                    *last = time;
+                    raw_input.events.push(egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Line,
+                        delta: egui::vec2(0.0, -3.0),
+                        phase: egui::TouchPhase::Move,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                }
+                ctx.request_repaint_after(std::time::Duration::from_millis(200));
+            }
+            None => {}
+        }
+    }
+
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.app.background();
         if std::mem::take(&mut self.app.wants_show) {

@@ -61,6 +61,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             .order(egui::Order::Middle)
             .fixed_pos(rest.min)
             .show(&ctx, |area| {
+                // The area must be as large as what it shows: egui finds the
+                // layer under the pointer by area sizes, and the scroll wheel
+                // goes nowhere over an area it thinks is empty.
+                area.set_min_size(rest.size());
                 let mut ui = area.new_child(egui::UiBuilder::new().max_rect(rest));
                 ui.set_clip_rect(rest);
                 ui.multiply_opacity(eased);
@@ -94,8 +98,10 @@ fn windowed(app: &mut App, ui: &mut egui::Ui) {
             )
             .show(ui, |ui| side_panel::show(app, ui));
     }
+    // No fill: the window is cleared to the same colour, and a fill would
+    // be one more layer over most of the window, every frame.
     egui::CentralPanel::default()
-        .frame(Frame::new().fill(theme::BG))
+        .frame(Frame::new())
         .show(ui, |ui| {
             topbar::show(app, ui);
             pages::show(app, ui);
