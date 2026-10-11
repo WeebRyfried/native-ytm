@@ -3,6 +3,8 @@
 
 mod dialogs;
 mod keys;
+mod lyrics;
+mod now_playing;
 mod pages;
 mod player_bar;
 mod settings;
@@ -46,6 +48,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         .show_separator_line(false)
         .frame(Frame::new().fill(theme::PLAYER))
         .show(ui, |ui| player_bar::show(app, ui));
+    if app.full_view {
+        egui::CentralPanel::default()
+            .frame(Frame::new().fill(theme::BG))
+            .show(ui, |ui| now_playing::show(app, ui));
+        dialogs::show(app, &ctx);
+        toasts(app, &ctx);
+        return;
+    }
     if app.settings.sidebar {
         egui::Panel::left("sidebar")
             .exact_size(theme::SIDEBAR_WIDTH)

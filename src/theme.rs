@@ -19,7 +19,7 @@ pub const ACCENT_TEXT: Color32 = Color32::from_rgb(0xff, 0x4d, 0x5e);
 pub const DIVIDER: Color32 = Color32::from_rgb(0x26, 0x26, 0x26);
 pub const SCRIM: Color32 = Color32::from_black_alpha(160);
 
-pub const PLAYER_HEIGHT: f32 = 76.0;
+pub const PLAYER_HEIGHT: f32 = 80.0;
 pub const SIDEBAR_WIDTH: f32 = 232.0;
 pub const TOPBAR_HEIGHT: f32 = 60.0;
 pub const SIDE_PANEL_WIDTH: f32 = 360.0;
@@ -181,6 +181,8 @@ fastframe_icons::icons! {
         Alert => lucide "circle-alert",
         Refresh => lucide "refresh-cw",
         Sidebar => lucide "panel-left",
+        Expand => lucide "maximize-2",
+        Collapse => lucide "minimize-2",
     }
 }
 

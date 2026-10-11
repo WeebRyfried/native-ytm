@@ -241,6 +241,16 @@ pub struct Suggestions {
 pub struct Lyrics {
     pub text: String,
     pub source: Option<String>,
+    /// The lines with their times, when the lyrics are synced.
+    pub lines: Vec<LyricLine>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LyricLine {
+    /// Seconds into the song.
+    pub time: f64,
+    /// Empty for an instrumental break.
+    pub text: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

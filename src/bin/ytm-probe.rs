@@ -9,6 +9,7 @@
 //! ytm-probe dump watch dQw4w9WgXcQ
 //! ytm-probe play dQw4w9WgXcQ [--seek 120]
 //! ytm-probe icon assets/app.ico         (the executable's icon, drawn)
+//! ytm-probe lyrics TITLE ARTIST [SECONDS]  (synced lyrics from LRCLIB)
 //! ```
 
 use std::sync::Arc;
@@ -23,6 +24,7 @@ fn main() -> anyhow::Result<()> {
     match args.get(1).map(String::as_str) {
         Some("dump") if args.len() > 2 => return dump(&args[2..]),
         Some("icon") => return write_icon(args.get(2).map_or("assets/app.ico", String::as_str)),
+        Some("lyrics") if args.len() > 3 => return lyrics(&args[2..]),
         Some("play") => {}
         _ => {
             eprintln!("usage: ytm-probe dump home|browse ID|search QUERY [songs|albums|artists]|suggest TEXT|watch ID
@@ -35,16 +37,25 @@ fn main() -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().worker_threads(2).build()?;
     let http = reqwest::Client::builder().gzip(true).build()?;
     let api = Arc::new(api::client::Innertube::new(http.clone(), "en"));
-    let mut resolver = stream::Resolver::new(None, true);
+    // `--cookies FILE` signs in with a cookies.txt (or a pasted header), to
+    // check the account's streams; `--premium` asks for 256 kb/s.
+    if let Some(path) = args.iter().position(|a| a == "--cookies").and_then(|i| args.get(i + 1)) {
+        let text = std::fs::read_to_string(path)?;
+        let auth = api::client::Auth { cookies: api::client::parse_cookies(&text), auth_user: 0 };
+        println!("signed in: {}", auth.is_usable());
+        api.set_auth(Some(auth));
+    }
+    let scratch = std::env::temp_dir().join("ytm-probe");
+    let mut resolver = stream::Resolver::new(None, true, args.iter().any(|a| a == "--premium"), scratch);
     // `--ytdlp` skips the native clients, to check the fallback.
     if args.iter().any(|a| a == "--ytdlp") {
         resolver.clients.clear();
     }
     let started = std::time::Instant::now();
     let (info, via) = runtime.block_on(async { api.bootstrap().await; resolver.resolve(&api, &id).await })?;
-    println!("resolved via {via:?} in {:?}: {} bytes, {:?}, loudness {:?}", started.elapsed(), info.content_length, info.duration, info.loudness_db);
+    println!("resolved via {via:?} in {:?}: {} ({}), {} bytes, {:?}, loudness {:?}", started.elapsed(), info.quality, info.mime, info.content_length, info.duration, info.loudness_db);
     let (tx, rx) = std::sync::mpsc::channel();
-    let mut player = player::Player::spawn(runtime.handle().clone(), http, tx, Arc::new(|| {}), true); player.set_volume(0.35);
+    let mut player = player::Player::spawn(runtime.handle().clone(), http, tx, Arc::new(|| {}), true); player.set_volume(if std::env::var_os("NATIVE_YTM_MUTE").is_some() { 0.0 } else { 0.35 });
     let t0 = std::time::Instant::now();
     player.load(1, info, Duration::ZERO, true);
     for i in 0..60 {
@@ -125,5 +136,26 @@ fn write_icon(path: &str) -> anyhow::Result<()> {
     }
     std::fs::write(path, out)?;
     println!("wrote {path}");
+    Ok(())
+}
+
+fn lyrics(args: &[String]) -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let http = reqwest::Client::builder().gzip(true).build()?;
+    let query = api::lrclib::Query {
+        title: args[0].clone(),
+        artist: args[1].clone(),
+        album: None,
+        duration: args.get(2).and_then(|s| s.parse().ok()),
+    };
+    match runtime.block_on(api::lrclib::find(&http, &query))? {
+        Some(lyrics) => {
+            println!("{:?}: {} timed lines", lyrics.source, lyrics.lines.len());
+            for line in lyrics.lines.iter().take(6) {
+                println!("  {:>7.2}  {}", line.time, line.text);
+            }
+        }
+        None => println!("none"),
+    }
     Ok(())
 }

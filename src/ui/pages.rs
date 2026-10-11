@@ -16,7 +16,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let mut area = egui::ScrollArea::vertical()
         .id_salt(("page", key.clone()))
         .auto_shrink([false, false]);
-    let ready = app.pages.get(&key).is_some_and(|p| matches!(p.data, Loadable::Ready(_)));
+    let ready = route == Route::Settings || app.pages.get(&key).is_some_and(|p| matches!(p.data, Loadable::Ready(_)));
     if ready && let Some(y) = app.scroll_to.take() {
         area = area.vertical_scroll_offset(y);
     }

@@ -70,6 +70,31 @@ impl Images {
     pub fn get(&mut self, url: &str, px: u32) -> Option<TextureHandle> {
         let px = px.clamp(32, 1200).next_power_of_two().min(1200);
         let key = sized_thumbnail(url, px);
+        self.entry(key.clone(), key, px, false)
+    }
+
+    /// The artwork at `px`, or while that loads, a smaller size already
+    /// here, so a big view never flashes empty.
+    pub fn get_or_smaller(&mut self, url: &str, px: u32) -> Option<TextureHandle> {
+        if let Some(texture) = self.get(url, px) {
+            return Some(texture);
+        }
+        [512, 256, 128, 64, 32].into_iter().find_map(|size| match self.entries.get_mut(&sized_thumbnail(url, size)) {
+            Some(Entry::Ready { texture, used, .. }) => {
+                *used = Instant::now();
+                Some(texture.clone())
+            }
+            _ => None,
+        })
+    }
+
+    /// The artwork blurred to a wash of its colours, for a backdrop.
+    pub fn backdrop(&mut self, url: &str) -> Option<TextureHandle> {
+        let source = sized_thumbnail(url, 128);
+        self.entry(format!("backdrop:{source}"), source, 128, true)
+    }
+
+    fn entry(&mut self, key: String, source: String, px: u32, blur: bool) -> Option<TextureHandle> {
         match self.entries.get_mut(&key) {
             Some(Entry::Ready { texture, used, .. }) => {
                 *used = Instant::now();
@@ -84,7 +109,7 @@ impl Images {
             }
             None => {
                 self.entries.insert(key.clone(), Entry::Loading);
-                self.fetch(key, px);
+                self.fetch(key, source, px, blur);
                 None
             }
         }
@@ -103,10 +128,11 @@ impl Images {
         }
     }
 
-    fn fetch(&self, key: String, px: u32) {
+    fn fetch(&self, key: String, source: String, px: u32, blur: bool) {
         let tx = self.tx.clone();
         let http = self.http.clone();
-        let path = self.dir.join(format!("{:016x}.img", fnv(&key)));
+        // The file is the source image's, whatever is made of it.
+        let path = self.dir.join(format!("{:016x}.img", fnv(&source)));
         let permits = self.permits.clone();
         let ctx = self.ctx.clone();
         self.runtime.spawn(async move {
@@ -114,7 +140,7 @@ impl Images {
                 Ok(bytes) => Some(bytes),
                 Err(_) => {
                     let _permit = permits.acquire().await.ok();
-                    download(&http, &key).await.inspect(|bytes| {
+                    download(&http, &source).await.inspect(|bytes| {
                         crate::settings::write_atomic(&path, bytes);
                     })
                 }
@@ -123,7 +149,9 @@ impl Images {
                 Some(bytes) => {
                     let name = key.clone();
                     let ctx = ctx.clone();
-                    tokio::task::spawn_blocking(move || decode(&ctx, &name, &bytes, px))
+                    tokio::task::spawn_blocking(move || {
+                        if blur { decode_blurred(&ctx, &name, &bytes) } else { decode(&ctx, &name, &bytes, px) }
+                    })
                         .await
                         .ok()
                         .flatten()
@@ -204,6 +232,60 @@ fn decode(ctx: &egui::Context, name: &str, bytes: &[u8], px: u32) -> Option<Text
     let size = [rgba.width() as usize, rgba.height() as usize];
     let color = ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
     Some(ctx.load_texture(name, color, TextureOptions::LINEAR))
+}
+
+/// The image shrunk to 32 by 32 and blurred: drawn stretched across a
+/// window, the GPU's smoothing turns it into soft fields of its colours.
+fn decode_blurred(ctx: &egui::Context, name: &str, bytes: &[u8]) -> Option<TextureHandle> {
+    const N: usize = 32;
+    let image = image::load_from_memory(bytes).ok()?;
+    let small = image
+        .resize_exact(N as u32, N as u32, image::imageops::FilterType::Triangle)
+        .to_rgb8();
+    let mut pixels: Vec<[f32; 3]> = small
+        .pixels()
+        .map(|p| [f32::from(p[0]), f32::from(p[1]), f32::from(p[2])])
+        .collect();
+    // Three box blurs come close to a Gaussian.
+    for _ in 0..3 {
+        pixels = box_blur(&pixels, N, 4);
+    }
+    let mut rgba = Vec::with_capacity(N * N * 4);
+    for [r, g, b] in pixels {
+        // A little more colour, as blurring greys it.
+        let mean = (r + g + b) / 3.0;
+        let boost = |c: f32| (mean + (c - mean) * 1.35).clamp(0.0, 255.0) as u8;
+        rgba.extend_from_slice(&[boost(r), boost(g), boost(b), 255]);
+    }
+    let color = ColorImage::from_rgba_unmultiplied([N, N], &rgba);
+    Some(ctx.load_texture(name, color, TextureOptions::LINEAR))
+}
+
+fn box_blur(pixels: &[[f32; 3]], n: usize, radius: usize) -> Vec<[f32; 3]> {
+    let pass = |input: &[[f32; 3]], horizontal: bool| -> Vec<[f32; 3]> {
+        let mut out = vec![[0.0; 3]; n * n];
+        for y in 0..n {
+            for x in 0..n {
+                let mut sum = [0.0f32; 3];
+                let mut count = 0.0;
+                for d in 0..=radius * 2 {
+                    let offset = d as isize - radius as isize;
+                    let (sx, sy) = if horizontal { (x as isize + offset, y as isize) } else { (x as isize, y as isize + offset) };
+                    // Edges repeat, so the colours do not darken there.
+                    let sx = sx.clamp(0, n as isize - 1) as usize;
+                    let sy = sy.clamp(0, n as isize - 1) as usize;
+                    let p = input[sy * n + sx];
+                    for c in 0..3 {
+                        sum[c] += p[c];
+                    }
+                    count += 1.0;
+                }
+                out[y * n + x] = [sum[0] / count, sum[1] / count, sum[2] / count];
+            }
+        }
+        out
+    };
+    pass(&pass(pixels, true), false)
 }
 
 fn fnv(s: &str) -> u64 {

@@ -40,7 +40,7 @@ pub fn paint_art(ui: &Ui, images: &mut Images, url: Option<&str>, rect: Rect, ra
         CornerRadius::same(radius.min(255.0) as u8)
     };
     let px = (rect.width().max(rect.height()) * ui.ctx().pixels_per_point()).round() as u32;
-    let texture = url.and_then(|url| images.get(url, px));
+    let texture = url.and_then(|url| images.get_or_smaller(url, px));
     match texture {
         Some(texture) => {
             let size = texture.size_vec2();
@@ -307,7 +307,9 @@ pub fn track_row(
         return RowResponse { play, response };
     }
     let current = cx.current == Some(track.video_id.as_str());
-    let hovered = response.hovered() || response.context_menu_opened();
+    // Where the pointer is, not which widget has it: the artwork and the
+    // menu button sit over the row and would take its hover away.
+    let hovered = response.contains_pointer() || response.context_menu_opened();
     if hovered {
         ui.painter()
             .rect_filled(rect, CornerRadius::same(6), Color32::from_white_alpha(14));
@@ -612,7 +614,10 @@ pub fn card(ui: &mut Ui, cx: &mut Cx<'_>, item: &Item, width: f32) -> Response {
     let art = Rect::from_min_size(rect.min, vec2(width, art_h));
     let round = item.kind.round();
     paint_art(ui, cx.images, item.thumbnail.as_deref(), art, 6.0, round);
-    let hovered = response.hovered() || response.context_menu_opened();
+    // The play button over the art takes the hover when the pointer is on
+    // it; the card stays hovered all the same, or the button would vanish
+    // and come back every frame.
+    let hovered = response.contains_pointer() || response.context_menu_opened();
     let playable = item.track.is_some() || item.play_playlist.is_some();
     let mut play_clicked = false;
     if hovered && !round {
@@ -1004,4 +1009,39 @@ fn category_grid(ui: &mut Ui, cx: &mut Cx<'_>, items: &[Item]) {
         });
         ui.add_space(12.0);
     }
+}
+
+/// The tabs atop the queue and lyrics ("UP NEXT", "LYRICS"), with one
+/// divider under the whole row, the close button's part too. Returns the
+/// tab clicked, and whether the close button was.
+pub fn tab_header(ui: &mut Ui, current: crate::model::SideTab, close: bool) -> (Option<crate::model::SideTab>, bool) {
+    use crate::model::SideTab;
+    let row = ui.available_rect_before_wrap();
+    let height = 40.0;
+    ui.painter().hline(row.x_range(), row.top() + height - 1.0, Stroke::new(1.0, theme::DIVIDER));
+    let mut picked = None;
+    let mut closed = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let tabs_w = if close { row.width() - 40.0 } else { row.width() };
+        for (tab, label) in [(SideTab::UpNext, "UP NEXT"), (SideTab::Lyrics, "LYRICS")] {
+            let selected = current == tab;
+            let (rect, response) = ui.allocate_exact_size(vec2((tabs_w / 2.0).max(80.0), height), Sense::click());
+            let response = response.on_hover_cursor(CursorIcon::PointingHand);
+            let color = if selected || response.hovered() { theme::TEXT } else { theme::TEXT_DIM };
+            ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, theme::semibold(13.5), color);
+            if selected {
+                ui.painter().hline(rect.x_range(), rect.bottom() - 1.0, Stroke::new(2.0, theme::TEXT));
+            }
+            if response.clicked() && !selected {
+                picked = Some(tab);
+            }
+        }
+        if close {
+            ui.allocate_ui_with_layout(vec2(40.0, height), EguiLayout::right_to_left(Align::Center), |ui| {
+                closed = icon_button(ui, Icon::Close, 18.0, theme::TEXT_DIM, "Close").clicked();
+            });
+        }
+    });
+    (picked, closed)
 }

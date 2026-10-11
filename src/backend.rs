@@ -19,6 +19,8 @@ pub enum Purpose {
     Load,
     /// Have it ready for a gapless start after the current track.
     Preload,
+    /// Only find it, for later: resolving is slow.
+    Prefetch,
 }
 
 pub enum Request {
@@ -64,9 +66,12 @@ pub enum Request {
         seq: u64,
         playlist_id: String,
     },
+    /// YouTube's lyrics (by their browse id), and synced ones from LRCLIB
+    /// (by the song's names).
     Lyrics {
         video_id: String,
-        browse_id: String,
+        browse_id: Option<String>,
+        query: Option<crate::api::lrclib::Query>,
     },
     Resolve {
         token: u64,
@@ -112,6 +117,8 @@ pub enum Request {
         enabled: bool,
         path: Option<std::path::PathBuf>,
     },
+    /// Premium's 256 kb/s streams, through yt-dlp, when signed in.
+    SetPremium(bool),
 }
 
 pub enum Response {
@@ -234,8 +241,13 @@ impl Backend {
                 if path.is_some() {
                     resolver.ytdlp = path;
                 } else {
-                    *resolver = Resolver::new(None, enabled);
+                    let (premium, scratch) = (resolver.premium, resolver.scratch.clone());
+                    *resolver = Resolver::new(None, enabled, premium, scratch);
                 }
+                return;
+            }
+            Request::SetPremium(on) => {
+                self.resolver.write().premium = on;
                 return;
             }
             _ => {}
@@ -334,10 +346,36 @@ async fn run(
             seq,
             result: api.playlist_tracks(&playlist_id, 1000).await.map_err(err),
         },
-        Request::Lyrics { video_id, browse_id } => Response::Lyrics {
+        Request::Lyrics {
             video_id,
-            result: api.lyrics(&browse_id).await.map_err(err),
-        },
+            browse_id,
+            query,
+        } => {
+            let youtube = async {
+                match &browse_id {
+                    Some(id) => api.lyrics(id).await.map_err(err),
+                    None => Ok(None),
+                }
+            };
+            let open = async {
+                match &query {
+                    Some(query) => crate::api::lrclib::find(&api.http, query).await.unwrap_or_else(|error| {
+                        log::info!("LRCLIB: {error:#}");
+                        None
+                    }),
+                    None => None,
+                }
+            };
+            let (youtube, open) = tokio::join!(youtube, open);
+            // Synced first; then YouTube's own text; then LRCLIB's.
+            let result = match (open, youtube) {
+                (Some(synced), _) if !synced.lines.is_empty() => Ok(Some(synced)),
+                (_, Ok(Some(text))) => Ok(Some(text)),
+                (Some(plain), _) => Ok(Some(plain)),
+                (None, other) => other,
+            };
+            Response::Lyrics { video_id, result }
+        }
         Request::Resolve {
             token,
             video_id,
@@ -346,14 +384,7 @@ async fn run(
         } => {
             // The resolver is cheap to copy; the lock is not held across the
             // network.
-            let snapshot = {
-                let r = resolver.read();
-                Resolver {
-                    clients: r.clients.clone(),
-                    ytdlp: r.ytdlp.clone(),
-                    use_ytdlp: r.use_ytdlp,
-                }
-            };
+            let snapshot = resolver.read().clone();
             let started = std::time::Instant::now();
             let result = snapshot.resolve(api, &video_id).await.map_err(err);
             if let Ok((_, via)) = &result {
@@ -429,7 +460,10 @@ async fn run(
         Request::LibraryPlaylists => {
             Response::LibraryPlaylists(api.library_playlists().await.map_err(err))
         }
-        Request::SetAuth(_) | Request::SetLanguage { .. } | Request::SetYtDlp { .. } => return None,
+        Request::SetAuth(_)
+        | Request::SetLanguage { .. }
+        | Request::SetYtDlp { .. }
+        | Request::SetPremium(_) => return None,
     })
 }
 

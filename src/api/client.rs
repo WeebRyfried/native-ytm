@@ -145,6 +145,10 @@ pub struct Innertube {
     pub http: reqwest::Client,
     auth: RwLock<Option<Auth>>,
     config: RwLock<Config>,
+    /// A visitor id of its own for the signed-out player request. The web
+    /// app's id belongs to the account once signed in, and stream addresses
+    /// asked for with it but without the account are refused.
+    player_visitor: RwLock<Option<String>>,
 }
 
 impl Innertube {
@@ -158,6 +162,7 @@ impl Innertube {
                 hl: language.to_owned(),
                 gl: None,
             }),
+            player_visitor: RwLock::new(None),
         }
     }
 
@@ -347,11 +352,12 @@ impl Innertube {
     /// need no JavaScript challenge. The client is configurable since
     /// YouTube changes which clients work.
     pub async fn player_as(&self, client: &PlayerClient, video_id: &str) -> Result<Value> {
-        let visitor = match self.visitor_data() {
+        let cached = self.player_visitor.read().clone();
+        let visitor = match cached {
             Some(visitor) => visitor,
             None => {
                 let visitor = self.fetch_visitor_data().await?;
-                self.config.write().visitor_data = Some(visitor.clone());
+                *self.player_visitor.write() = Some(visitor.clone());
                 visitor
             }
         };

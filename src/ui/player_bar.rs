@@ -11,12 +11,18 @@ use crate::settings::Repeat;
 use crate::theme::{self, Icon};
 use crate::ui::widgets::{self, RowPlace};
 
+/// The seek bar's line lies along the bar's top edge; this much of the bar
+/// below it takes its clicks and drags.
+const SEEK_GRAB: f32 = 12.0;
+
 pub fn show(app: &mut App, ui: &mut Ui) {
     let rect = ui.max_rect();
-    seek_bar(app, ui, Rect::from_min_size(rect.min - vec2(0.0, 6.0), vec2(rect.width(), 14.0)));
-    let inner = rect.shrink2(vec2(16.0, 0.0)).translate(vec2(0.0, 3.0));
+    seek_bar(app, ui, Rect::from_min_size(rect.min, vec2(rect.width(), SEEK_GRAB)));
+    // The rest, centred below the line, with the same room above and below
+    // the artwork.
+    let inner = Rect::from_min_max(rect.min + vec2(16.0, 3.0), rect.max - vec2(16.0, 0.0));
     let left_w = 260.0f32.min(inner.width() * 0.3);
-    let right_w = 300.0f32.min(inner.width() * 0.32);
+    let right_w = 350.0f32.min(inner.width() * 0.34);
     let left = Rect::from_min_size(inner.min, vec2(left_w, inner.height()));
     let right = Rect::from_min_max(pos2(inner.right() - right_w, inner.top()), inner.max);
     let middle = Rect::from_min_max(pos2(left.right() + 16.0, inner.top()), pos2(right.left() - 16.0, inner.bottom()));
@@ -29,9 +35,14 @@ fn seek_bar(app: &mut App, ui: &mut Ui, rect: Rect) {
     let duration = app.duration();
     let response = ui.interact(rect, ui.id().with("seek"), Sense::click_and_drag());
     let active = response.hovered() || response.dragged();
-    let line_y = rect.top() + 6.0;
+    let line_y = rect.top() + 1.0;
     let thickness = if active { 4.0 } else { 2.0 };
-    let painter = ui.painter();
+    // Above the page, unclipped: the knob rises over the page's bottom
+    // edge, and the bar's own clip would cut it in half.
+    let painter = ui
+        .ctx()
+        .layer_painter(egui::LayerId::new(egui::Order::Middle, ui.id().with("seek-layer")));
+    let painter = &painter;
     let track = Rect::from_min_max(pos2(rect.left(), line_y - thickness / 2.0), pos2(rect.right(), line_y + thickness / 2.0));
     painter.rect_filled(track, CornerRadius::ZERO, Color32::from_white_alpha(28));
     let Some(duration) = duration.filter(|d| *d > 0.0) else {
@@ -156,11 +167,14 @@ fn now(app: &mut App, ui: &mut Ui) {
     let width = ui.available_width();
     ui.spacing_mut().item_spacing.x = 12.0;
     let (art, art_response) = ui.allocate_exact_size(Vec2::splat(48.0), Sense::click());
+    let full = app.full_view;
     let mut cx = app.cx();
     widgets::paint_art(ui, cx.images, track.thumbnail.as_deref(), art, 4.0, false);
-    let art_response = art_response.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Show the queue");
+    let art_response = art_response
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text(if full { "Close the player (Esc)" } else { "Open the player (F)" });
     if art_response.clicked() {
-        cx.push(Action::ShowSidePanel(SideTab::UpNext));
+        cx.push(Action::ToggleFullView);
     }
     // Dislike, like and more: three icon buttons and their gaps.
     let buttons_w = 3.0 * 38.0 + 2.0 * 12.0 + 12.0;
@@ -208,13 +222,29 @@ fn now(app: &mut App, ui: &mut Ui) {
 
 fn extras(app: &mut App, ui: &mut Ui) {
     ui.spacing_mut().item_spacing.x = 2.0;
-    let lyrics_on = app.settings.side_panel && app.side_tab == SideTab::Lyrics;
-    if widgets::icon_button(ui, Icon::Lyrics, 20.0, if lyrics_on { theme::TEXT } else { theme::TEXT_DIM }, "Lyrics").clicked() {
-        app.actions.push(if lyrics_on { Action::ToggleSidePanel } else { Action::ShowSidePanel(SideTab::Lyrics) });
+    let (icon, tip) = if app.full_view {
+        (Icon::Collapse, "Close the player (Esc)")
+    } else {
+        (Icon::Expand, "Open the player (F)")
+    };
+    if widgets::icon_button(ui, icon, 19.0, theme::TEXT_DIM, tip).clicked() {
+        app.actions.push(Action::ToggleFullView);
     }
-    let queue_on = app.settings.side_panel && app.side_tab == SideTab::UpNext;
+    let (lyrics_on, queue_on) = if app.full_view {
+        (app.full_tab == SideTab::Lyrics, app.full_tab == SideTab::UpNext)
+    } else {
+        (
+            app.settings.side_panel && app.side_tab == SideTab::Lyrics,
+            app.settings.side_panel && app.side_tab == SideTab::UpNext,
+        )
+    };
+    // In the full view these pick its tab; the panel there never closes.
+    let full = app.full_view;
+    if widgets::icon_button(ui, Icon::Lyrics, 20.0, if lyrics_on { theme::TEXT } else { theme::TEXT_DIM }, "Lyrics").clicked() {
+        app.actions.push(if lyrics_on && !full { Action::ToggleSidePanel } else { Action::ShowSidePanel(SideTab::Lyrics) });
+    }
     if widgets::icon_button(ui, Icon::Queue, 20.0, if queue_on { theme::TEXT } else { theme::TEXT_DIM }, "Up next (Q)").clicked() {
-        app.actions.push(if queue_on { Action::ToggleSidePanel } else { Action::ShowSidePanel(SideTab::UpNext) });
+        app.actions.push(if queue_on && !full { Action::ToggleSidePanel } else { Action::ShowSidePanel(SideTab::UpNext) });
     }
     let shuffle = app.queue.shuffle;
     let shuffle_tint = if shuffle { theme::TEXT } else { theme::TEXT_FAINT };

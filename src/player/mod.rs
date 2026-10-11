@@ -6,6 +6,7 @@
 //! failed; the app decides what plays next. A stream given with
 //! [`Player::preload`] starts the moment the current one ends, with no gap.
 
+mod opus;
 pub mod output;
 mod resample;
 pub mod source;
@@ -20,6 +21,7 @@ use fastframe_audio::{Buffer, BufferSize, Maintained, Output, OutputOptions};
 use parking_lot::Mutex;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use symphonia::core::codecs::CodecParameters;
+use symphonia::core::codecs::audio::well_known::CODEC_ID_OPUS;
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
 use symphonia::core::errors::Error as SymError;
 use symphonia::core::formats::probe::Hint;
@@ -44,6 +46,10 @@ pub struct StreamInfo {
     pub duration: Option<Duration>,
     /// YouTube's loudness for the track, in dB relative to its target.
     pub loudness_db: Option<f32>,
+    /// The container's MIME type: `audio/mp4` (AAC) or `audio/webm` (Opus).
+    pub mime: String,
+    /// What it is, for people: "Opus 256 kb/s".
+    pub quality: String,
 }
 
 impl StreamInfo {
@@ -293,7 +299,7 @@ fn curve(knob: f32) -> f32 {
 struct Decoding {
     token: u64,
     format: Box<dyn FormatReader>,
-    decoder: Box<dyn AudioDecoder>,
+    decoder: Decoder,
     track_id: u32,
     time_base: Option<TimeBase>,
     source: Arc<source::Shared>,
@@ -305,6 +311,37 @@ struct Decoding {
     skip_frames: u64,
     finished: bool,
     scratch: Vec<f32>,
+}
+
+/// Symphonia's decoders (AAC), or libopus for Opus, which symphonia lacks.
+enum Decoder {
+    Symphonia(Box<dyn AudioDecoder>),
+    Opus(opus::Opus),
+}
+
+impl Decoder {
+    fn reset(&mut self) {
+        match self {
+            Decoder::Symphonia(decoder) => decoder.reset(),
+            Decoder::Opus(decoder) => decoder.reset(),
+        }
+    }
+
+    fn sample_rate(&self) -> u32 {
+        match self {
+            Decoder::Symphonia(decoder) => decoder.codec_params().sample_rate.unwrap_or(44_100),
+            Decoder::Opus(_) => opus::RATE,
+        }
+    }
+
+    /// How far before a seek target decoding starts, so the decoder has
+    /// settled by the target: 80 ms for Opus, as RFC 7845 advises.
+    fn preroll(&self) -> Duration {
+        match self {
+            Decoder::Symphonia(_) => Duration::ZERO,
+            Decoder::Opus(_) => Duration::from_millis(80),
+        }
+    }
 }
 
 struct Next {
@@ -577,7 +614,8 @@ impl Engine {
             return;
         }
         decoding.source.clear_interrupt();
-        let time = Time::try_from_secs_f64(to.as_secs_f64()).unwrap_or(Time::ZERO);
+        let from = to.saturating_sub(decoding.decoder.preroll());
+        let time = Time::try_from_secs_f64(from.as_secs_f64()).unwrap_or(Time::ZERO);
         let result = decoding.format.seek(
             SeekMode::Accurate,
             SeekTo::Time {
@@ -592,7 +630,9 @@ impl Engine {
                     converter.reset();
                 }
                 let skip = seeked.required_ts.get() - seeked.actual_ts.get();
-                decoding.skip_frames = ts_to_frames(skip.max(0), decoding.time_base, decoding.sample_rate());
+                let rate = decoding.sample_rate();
+                decoding.skip_frames = ts_to_frames(skip.max(0), decoding.time_base, rate)
+                    + duration_to_frames(to - from, rate);
                 decoding.next_time = to;
                 decoding.finished = false;
                 let mut queue = self.queue.lock();
@@ -656,8 +696,8 @@ impl Engine {
         };
         let mss = MediaSourceStream::new(Box::new(reader), Default::default());
         let mut hint = Hint::new();
-        hint.with_extension("m4a");
-        hint.mime_type("audio/mp4");
+        hint.with_extension(if stream.mime.contains("webm") { "webm" } else { "m4a" });
+        hint.mime_type(&stream.mime);
         let format = symphonia::default::get_probe()
             .probe(
                 &hint,
@@ -680,9 +720,24 @@ impl Engine {
                 expired: false,
             });
         };
-        let decoder = symphonia::default::get_codecs()
-            .make_audio_decoder(&params, &AudioDecoderOptions::default())
-            .map_err(|e| failed(e, &handle))?;
+        let decoder = if params.codec == CODEC_ID_OPUS {
+            Decoder::Opus(opus::Opus::new(&params).map_err(|message| OpenError::Failed {
+                message,
+                expired: false,
+            })?)
+        } else {
+            Decoder::Symphonia(
+                symphonia::default::get_codecs()
+                    .make_audio_decoder(&params, &AudioDecoderOptions::default())
+                    .map_err(|e| failed(e, &handle))?,
+            )
+        };
+        // An Opus stream starts with the encoder's lead-in, which is not
+        // meant to be heard.
+        let lead_in = match &decoder {
+            Decoder::Opus(opus) => opus.pre_skip,
+            Decoder::Symphonia(_) => 0,
+        };
         let mut decoding = Decoding {
             token,
             format,
@@ -693,12 +748,13 @@ impl Engine {
             stream,
             converter: None,
             next_time: Duration::ZERO,
-            skip_frames: 0,
+            skip_frames: lead_in,
             finished: false,
             scratch: Vec::new(),
         };
         if !start.is_zero() {
-            let time = Time::try_from_secs_f64(start.as_secs_f64()).unwrap_or(Time::ZERO);
+            let from = start.saturating_sub(decoding.decoder.preroll());
+            let time = Time::try_from_secs_f64(from.as_secs_f64()).unwrap_or(Time::ZERO);
             match decoding.format.seek(
                 SeekMode::Accurate,
                 SeekTo::Time {
@@ -708,8 +764,9 @@ impl Engine {
             ) {
                 Ok(seeked) => {
                     let skip = seeked.required_ts.get() - seeked.actual_ts.get();
-                    decoding.skip_frames =
-                        ts_to_frames(skip.max(0), time_base, decoding.sample_rate());
+                    let rate = decoding.sample_rate();
+                    decoding.skip_frames = ts_to_frames(skip.max(0), time_base, rate)
+                        + duration_to_frames(start - from, rate);
                     decoding.next_time = start;
                 }
                 Err(error) => return Err(failed(error, &handle)),
@@ -802,12 +859,26 @@ impl Engine {
         if packet.track_id != decoding.track_id {
             return true;
         }
-        match decoding.decoder.decode(&packet) {
-            Ok(buffer) => {
-                let in_rate = buffer.spec().rate();
-                let in_channels = buffer.spec().channels().count().max(1);
-                decoding.scratch.clear();
-                buffer.copy_to_vec_interleaved(&mut decoding.scratch);
+        let decoded = match &mut decoding.decoder {
+            Decoder::Symphonia(decoder) => match decoder.decode(&packet) {
+                Ok(buffer) => {
+                    let format = (buffer.spec().rate(), buffer.spec().channels().count().max(1));
+                    decoding.scratch.clear();
+                    buffer.copy_to_vec_interleaved(&mut decoding.scratch);
+                    Ok(format)
+                }
+                Err(SymError::DecodeError(error)) => Err(format!("decode error: {error}")),
+                Err(error) => {
+                    log::warn!("decoder: {error}");
+                    return true;
+                }
+            },
+            Decoder::Opus(decoder) => decoder
+                .decode(&packet.data, &mut decoding.scratch)
+                .map(|()| (opus::RATE, decoder.channels)),
+        };
+        match decoded {
+            Ok((in_rate, in_channels)) => {
                 let gain = if normalize {
                     decoding.stream.loudness_db.map_or(1.0, |db| {
                         // YouTube only turns loud tracks down.
@@ -825,8 +896,7 @@ impl Engine {
                     gain,
                 );
             }
-            Err(SymError::DecodeError(error)) => log::debug!("decode error: {error}"),
-            Err(error) => log::warn!("decoder: {error}"),
+            Err(error) => log::debug!("{error}"),
         }
         true
     }
@@ -948,7 +1018,7 @@ impl Engine {
 
 impl Decoding {
     fn sample_rate(&self) -> u32 {
-        self.decoder.codec_params().sample_rate.unwrap_or(44_100)
+        self.decoder.sample_rate()
     }
 
     fn converter(&mut self, in_rate: u32, out_rate: u32, channels: usize) -> &mut Converter {
@@ -1023,6 +1093,10 @@ fn remix(input: &[f32], from: usize, to: usize, gain: f32) -> Vec<f32> {
         }
     }
     out
+}
+
+fn duration_to_frames(duration: Duration, rate: u32) -> u64 {
+    (duration.as_secs_f64() * f64::from(rate)).round() as u64
 }
 
 fn ts_to_frames(ts: i64, time_base: Option<TimeBase>, rate: u32) -> u64 {

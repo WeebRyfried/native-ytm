@@ -1,6 +1,6 @@
 //! The little Windows needs beyond what eframe and fastframe do: keeping the
-//! sign-in cookie encrypted to this Windows account (DPAPI), and a title bar
-//! in the app's colours.
+//! sign-in cookie encrypted to this Windows account (DPAPI), a title bar in
+//! the app's colours, and the app's identity for the media overlay.
 
 use std::path::Path;
 
@@ -131,6 +131,103 @@ pub fn style_title_bar(hwnd: isize, caption: egui::Color32) {
 
 #[cfg(not(windows))]
 pub fn style_title_bar(_hwnd: isize, _caption: egui::Color32) {}
+
+/// The app's identity to Windows. The media overlay names an app after the
+/// Start menu shortcut carrying its id; without one it says "Unknown app".
+pub const APP_ID: &str = "NativeYTM.Desktop";
+pub const APP_NAME: &str = "Native YTM";
+
+/// Tells Windows who this process is, and keeps a Start menu shortcut with
+/// that id pointing at this executable. Call before any window exists.
+#[cfg(windows)]
+pub fn register_app_identity(config: &Path) {
+    use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+    // SAFETY: a valid, NUL-terminated string for the call.
+    if let Err(error) = unsafe { SetCurrentProcessExplicitAppUserModelID(&windows::core::HSTRING::from(APP_ID)) } {
+        log::warn!("app id: {error}");
+    }
+    // COM on a thread of its own, so it never meets the window's apartment.
+    let marker = config.join("shortcut.txt");
+    std::thread::spawn(move || {
+        if let Err(error) = ensure_shortcut(&marker) {
+            log::warn!("Start menu shortcut: {error}");
+        }
+    });
+}
+
+#[cfg(not(windows))]
+pub fn register_app_identity(_config: &Path) {}
+
+#[cfg(windows)]
+/// `marker` remembers which executable the shortcut was made for.
+fn ensure_shortcut(marker: &Path) -> windows::core::Result<()> {
+    use std::mem::ManuallyDrop;
+    use windows::Win32::Foundation::PROPERTYKEY;
+    use windows::Win32::System::Com::StructuredStorage::{PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0};
+    use windows::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile,
+    };
+    use windows::Win32::System::Variant::VT_LPWSTR;
+    use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+    use windows::core::{GUID, HSTRING, Interface, PWSTR};
+
+    let Some(dir) = std::env::var_os("APPDATA").map(|appdata| {
+        std::path::PathBuf::from(appdata).join(r"Microsoft\Windows\Start Menu\Programs")
+    }) else {
+        return Ok(());
+    };
+    let exe = std::env::current_exe().map_err(|_| windows::core::Error::empty())?;
+    let link = dir.join(format!("{APP_NAME}.lnk"));
+    let made_for = std::fs::read_to_string(marker).unwrap_or_default();
+    if link.exists() && made_for == exe.to_string_lossy() {
+        return Ok(());
+    }
+    // SAFETY: COM is initialised for this thread and torn down at the end;
+    // every interface comes from CoCreateInstance or `cast`, and the
+    // property value points at `id`, which outlives its use, and is never
+    // cleared by PROPVARIANT's drop (ManuallyDrop).
+    unsafe {
+        CoInitializeEx(None, COINIT_MULTITHREADED).ok()?;
+        let result = (|| {
+            let shell_link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
+            let persist: IPersistFile = shell_link.cast()?;
+            shell_link.SetPath(&HSTRING::from(exe.as_path()))?;
+            if let Some(parent) = exe.parent() {
+                shell_link.SetWorkingDirectory(&HSTRING::from(parent))?;
+            }
+            shell_link.SetDescription(&HSTRING::from("A lightweight YouTube Music player"))?;
+            shell_link.SetIconLocation(&HSTRING::from(exe.as_path()), 0)?;
+            let store: IPropertyStore = shell_link.cast()?;
+            let mut id: Vec<u16> = APP_ID.encode_utf16().chain(std::iter::once(0)).collect();
+            let value = ManuallyDrop::new(PROPVARIANT {
+                Anonymous: PROPVARIANT_0 {
+                    Anonymous: ManuallyDrop::new(PROPVARIANT_0_0 {
+                        vt: VT_LPWSTR,
+                        wReserved1: 0,
+                        wReserved2: 0,
+                        wReserved3: 0,
+                        Anonymous: PROPVARIANT_0_0_0 { pwszVal: PWSTR(id.as_mut_ptr()) },
+                    }),
+                },
+            });
+            // System.AppUserModel.ID
+            let key = PROPERTYKEY {
+                fmtid: GUID::from_u128(0x9f4c2855_9f79_4b39_a8d0_e1d42de1d5f3),
+                pid: 5,
+            };
+            store.SetValue(&key, &*value)?;
+            store.Commit()?;
+            let _ = std::fs::create_dir_all(&dir);
+            persist.Save(&HSTRING::from(link.as_path()), true)?;
+            crate::settings::write_atomic(marker, exe.to_string_lossy().as_bytes());
+            log::info!("Start menu shortcut written: {}", link.display());
+            Ok(())
+        })();
+        CoUninitialize();
+        result
+    }
+}
 
 #[cfg(all(test, windows))]
 mod tests {

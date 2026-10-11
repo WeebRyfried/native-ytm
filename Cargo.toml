@@ -20,6 +20,8 @@ directories = "6"
 parking_lot = "0.12"
 fastrand = "2"
 sha1 = "0.10"
+# Last.fm's request signatures.
+md-5 = "0.10"
 # The whole UI. glow keeps the binary and the dependency tree small; wgpu is
 # not needed for a 2D music client (the same choice Spotifast makes).
 eframe = { version = "0.36", default-features = false, features = ["accesskit", "glow", "default_fonts", "persistence"] }
@@ -43,8 +45,10 @@ raw-window-handle = "0.6"
 # needs no OpenSSL.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "gzip", "http2", "stream"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "process"] }
-# Decoding: YouTube's AAC-in-MP4 audio (itag 140).
-symphonia = { version = "0.6", default-features = false, features = ["aac", "isomp4"] }
+# Demuxing and AAC: YouTube's MP4 (itag 140) and WebM (Opus) audio.
+symphonia = { version = "0.6", default-features = false, features = ["aac", "isomp4", "mkv"] }
+# Opus (itags 251 and 774): libopus translated to Rust, so no C toolchain.
+unsafe-libopus = "0.2"
 # Sample-rate conversion to whatever rate the output device runs at.
 rubato = "5"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
@@ -52,6 +56,10 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 [target.'cfg(windows)'.dependencies]
 # DPAPI for the signed-in cookie, the title bar's colours, and message boxes.
 windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_Graphics_Dwm", "Win32_UI_WindowsAndMessaging", "Win32_System_Memory"] }
+
+# The Start menu shortcut that names the app in the media overlay (COM).
+# The same version and features eframe and the audio output already build.
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

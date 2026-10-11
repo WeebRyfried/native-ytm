@@ -62,8 +62,17 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     });
 
     group(ui, "Streams");
-    ui.label(RichText::new("Audio comes straight from YouTube's servers as AAC. When YouTube refuses that, yt-dlp can find the stream instead.").color(theme::TEXT_DIM));
+    ui.label(RichText::new("Audio comes straight from YouTube's servers, as Opus (about 130 kb/s) or AAC (128 kb/s). When YouTube refuses that, yt-dlp can find the stream instead.").color(theme::TEXT_DIM));
     ui.add_space(4.0);
+    ui.checkbox(&mut draft.premium_quality, "Premium quality: 256 kb/s audio with a Music Premium account");
+    note(ui, "Signed in, songs come through yt-dlp with your account, which takes a few seconds for the first song (the next is fetched while one plays). Songs only Premium members can play always go this way.");
+    if draft.premium_quality && !app.signed_in {
+        note(ui, "Sign in to use it.");
+    }
+    if let Some(quality) = app.stream_quality() {
+        note(ui, &format!("Playing now: {quality}"));
+    }
+    ui.add_space(6.0);
     ui.checkbox(&mut draft.use_ytdlp, "Use yt-dlp as a fallback");
     ui.horizontal(|ui| {
         ui.label("yt-dlp");
@@ -78,6 +87,22 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         .color(theme::TEXT_FAINT)
         .font(theme::regular(12.5)),
     );
+
+    group(ui, "Lyrics");
+    ui.checkbox(&mut draft.synced_lyrics, "Synced lyrics from LRCLIB");
+    note(ui, "Looks the song's title and artist up on lrclib.net, an open lyrics database, for lyrics that follow the song. Otherwise YouTube's own lyrics show, without times.");
+
+    group(ui, "Discord");
+    ui.checkbox(&mut draft.discord, "Show what's playing on Discord");
+    note(ui, "Your status reads \u{201c}Listening to\u{201d} the artist; your profile shows the artwork, the song and a progress bar. Paused, it shows nothing. Needs the Discord app running.");
+    ui.horizontal(|ui| {
+        ui.label("Application ID");
+        ui.add(egui::TextEdit::singleline(&mut draft.discord_client_id).desired_width(220.0).hint_text("YouTube Music (default)"));
+    });
+    note(ui, "Optional: the ID of a Discord application of your own, whose name then shows.");
+
+    group(ui, "Last.fm");
+    lastfm(app, ui, &mut draft);
 
     group(ui, "Storage");
     let size = crate::images::cache_size(&app.paths.images());
@@ -116,6 +141,54 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     } else {
         app.settings_draft = None;
     }
+}
+
+fn lastfm(app: &mut App, ui: &mut Ui, draft: &mut crate::settings::Settings) {
+    use crate::lastfm::Status;
+    match app.lastfm.status() {
+        Status::Connected => {
+            let user = app.lastfm.stored.user.clone().unwrap_or_else(|| "your account".into());
+            ui.label(RichText::new(format!("Connected as {user}")).font(theme::medium(15.0)));
+            ui.checkbox(&mut draft.scrobble, "Scrobble the songs I play");
+            let waiting = app.lastfm.waiting();
+            if waiting > 0 {
+                note(ui, &format!("{waiting} scrobbles are waiting to be sent."));
+            }
+            ui.add_space(4.0);
+            if widgets::pill(ui, Some(Icon::SignOut), "Disconnect", false).clicked() {
+                app.actions.push(Action::LastFmDisconnect);
+            }
+        }
+        Status::Authorising => {
+            ui.label(RichText::new("Waiting for you to allow access on Last.fm, in your browser\u{2026}").color(theme::TEXT_DIM));
+        }
+        Status::Disconnected => {
+            note(ui, "Scrobbling uses a Last.fm API account of your own: create one (any name and description will do), then paste its API key and shared secret here and connect. You allow access on last.fm; your password never passes through the app.");
+            ui.add_space(4.0);
+            if widgets::pill(ui, Some(Icon::External), "Create an API account", false).clicked() {
+                app.actions.push(Action::OpenUrl("https://www.last.fm/api/account/create".into()));
+            }
+            ui.add_space(6.0);
+            let (key, secret) = &mut app.lastfm_form;
+            ui.horizontal(|ui| {
+                ui.allocate_ui_with_layout(egui::vec2(110.0, 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| ui.label("API key"));
+                ui.add(egui::TextEdit::singleline(key).desired_width(300.0));
+            });
+            ui.horizontal(|ui| {
+                ui.allocate_ui_with_layout(egui::vec2(110.0, 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| ui.label("Shared secret"));
+                ui.add(egui::TextEdit::singleline(secret).desired_width(300.0).password(true));
+            });
+            ui.add_space(4.0);
+            let ready = !app.lastfm_form.0.trim().is_empty() && !app.lastfm_form.1.trim().is_empty();
+            if widgets::pill(ui, None, "Connect", ready).clicked() {
+                app.actions.push(Action::LastFmConnect);
+            }
+        }
+    }
+}
+
+fn note(ui: &mut Ui, text: &str) {
+    ui.label(RichText::new(text).color(theme::TEXT_FAINT).font(theme::regular(12.5)));
 }
 
 fn group(ui: &mut Ui, title: &str) {

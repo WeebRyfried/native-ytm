@@ -1082,6 +1082,7 @@ pub fn lyrics(v: &Value) -> Option<Lyrics> {
     Some(Lyrics {
         text: opt_text(&shelf["description"])?,
         source: opt_text(&shelf["footer"]),
+        lines: Vec::new(),
     })
 }
 

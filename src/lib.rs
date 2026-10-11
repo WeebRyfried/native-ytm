@@ -5,7 +5,9 @@
 pub mod api;
 pub mod app;
 pub mod backend;
+pub mod discord;
 pub mod images;
+pub mod lastfm;
 pub mod model;
 pub mod platform;
 pub mod player;

@@ -5,8 +5,9 @@
 //! frame. The interface is optimistic: a clicked song is the playing song at
 //! once, and the backend catches up behind it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
@@ -19,6 +20,7 @@ use crate::model::*;
 use crate::player::{self, Player, State as PlayState, StreamInfo};
 use crate::queue::{Queue, Source};
 use crate::settings::{self, Paths, Repeat, Session, Settings};
+use crate::{discord, lastfm};
 
 /// Set by another launch of the app, which asks for the window.
 pub static SHOW_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -50,6 +52,9 @@ pub struct NowInfo {
     pub video_id: String,
     pub lyrics_id: Option<String>,
     pub like: Option<Like>,
+    /// The song's info arrived (or failed): whether YouTube has lyrics for
+    /// it is known.
+    pub info_ready: bool,
 }
 
 pub struct SearchState {
@@ -103,6 +108,9 @@ pub struct App {
     failures: u32,
     retried: Option<u64>,
     streams: HashMap<String, (StreamInfo, Instant)>,
+    /// Songs being resolved ahead of time, so a slow resolve (yt-dlp) is
+    /// done before they are wanted.
+    prefetching: HashSet<String>,
     /// A queue answer is on its way; the bar shows it loading.
     pub pending_queue: Option<u64>,
     extending: bool,
@@ -120,11 +128,21 @@ pub struct App {
     pub new_playlist: Option<(String, Vec<Track>)>,
     pub toasts: Vec<Toast>,
     pub side_tab: SideTab,
+    /// The full-window player: the artwork, with the queue or the lyrics.
+    pub full_view: bool,
+    pub full_tab: SideTab,
     pub ready: bool,
     /// Settings as edited on the Settings page, until applied.
     pub settings_draft: Option<Settings>,
 
     now_playing: Option<fastframe_now_playing::NowPlaying>,
+    presence: Option<discord::Presence>,
+    pub lastfm: lastfm::LastFm,
+    /// The Last.fm API account as typed in Settings, until it connects.
+    pub lastfm_form: (String, String),
+    /// Set while music plays, so a timer wakes the app now and then with
+    /// the window closed (scrobbling, preloading).
+    ticking: Arc<AtomicBool>,
     tray: Option<fastframe_tray::Tray>,
     tray_playing: Option<bool>,
     waker: fastframe_shell::Waker,
@@ -148,9 +166,10 @@ impl App {
         };
         let ytdlp = (!settings.ytdlp_path.trim().is_empty())
             .then(|| std::path::PathBuf::from(settings.ytdlp_path.trim()));
+        crate::stream::clean_scratch(&paths.scratch());
         let backend = Backend::new(
             &settings.language,
-            crate::stream::Resolver::new(ytdlp, settings.use_ytdlp),
+            crate::stream::Resolver::new(ytdlp, settings.use_ytdlp, settings.premium_quality, paths.scratch()),
             wake.clone(),
         );
         if !settings.region.trim().is_empty() {
@@ -177,6 +196,17 @@ impl App {
         );
         let mut queue = Queue::default();
         queue.shuffle = settings.shuffle;
+        let lastfm = lastfm::LastFm::new(&paths.config, backend.runtime.handle().clone(), backend.http.clone());
+        let ticking = Arc::new(AtomicBool::new(false));
+        {
+            let (ticking, waker) = (ticking.clone(), waker.clone());
+            let _ = std::thread::Builder::new().name("ticker".into()).spawn(move || loop {
+                std::thread::sleep(Duration::from_secs(5));
+                if ticking.load(std::sync::atomic::Ordering::Relaxed) {
+                    waker.wake();
+                }
+            });
+        }
         let mut app = Self {
             settings,
             backend,
@@ -214,6 +244,7 @@ impl App {
             failures: 0,
             retried: None,
             streams: HashMap::new(),
+            prefetching: HashSet::new(),
             pending_queue: None,
             extending: false,
             radio_dry: false,
@@ -228,9 +259,15 @@ impl App {
             new_playlist: None,
             toasts: Vec::new(),
             side_tab: SideTab::UpNext,
+            full_view: false,
+            full_tab: SideTab::UpNext,
             ready: false,
             settings_draft: None,
             now_playing: None,
+            presence: None,
+            lastfm,
+            lastfm_form: (String::new(), String::new()),
+            ticking,
             tray: None,
             tray_playing: None,
             waker,
@@ -281,6 +318,10 @@ impl App {
                 move || waker.wake()
             },
         ));
+        // NATIVE_YTM_NO_DISCORD keeps test runs off the person's profile.
+        if app.settings.discord && std::env::var_os("NATIVE_YTM_NO_DISCORD").is_none() {
+            app.presence = Some(discord::Presence::spawn(&app.discord_client_id()));
+        }
         app.tray = fastframe_tray::Tray::spawn(tray_config(), {
             let waker = app.waker.clone();
             move || waker.wake()
@@ -339,6 +380,10 @@ impl App {
         self.tray_events();
         self.maybe_preload();
         self.maybe_extend();
+        self.presence_tick();
+        self.scrobble_tick();
+        self.ticking
+            .store(self.playing(), std::sync::atomic::Ordering::Relaxed);
         self.toasts.retain(|t| t.until > Instant::now());
         if self.last_saved.elapsed() > Duration::from_secs(15) {
             self.save_session();
@@ -699,12 +744,13 @@ impl App {
                 if self.now.video_id != video_id {
                     return;
                 }
+                self.now.info_ready = true;
                 if let Ok(watch) = result {
                     self.now.lyrics_id = watch.lyrics_id;
                     self.now.like = watch.like;
-                    if self.side_tab == SideTab::Lyrics && self.settings.side_panel {
-                        self.request_lyrics();
-                    }
+                }
+                if self.lyrics_shown() {
+                    self.request_lyrics();
                 }
             }
         }
@@ -734,7 +780,7 @@ impl App {
         self.player.stop();
         let video_id = entry.track.video_id.clone();
         if let Some((stream, at)) = self.streams.get(&video_id)
-            && at.elapsed() < Duration::from_secs(3600)
+            && at.elapsed() < STREAM_FRESH
         {
             self.player
                 .load(token, stream.clone(), Duration::from_secs_f64(start), true);
@@ -758,6 +804,9 @@ impl App {
             video_id: video_id.to_owned(),
             ..NowInfo::default()
         };
+        if self.lyrics.len() > 200 {
+            self.lyrics.clear();
+        }
         let seq = self.next_seq();
         self.watch_purposes.insert(
             seq,
@@ -773,15 +822,89 @@ impl App {
         });
     }
 
+    /// Asks for the current song's lyrics, once its info says whether
+    /// YouTube has them: synced ones from LRCLIB first, then YouTube's.
     pub fn request_lyrics(&mut self) {
-        let video_id = self.now.video_id.clone();
-        if video_id.is_empty() || self.lyrics.contains_key(&video_id) {
+        let Some(track) = self.current().cloned() else {
+            return;
+        };
+        // A restored song that has not played yet has no info yet.
+        if self.now.video_id != track.video_id {
+            self.track_info(&track.video_id);
             return;
         }
-        if let Some(browse_id) = self.now.lyrics_id.clone() {
-            self.lyrics.insert(video_id.clone(), Loadable::Loading);
-            self.backend.send(Request::Lyrics { video_id, browse_id });
+        let video_id = track.video_id.clone();
+        if self.lyrics.contains_key(&video_id) || !self.now.info_ready {
+            return;
         }
+        let query = track
+            .artists
+            .first()
+            .filter(|_| self.settings.synced_lyrics)
+            .map(|artist| crate::api::lrclib::Query {
+                title: track.title.clone(),
+                artist: artist.name.clone(),
+                album: track.album.as_ref().map(|a| a.name.clone()),
+                duration: track.duration,
+            });
+        let browse_id = self.now.lyrics_id.clone();
+        if query.is_none() && browse_id.is_none() {
+            self.lyrics.insert(video_id, Loadable::Ready(None));
+            return;
+        }
+        self.lyrics.insert(video_id.clone(), Loadable::Loading);
+        self.backend.send(Request::Lyrics {
+            video_id,
+            browse_id,
+            query,
+        });
+    }
+
+    /// Lyrics are on screen: the side panel's tab, or the full view's.
+    pub fn lyrics_shown(&self) -> bool {
+        if self.full_view {
+            self.full_tab == SideTab::Lyrics
+        } else {
+            self.settings.side_panel && self.side_tab == SideTab::Lyrics
+        }
+    }
+
+    /// The current stream's codec and rate, such as "Opus 257 kb/s".
+    pub fn stream_quality(&self) -> Option<&str> {
+        let track = self.current()?;
+        self.streams
+            .get(&track.video_id)
+            .map(|(stream, _)| stream.quality.as_str())
+    }
+
+    /// Resolves the song after this one ahead of time, when resolving is
+    /// slow (the account's streams come through yt-dlp, in seconds).
+    fn prefetch_next(&mut self) {
+        if !(self.settings.premium_quality && self.signed_in) {
+            return;
+        }
+        let Some(entry) = self
+            .queue
+            .next_index(self.settings.repeat, false)
+            .and_then(|i| self.queue.entries.get(i))
+        else {
+            return;
+        };
+        let video_id = entry.track.video_id.clone();
+        let fresh = self
+            .streams
+            .get(&video_id)
+            .is_some_and(|(_, at)| at.elapsed() < STREAM_FRESH);
+        if fresh || self.prefetching.contains(&video_id) || Some(video_id.as_str()) == self.current().map(|t| t.video_id.as_str()) {
+            return;
+        }
+        self.prefetching.insert(video_id.clone());
+        self.backend.send(Request::Resolve {
+            token: 0,
+            video_id,
+            purpose: Purpose::Prefetch,
+            start: 0.0,
+        });
     }
 
     fn on_resolved(
@@ -792,7 +915,14 @@ impl App {
         start: f64,
         result: Result<(StreamInfo, crate::stream::Via), String>,
     ) {
+        if purpose == Purpose::Prefetch {
+            self.prefetching.remove(&video_id);
+        }
         match (purpose, result) {
+            (Purpose::Prefetch, Ok((stream, _))) => {
+                self.streams.insert(video_id, (stream, Instant::now()));
+            }
+            (Purpose::Prefetch, Err(error)) => log::info!("prefetch of {video_id} failed: {error}"),
             (Purpose::Load, Ok((stream, _))) => {
                 self.streams
                     .insert(video_id, (stream.clone(), Instant::now()));
@@ -819,7 +949,16 @@ impl App {
                 let title = self.current().map(|t| t.title.clone()).unwrap_or_default();
                 log::warn!("cannot play {video_id}: {error}");
                 self.failures += 1;
-                self.toast(format!("Cannot play \u{201c}{title}\u{201d}"), ToastKind::Error);
+                let why = if error.contains("Premium members") {
+                    if self.signed_in {
+                        " (a Music Premium song; it needs yt-dlp, set in Settings)"
+                    } else {
+                        ": only Music Premium members can play it. Sign in with a Premium account."
+                    }
+                } else {
+                    ""
+                };
+                self.toast(format!("Cannot play \u{201c}{title}\u{201d}{why}"), ToastKind::Error);
                 if self.failures < 3 && self.queue.next_index(self.settings.repeat, true).is_some() {
                     self.advance(true);
                 } else {
@@ -844,6 +983,7 @@ impl App {
                     self.failures = 0;
                     self.retried = None;
                     self.start_at = 0.0;
+                    self.prefetch_next();
                 } else if let Some((preload_token, uid)) = self.preload
                     && preload_token == token
                 {
@@ -860,6 +1000,7 @@ impl App {
                     if let Some(video_id) = self.current().map(|t| t.video_id.clone()) {
                         self.track_info(&video_id);
                     }
+                    self.prefetch_next();
                 }
             }
             player::Event::Ended(token) => {
@@ -950,7 +1091,7 @@ impl App {
         let token = self.next_seq();
         self.preload = Some((token, entry.uid));
         if let Some((stream, at)) = self.streams.get(&entry.track.video_id)
-            && at.elapsed() < Duration::from_secs(3600)
+            && at.elapsed() < STREAM_FRESH
         {
             self.player.preload(token, stream.clone());
         } else {
@@ -1031,6 +1172,9 @@ impl App {
             self.preload = None;
             self.preload_wanted_for = None;
             self.player.clear_preload();
+        }
+        if self.playing() {
+            self.prefetch_next();
         }
     }
 
@@ -1630,12 +1774,35 @@ impl App {
                 self.backend.send(Request::Suggest { seq, input });
             }
             Action::ShowSidePanel(tab) => {
-                self.settings.side_panel = true;
-                self.side_tab = tab;
+                if self.full_view {
+                    self.full_tab = tab;
+                } else {
+                    self.settings.side_panel = true;
+                    self.side_tab = tab;
+                    self.save_settings();
+                }
                 if tab == SideTab::Lyrics {
                     self.request_lyrics();
                 }
-                self.save_settings();
+            }
+            Action::ToggleFullView => {
+                self.full_view = !self.full_view;
+                if self.full_view && self.full_tab == SideTab::Lyrics {
+                    self.request_lyrics();
+                }
+            }
+            Action::LastFmConnect => {
+                let (key, secret) = self.lastfm_form.clone();
+                if key.trim().is_empty() || secret.trim().is_empty() {
+                    self.toast("Enter the API key and the shared secret first", ToastKind::Info);
+                } else {
+                    self.lastfm.connect(&key, &secret);
+                    self.lastfm_form = (String::new(), String::new());
+                }
+            }
+            Action::LastFmDisconnect => {
+                self.lastfm.disconnect();
+                self.toast("Disconnected from Last.fm", ToastKind::Info);
             }
             Action::ToggleSidePanel => {
                 self.settings.side_panel = !self.settings.side_panel;
@@ -1707,8 +1874,24 @@ impl App {
                         path: (!new.ytdlp_path.trim().is_empty()).then(|| new.ytdlp_path.trim().into()),
                     });
                 }
+                if new.premium_quality != self.settings.premium_quality {
+                    self.backend.send(Request::SetPremium(new.premium_quality));
+                    // Streams found at the other quality are found again.
+                    self.streams.clear();
+                }
                 if new.normalize != self.settings.normalize {
                     self.player.set_normalize(new.normalize);
+                }
+                if new.discord != self.settings.discord || new.discord_client_id != self.settings.discord_client_id {
+                    // Dropping it clears the activity and ends its thread.
+                    self.presence = None;
+                    if new.discord {
+                        let id = client_id_or_default(&new.discord_client_id);
+                        self.presence = Some(discord::Presence::spawn(&id));
+                    }
+                }
+                if new.synced_lyrics != self.settings.synced_lyrics {
+                    self.lyrics.clear();
                 }
                 if (new.zoom - self.settings.zoom).abs() > f32::EPSILON {
                     self.ctx.set_zoom_factor(new.zoom.clamp(0.7, 2.0));
@@ -1746,6 +1929,15 @@ impl App {
         self.actions.push(Action::OpenSignIn);
         false
     }
+}
+
+/// How long a resolved stream address is used before it is resolved again;
+/// YouTube's last about six hours.
+const STREAM_FRESH: Duration = Duration::from_secs(3600);
+
+fn client_id_or_default(id: &str) -> String {
+    let id = id.trim();
+    if id.is_empty() { discord::DEFAULT_CLIENT_ID.to_owned() } else { id.to_owned() }
 }
 
 fn route_filter(route: &Route) -> Filter {
@@ -1836,6 +2028,68 @@ impl App {
         };
         if let Some(controls) = &mut self.now_playing {
             controls.update(state);
+        }
+    }
+
+    fn discord_client_id(&self) -> String {
+        client_id_or_default(&self.settings.discord_client_id)
+    }
+
+    /// Tells Discord what plays; nothing while paused.
+    fn presence_tick(&mut self) {
+        if self.presence.is_none() {
+            return;
+        }
+        let activity = self.current().filter(|_| self.playing()).map(|track| {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as i64);
+            let start_ms = now_ms - (self.position() * 1000.0) as i64;
+            let end_ms = self.duration().map(|d| start_ms + (d * 1000.0) as i64);
+            discord::Activity {
+                title: track.title.clone(),
+                artist: track.artist_line(),
+                album: track.album.as_ref().map(|a| a.name.clone()),
+                art_url: track
+                    .thumbnail
+                    .as_deref()
+                    .map(|url| sized_thumbnail(url, 512))
+                    .filter(|url| url.starts_with("https://") && url.len() <= 256),
+                url: format!("https://music.youtube.com/watch?v={}", track.video_id),
+                artist_url: track
+                    .artists
+                    .first()
+                    .and_then(|a| a.id.as_ref())
+                    .map(|id| format!("https://music.youtube.com/channel/{id}")),
+                start_ms,
+                end_ms,
+            }
+        });
+        if let Some(presence) = &mut self.presence {
+            presence.set(activity);
+        }
+    }
+
+    fn scrobble_tick(&mut self) {
+        let playing = self.playing();
+        let position = self.position();
+        let duration = self.duration();
+        let uid = self.current_uid.unwrap_or(0);
+        let track = self.queue.current_track().cloned();
+        let current = track.as_ref().filter(|_| self.current_token != 0).map(|track| lastfm::Current {
+            uid,
+            track,
+            position,
+            duration,
+            playing,
+        });
+        for notice in self.lastfm.tick(current, self.settings.scrobble) {
+            match notice {
+                lastfm::Notice::OpenUrl(url) => self.ctx.open_url(egui::OpenUrl::new_tab(url)),
+                lastfm::Notice::Toast { text, error } => {
+                    self.toast(text, if error { ToastKind::Error } else { ToastKind::Info })
+                }
+            }
         }
     }
 

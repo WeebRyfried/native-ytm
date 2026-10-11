@@ -37,6 +37,9 @@ fn main() {
         eprintln!("no logger: {error}");
     }
 
+    // Before the media controls and the window: Windows names the app in
+    // its media overlay from this id.
+    platform::register_app_identity(&paths.config);
     let app = App::new(waker.clone());
     let config = paths.config.clone();
     let result = fastframe_shell::Shell::new(app, &waker).run(|lease| {
@@ -131,6 +134,7 @@ fn dev_route(app: &mut App) {
             "queue" => Action::ShowSidePanel(SideTab::UpNext),
             "lyrics" => Action::ShowSidePanel(SideTab::Lyrics),
             "signin" => Action::OpenSignIn,
+            "full" => Action::ToggleFullView,
             "play" => Action::PlayWatch { video_id: Some(arg.to_owned()), playlist_id: None, params: None, title: None },
             _ => continue,
         };

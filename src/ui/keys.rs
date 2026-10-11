@@ -60,8 +60,16 @@ pub fn handle(app: &mut App, ctx: &Context) {
         if input.consume_key(Modifiers::NONE, Key::M) {
             actions.push(Action::ToggleMute);
         }
+        if input.consume_key(Modifiers::NONE, Key::F) {
+            actions.push(Action::ToggleFullView);
+        }
+        if app.full_view && input.consume_key(Modifiers::NONE, Key::Escape) {
+            actions.push(Action::ToggleFullView);
+        }
         if input.consume_key(Modifiers::NONE, Key::Q) {
-            actions.push(if app.settings.side_panel && app.side_tab == SideTab::UpNext {
+            actions.push(if app.full_view {
+                Action::ShowSidePanel(SideTab::UpNext)
+            } else if app.settings.side_panel && app.side_tab == SideTab::UpNext {
                 Action::ToggleSidePanel
             } else {
                 Action::ShowSidePanel(SideTab::UpNext)

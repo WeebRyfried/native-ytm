@@ -222,6 +222,11 @@ pub enum Action {
     Suggest(String),
     ShowSidePanel(SideTab),
     ToggleSidePanel,
+    /// The full-window player, or back.
+    ToggleFullView,
+    /// Starts Last.fm's authorisation with the API account typed in.
+    LastFmConnect,
+    LastFmDisconnect,
     ToggleSidebar,
     OpenSignIn,
     SignIn(String),

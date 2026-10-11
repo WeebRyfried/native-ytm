@@ -46,6 +46,16 @@ pub struct Settings {
     pub use_ytdlp: bool,
     /// yt-dlp's path, when it is not on PATH.
     pub ytdlp_path: String,
+    /// Signed in, ask for Premium's 256 kb/s streams (through yt-dlp).
+    pub premium_quality: bool,
+    /// Look up synced lyrics on LRCLIB.
+    pub synced_lyrics: bool,
+    /// Show what plays on Discord.
+    pub discord: bool,
+    /// Another Discord application than the default, whose name shows.
+    pub discord_client_id: String,
+    /// Scrobble to Last.fm, once connected.
+    pub scrobble: bool,
     pub sidebar: bool,
     pub side_panel: bool,
     /// Pick up where the last session left off.
@@ -68,6 +78,11 @@ impl Default for Settings {
             region: String::new(),
             use_ytdlp: true,
             ytdlp_path: String::new(),
+            premium_quality: true,
+            synced_lyrics: true,
+            discord: true,
+            discord_client_id: String::new(),
+            scrobble: true,
             sidebar: true,
             side_panel: false,
             restore_session: true,
@@ -124,6 +139,11 @@ impl Paths {
 
     pub fn logs(&self) -> PathBuf {
         self.cache.join("logs")
+    }
+
+    /// Short-lived files: yt-dlp's cookie file while it runs.
+    pub fn scratch(&self) -> PathBuf {
+        self.cache.join("scratch")
     }
 }
 
