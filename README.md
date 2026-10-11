@@ -1,287 +1,206 @@
-# native-ytm
+<p align="center">
+  <img src="assets/logo.svg" width="112" alt="Native YTM">
+</p>
 
-A lightweight, native YouTube Music client for Windows, built the way
-[Spotifast](https://github.com/crmne/spotifast) is: Rust and
-[egui](https://github.com/emilk/egui) on Spotifast's own foundation,
-[fastframe](https://github.com/crmne/fastframe). There is no browser engine
-and no webview. The interface is drawn natively with OpenGL, the catalogue
-comes from YouTube Music's JSON API, and the audio is streamed, decoded and
-played by a small engine in Rust.
+<h1 align="center">Native YTM</h1>
 
-This is a personal experiment, not affiliated with Google or YouTube.
+<p align="center">
+  <b>YouTube Music as a real Windows app.</b><br>
+  No browser inside: Rust, drawn on the GPU. Open in a tenth of a second, at rest on a fraction of a core.
+</p>
 
-![Search, the queue and the player bar](docs/screenshot.png)
+<p align="center">
+  <a href="../../releases/latest"><img src="https://img.shields.io/badge/download-v0.1.0-ff0033?style=flat-square" alt="Download v0.1.0"></a>
+  <img src="https://img.shields.io/badge/Windows-x64-0078D4?style=flat-square&logo=windows11&logoColor=white" alt="Windows x64">
+  <img src="https://img.shields.io/badge/Rust-2024-B7410E?style=flat-square&logo=rust&logoColor=white" alt="Rust 2024">
+  <img src="https://img.shields.io/badge/UI-egui%20%2B%20OpenGL-1f1f1f?style=flat-square" alt="egui and OpenGL">
+  <img src="https://img.shields.io/badge/webview-none-2ea44f?style=flat-square" alt="No webview">
+  <img src="https://img.shields.io/badge/one%20file-15%20MB-555555?style=flat-square" alt="One 15 MB file">
+  <img src="https://img.shields.io/badge/license-MIT-3b82f6?style=flat-square" alt="MIT licence">
+</p>
 
-## What it does
+<p align="center">
+  <img src="docs/hero.webp" alt="The full-window player: the artwork over a wash of its own colours, with what plays next" width="900">
+</p>
 
-- **Home, Explore, search** (with filters and suggestions), **albums,
-  artists, playlists**, moods and charts, with infinite scrolling.
-- **Playback** straight from YouTube's servers: Opus at about 130 kb/s
-  (or AAC at 128), resampled to whatever rate the output device runs at,
-  with **gapless** transitions (the next song is fetched and decoded before
-  this one ends), instant seeking, and YouTube Music's loudness
-  normalisation.
-- **Premium quality**: signed in with a Music Premium account, 256 kb/s
-  Opus (or AAC), and the songs only Premium members can play. A song starts
-  at once on the quick stream and switches to the Premium one mid-song with
-  no break (the full-window player shows the switch).
-- **Queue**: play next, add to queue, drag to reorder, shuffle, repeat
-  (all or one), and **autoplay radio** that keeps going when the queue runs
-  out, as YouTube Music does.
-- **Synced lyrics**, as Apple Music shows them: the line being sung lit,
-  the view following it, a click on a line to play from there (from
-  [LRCLIB](https://lrclib.net); YouTube's own lyrics otherwise).
-- **A full-window player**: the artwork large over a wash of its colours,
-  with what plays next or the lyrics beside it, fading and rising in.
-- Light animations throughout (page and toast transitions, hover fades, the
-  play button's morph, a like's pop, the artwork crossfading between
-  songs), each drawing frames only while it moves.
+## Why
+
+Most desktop players for YouTube Music are a web browser in a window, with
+a browser's appetite. Native YTM is a single 15 MB program: the interface is
+drawn by the GPU, the audio is streamed, decoded and played by its own
+engine, and the catalogue comes straight from YouTube Music's API. It starts
+before you can let go of the mouse, plays in about 30 MB from the tray, and
+sounds as good as your account allows.
+
+## Features
+
+**Sound**
+- **Premium quality.** With Music Premium, 256 kb/s Opus or AAC. A song
+  starts in under a second and switches up to Premium mid-song, without a
+  gap, the full-window player showing it happen.
+- **Songs kept on disk.** The last 100 songs you heard (or as many as you
+  like) are kept at the best quality heard, and play from disk at once.
+- **Gapless**, Opus and AAC, resampled to your device, levelled the way
+  YouTube Music levels them.
+
+**Lyrics and the full view**
+- **Synced lyrics** that follow the song: the line being sung lit, the rest
+  dim, the view gliding along. Click a line to play from there.
+- **A full-window player**: the artwork large over a wash of its own colours,
+  with what plays next or the lyrics beside it.
+
+**Your music**
+- Home, Explore, moods and charts, search with suggestions, albums,
+  artists, playlists, all with infinite scrolling.
+- Signed in: your playlists, Liked music, the library, likes, saving,
+  subscribing, creating playlists, songs only Premium members can play.
+- A queue that does what you expect: play next, drag to reorder, shuffle,
+  repeat, and radio that keeps going when it runs out.
+
+**At home on Windows**
+- The media keys and the volume flyout, with the song's name and artwork.
+- Closes to the tray and keeps playing. One copy at a time.
 - **Discord**: "Listening to" the artist, with the artwork, the song and a
   progress bar on your profile.
-- **Last.fm** scrobbling, with now-playing updates.
-- **Signed in** (optional): your playlists in the sidebar, Liked music,
-  the Library (playlists, songs, albums, artists, subscriptions, history),
-  like and dislike, save albums and playlists, subscribe to artists, save to
-  a playlist, create playlists, remove songs from your own playlists.
-- **Windows integration**: the media keys and the volume overlay's
-  controls (System Media Transport Controls), named and with the app's icon
-  (a Start menu shortcut carries the app's id, which is how Windows names
-  an app there), a tray icon that keeps the music playing with the window
-  closed, one running copy (a second launch brings the window back), and a
-  dark title bar.
-- The queue and position are restored at the next start.
+- **Last.fm** scrobbling and now playing.
+- Light animations throughout, each drawing frames only while it moves.
 
-## How it works
+<p align="center">
+  <img src="docs/lyrics.webp" alt="Synced lyrics in the full-window player" width="49%">
+  <img src="docs/search.webp" alt="Search" width="49%">
+</p>
 
-| Part | Where | What |
-| --- | --- | --- |
-| Interface | `src/ui/` | egui views; they emit `Action`s, which `src/app.rs` applies after each frame |
-| App state | `src/app.rs`, `src/queue.rs` | navigation, the queue, what plays next, preloading, autoplay |
-| Network | `src/backend.rs` | a two-thread tokio runtime; the interface never waits on it |
-| API | `src/api/` | InnerTube (`WEB_REMIX`) requests and the parsers that turn renderers into the model |
-| Streams | `src/stream.rs` | finds an audio address for a video id (see below) |
-| Audio | `src/player/` | HTTP range downloader, symphonia demuxers (MP4, WebM) and AAC decoder, libopus for Opus, rubato resampler, fastframe-audio output |
-| Lyrics | `src/api/lrclib.rs`, `src/ui/lyrics.rs` | LRCLIB lookups and LRC parsing; the synced view |
-| Desktop | `src/discord.rs`, `src/lastfm.rs`, `src/platform.rs` | Discord's IPC pipe, Last.fm's API, DPAPI, the app's identity |
-| Artwork | `src/images.rs` | fetched and decoded off the interface thread, cached on disk, dropped from memory when unused |
+## Light on the machine
 
-### Getting the audio
+Measured with the release build on a laptop drawing on Intel UHD graphics:
 
-YouTube serves direct audio addresses to some of its own clients without
-the JavaScript challenge or proof-of-origin token the web player needs.
-`src/stream.rs` asks the player endpoint as one of those (visionOS, then
-Android VR), signed out and under a visitor id of its own, takes the Opus
-stream (itag 251, or AAC, itag 140), and checks the last kilobyte before
-trusting it, since some clients' addresses stop working after the first
-megabyte. This takes about half a second.
+| | Memory | CPU (one core) | GPU |
+| --- | --- | --- | --- |
+| Open, idle | 101 MB | 0.2% | 0% |
+| Playing | 110 MB | 3% | 0.6% |
+| Full-window player, lyrics moving | 115 MB | 3.3% | 3% |
+| Playing from the tray | 33 MB | 0.5% | none |
 
-Opus comes in WebM, which symphonia demuxes; symphonia has no Opus
-decoder, so the packets go to libopus, through
-[unsafe-libopus](https://github.com/DCNick3/unsafe-libopus), libopus's C
-translated to Rust, so the build needs no C compiler or CMake.
+The interface draws a frame only when something on screen changes, and
+never faster than the screen shows them; the system's Japanese, Chinese and
+Korean fonts are mapped rather than loaded; artwork stays within a budget.
 
-Premium's 256 kb/s streams (itag 774, Opus, and 141, AAC) and songs only
-Premium members can play are served only to the signed-in web player,
-whose addresses need its JavaScript run. With **Premium quality** on (in
-Settings) and an account signed in, the app asks
-[yt-dlp](https://github.com/yt-dlp/yt-dlp) for them with the account's
-cookie, written to a file in `%LOCALAPPDATA%\native-ytm\cache\scratch`
-for the few seconds yt-dlp runs and removed after. Premium members' songs
-go this way whatever the setting.
+## Install
 
-That takes four to eight seconds, so a song is not kept waiting for it: it
-starts on the quick signed-out stream (Opus at about 130 kb/s) in under a
-second, and when yt-dlp has the Premium stream, the player switches to it
-where its decoded audio runs out (about three seconds ahead of what is
-heard). The new stream's first 60 ms are decoded over the last 60 ms queued
-and crossfaded, so the join cannot click, and both are levelled to the
-same loudness. The switch happens only between streams of the same codec,
-which line up to the sample. The next song's Premium stream is fetched
-while this one plays, so it starts in Premium quality at once.
+1. Download `native-ytm.exe` from [Releases](../../releases/latest) and run
+   it. It is one file; it puts its settings in `%APPDATA%\native-ytm`.
+   (Windows may ask before running a new download: **More info**, then
+   **Run anyway**.)
+2. **Sign in**, if you like (browsing, search and playback need no
+   account). Google does not let third-party apps sign in to YouTube Music
+   directly, so the app uses your browser's session, as
+   [ytmusicapi](https://github.com/sigma67/ytmusicapi) does:
+   - Open <https://music.youtube.com>, signed in, and press **F12**.
+   - In **Network**, filter for `browse` and pick a request to
+     `music.youtube.com`.
+   - Copy its `cookie` request header (or *Copy as cURL*, or a
+     `cookies.txt` export), and paste it into **Sign in** in the app.
 
-YouTube changes which clients work. When none does, the app falls back to
-yt-dlp if it is installed (it is looked for on `PATH`, or set its path in
-Settings). yt-dlp needs a
-JavaScript runtime for YouTube; if Deno is not installed and Node is, the
-app tells yt-dlp to use Node. Keep yt-dlp current (`yt-dlp -U`, or your
-package manager): an old one finds addresses that YouTube cuts off after the
-first megabyte, which the app detects and reports. To fix the native path, update the client
-list in `PlayerClient::defaults` (`src/api/client.rs`) from yt-dlp's
-`_base.py`.
+   It is stored encrypted for your Windows account.
+3. **Premium quality** wants [yt-dlp](https://github.com/yt-dlp/yt-dlp) and
+   a JavaScript runtime it can use:
 
-## Signing in
+   ```bash
+   winget install yt-dlp.yt-dlp OpenJS.NodeJS.LTS
+   ```
 
-Google no longer lets third-party apps sign in to YouTube Music with OAuth
-in a way that works for this API, so the app signs in the way
-[ytmusicapi](https://github.com/sigma67/ytmusicapi) does: with your
-browser's cookie.
+**Discord** works with the Discord app running. **Last.fm** asks for an API
+account of your own (free and instant at
+<https://www.last.fm/api/account/create>): paste its key and secret in
+Settings and press **Connect**.
 
-1. Open <https://music.youtube.com> in your browser, signed in.
-2. Press F12, open **Network**, and filter for `browse` (click around if
-   the list is empty).
-3. Select a request to `music.youtube.com` and copy the value of the
-   `cookie` request header. (*Copy as cURL* or a `cookies.txt` export also
-   work.)
-4. In the app: **Sign in**, paste, **Sign in**.
+## Keyboard
 
-The cookie is stored encrypted with Windows DPAPI, readable only by your
-Windows account, in `%APPDATA%\native-ytm\config\account.bin`. Signing out
-of YouTube in that browser profile ends the app's session too.
+| Keys | |
+| --- | --- |
+| Space | Play or pause |
+| Ctrl + Right / Left | Next / previous |
+| Shift + Right / Left | Forward / back 10 seconds |
+| Ctrl + Up / Down, M | Volume, mute |
+| F, Esc | Open, close the full-window player |
+| Q | The queue |
+| L | Like |
+| Ctrl + F or / | Search |
+| Alt + Left / Right | Back / forward |
 
-## Discord and Last.fm
+## Build
 
-**Discord** works with the Discord app running and nothing to set up: the
-status reads "Listening to" the artist, and the profile card shows the
-artwork, the title, the artist and a progress bar (Discord draws the bar
-for listening activities with a start and an end). Paused, nothing shows.
-The name Discord gives the activity is that of the Discord application
-whose ID the app uses: by default the "YouTube Music" application of
-[th-ch/youtube-music](https://github.com/th-ch/youtube-music); Settings
-takes the ID of one of your own instead.
-
-**Last.fm** needs an API account of your own (Last.fm gives one at once at
-<https://www.last.fm/api/account/create>; any name and description do).
-Paste its API key and shared secret into Settings and press **Connect**;
-Last.fm asks in the browser whether to allow the app, and the app picks up
-the session when you do. Songs scrobble after half their length or four
-minutes, whichever comes first, as Last.fm asks; scrobbles wait in a file
-while Last.fm cannot be reached. The key, the secret and the session are
-stored encrypted with DPAPI, in `lastfm.bin`.
-
-## Building
-
-You need Rust 1.98 or newer and the MSVC build tools.
+Rust 1.98 or newer, with the MSVC build tools:
 
 ```bash
 cargo build --release
 ```
 
-The executable is `target\release\native-ytm.exe`, one file with
-everything inside.
+`target\release\native-ytm.exe` is the whole app.
 
-`ytm-probe` is a console tool for when YouTube changes something:
+<details>
+<summary><b>How it works</b></summary>
 
-```bash
-cargo run --release --bin ytm-probe -- dump search "daft punk" songs
-```
+| Part | Where | What |
+| --- | --- | --- |
+| Interface | `src/ui/` | egui views; they emit `Action`s, which `src/app.rs` applies after each frame |
+| App state | `src/app.rs`, `src/queue.rs` | navigation, the queue, what plays next, preloading, the switch to Premium |
+| Network | `src/backend.rs` | a two-thread tokio runtime; the interface never waits on it |
+| API | `src/api/` | InnerTube (`WEB_REMIX`) requests and the parsers that turn renderers into the model; LRCLIB for synced lyrics |
+| Streams | `src/stream.rs` | finds a stream for a song (below) |
+| Audio | `src/player/` | range downloader, symphonia (MP4, WebM, AAC), libopus for Opus, rubato resampler, fastframe-audio output |
+| Song cache | `src/cache.rs` | whole files kept on disk, the best quality heard, the least recently played going first |
+| Desktop | `src/discord.rs`, `src/lastfm.rs`, `src/platform.rs` | Discord's local pipe, Last.fm's API, DPAPI, the app's identity for the media flyout |
 
-Run it without arguments to see its commands (`dump` prints what the
-parsers make of live pages, `play` resolves and plays a stream, `icon`
-redraws `assets/app.ico`).
+**Streams.** The player endpoint is asked as one of the clients YouTube
+serves direct addresses to without a JavaScript challenge (visionOS, then
+Android VR), under a visitor id of its own; Opus (itag 251) is taken over
+AAC (itag 140), and the last kilobyte is checked before the stream is
+trusted. That takes about half a second. Premium's 256 kb/s streams (774
+Opus, 141 AAC) and Premium members' songs are served only to the signed-in
+web player, whose addresses need its JavaScript: yt-dlp fetches those with
+the account's cookie (written for the seconds it runs, then removed). A song
+starts on the quick stream; when the Premium one arrives, the engine decodes
+it from the end of the three seconds already queued, 60 ms early, and
+crossfades the overlap, so the join cannot click. The next song's Premium
+stream is fetched while one plays.
 
-To check the interface without clicking through it, the app takes a few
-environment variables (any build): `NATIVE_YTM_ROUTE` opens a page or
-plays something at start (`search:QUERY`, `browse:ID`, `play:VIDEO_ID`,
-`explore`, `library`, `settings`, `queue`, `lyrics`, `signin`, `full`, joined with
-`|`), `NATIVE_YTM_SHOT=out.png` saves a screenshot after
-`NATIVE_YTM_SHOT_DELAY` milliseconds and quits, `NATIVE_YTM_SCROLL` scrolls
-the page, `NATIVE_YTM_SEEK` jumps into the song, `NATIVE_YTM_MUTE` plays
-silently, and `NATIVE_YTM_NO_DISCORD` keeps the run off Discord.
-`NATIVE_YTM_PROFILE=DIR` runs a separate copy beside the real one, with
-its own settings, session and cache in that folder. `NATIVE_YTM_WIGGLE=x,y`
-and `NATIVE_YTM_WHEEL=x,y` make up pointer movement or wheel turns at that
-point (in points), to measure or check what they do, and
-`NATIVE_YTM_NO_FRAME_SKIP` draws identical frames anyway, to compare.
+**Frames.** egui runs a frame for every pointer movement. The vendored
+eframe (`vendor/eframe`, search for "native-ytm patch") puts off a frame
+asked for before the screen could show the last, and neither draws nor
+presents a frame identical to the one on screen. Animations the app drives
+are held to 60 frames a second (`theme::repaint_in` makes up for egui
+shortening every delay by a frame). The vendored fastframe-fonts maps the
+system's fallback fonts instead of reading them in.
 
-`ytm-probe play VIDEO_ID --cookies cookies.txt --premium` checks the
-account's streams, and `ytm-probe lyrics TITLE ARTIST` the lyrics lookup.
+**For development**, the app takes a few environment variables:
+`NATIVE_YTM_ROUTE` opens pages or plays at start (`search:QUERY`,
+`browse:ID`, `play:VIDEO_ID`, `explore`, `library`, `settings`, `queue`,
+`lyrics`, `signin`, `full`, joined with `|`); `NATIVE_YTM_SHOT=out.png`
+saves a screenshot after `NATIVE_YTM_SHOT_DELAY` ms and quits;
+`NATIVE_YTM_SCROLL`, `NATIVE_YTM_SEEK`, `NATIVE_YTM_MUTE`;
+`NATIVE_YTM_NO_DISCORD`; `NATIVE_YTM_PROFILE=DIR` runs a separate copy with
+its own data; `NATIVE_YTM_WIGGLE=x,y` and `NATIVE_YTM_WHEEL=x,y` make up
+pointer input; `NATIVE_YTM_NO_FRAME_SKIP` draws identical frames anyway.
+`ytm-probe` is a console tool for when YouTube changes something: `dump`
+prints what the parsers make of live pages, `play` resolves and plays a
+stream (`--cookies FILE --premium` for the account's), `lyrics` looks lyrics
+up, `logo` and `icon` draw the logo.
 
-## Keyboard
-
-| Keys | Does |
-| --- | --- |
-| Space | Play or pause |
-| Ctrl + Right / Left | Next / previous song |
-| Shift + Right / Left | Forward / back 10 seconds |
-| Ctrl + Up / Down | Volume |
-| M | Mute |
-| Ctrl + F or / | Search |
-| Alt + Left / Right, mouse back / forward | Back / forward |
-| Q | Show the queue |
-| F | Open or close the full-window player (Esc closes it) |
-| L | Like the song |
-| Ctrl + R or F5 | Reload the page |
-
-## Where things are kept
-
-- Settings, the queue, the sign-in and Last.fm: `%APPDATA%\native-ytm\config\`
-- Artwork cache and logs: `%LOCALAPPDATA%\native-ytm\cache\`
-- The Start menu shortcut: `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Native YTM.lnk`
-
-What leaves the machine besides YouTube's own traffic: the title, artist,
-album and length of songs whose lyrics are shown, to LRCLIB (Settings turns
-it off); what plays, to the Discord app on this computer, which shows it to
-your friends; and, once connected, scrobbles to Last.fm.
-
-## Footprint
-
-Measured on this machine (a laptop drawing on Intel UHD graphics, at 144
-and 60 Hz) with the release build, in private memory, share of one CPU
-core, and the GPU's 3D engine:
-
-| | Memory | CPU | GPU |
-| --- | --- | --- | --- |
-| Idle, window open | 101 MB | 0.2% | 0% |
-| Playing, window open | 110 MB | 3% | 0.6% |
-| Full-window player, synced lyrics moving | 115 MB | 3.3% | 3% |
-| Pointer moving over things that do not change | | 9% | 0.8% |
-| Playing, closed to the tray | 33 MB | 0.5% | none |
-
-A 15 MB executable; the window is up about 0.1 s after launch. What keeps
-it there:
-
-- The fonts for Chinese, Japanese, Korean and other scripts are the
-  system's own, memory-mapped rather than read in (58 MB that would
-  otherwise be the app's): only the parts glyphs are drawn from are loaded,
-  and those are shared with every other program using the fonts. This is
-  the one change to the vendored `fastframe-fonts` (in `vendor/`).
-- Frames are drawn only when something changes. egui runs a frame for
-  every pointer movement, and a mouse sends hundreds a second; here the
-  graphics driver did not hold presenting to the screen's rate, so moving
-  the pointer kept a core busy. The vendored eframe (in `vendor/`, search
-  for "native-ytm patch") puts off any frame asked for before the screen
-  could show it, and does not draw or present a frame identical to the one
-  on screen; after such a frame it looks again at 60 Hz until something
-  changes. Moving the pointer went from a whole core and 13% of the GPU to
-  under a tenth of a core and 1%.
-- Animations the app drives are held to 60 frames a second (egui takes a
-  frame off every delay asked for, which `theme::repaint_in` makes up), the
-  lyrics glide and the breathing dots pace themselves, and nothing spins at
-  the screen's full rate.
-- Artwork is kept on the GPU within a 48 MB budget and reloaded from the
-  disk cache when drawn again; the media overlay's artwork is read from
-  disk without becoming a texture.
-- The audio engine decodes in bursts (topping three seconds of audio back
-  up whenever it falls below two and a quarter) and otherwise sleeps.
-  Decoding Opus and resampling cost about 0.3% of a core.
-
-## Limits
-
-- Audio only. Premium's 256 kb/s streams and Premium members' songs need
-  yt-dlp (and a JavaScript runtime it can use, Deno or Node).
-- No video, no podcasts' episode lists beyond what pages show, no
-  uploads, no offline downloads.
-- YouTube changes its API without notice. The parsers look for item
-  renderers wherever they are rather than at fixed paths, which survives
-  most changes; stream access is the part most likely to need updating.
+</details>
 
 ## Credits
 
-- [Spotifast](https://github.com/crmne/spotifast) and
-  [fastframe](https://github.com/crmne/fastframe) by Carmine Paolino (MIT):
-  the design this follows, and the crates for audio output, media controls,
-  the tray, fonts, icons and the window shell.
-- [ytmusicapi](https://github.com/sigma67/ytmusicapi) and
-  [yt-dlp](https://github.com/yt-dlp/yt-dlp): what YouTube Music's API looks
-  like, and which clients still get streams.
-- `vendor/fastframe-fonts` is fastframe's font crate (MIT) with its
-  fallback fonts memory-mapped; `vendor/eframe` is
-  [eframe](https://github.com/emilk/egui) 0.36.2 (MIT or Apache-2.0) with
-  frames paced to the screen and identical frames left undrawn.
-- [libopus](https://opus-codec.org) (BSD), by way of
-  [unsafe-libopus](https://github.com/DCNick3/unsafe-libopus), for Opus.
-- [LRCLIB](https://lrclib.net) for synced lyrics, and
-  [th-ch/youtube-music](https://github.com/th-ch/youtube-music) for its
-  Discord application.
-- Icons from [Lucide](https://lucide.dev) (ISC). Interface font
-  [Inter](https://rsms.me/inter/) (SIL OFL 1.1), bundled by fastframe-fonts.
+[Spotifast](https://github.com/crmne/spotifast) and
+[fastframe](https://github.com/crmne/fastframe) by Carmine Paolino (MIT), the
+design this follows and its foundation. [egui and eframe](https://github.com/emilk/egui)
+(MIT or Apache-2.0). [ytmusicapi](https://github.com/sigma67/ytmusicapi) and
+[yt-dlp](https://github.com/yt-dlp/yt-dlp), for how YouTube Music works.
+[libopus](https://opus-codec.org) (BSD) through
+[unsafe-libopus](https://github.com/DCNick3/unsafe-libopus).
+[LRCLIB](https://lrclib.net) for synced lyrics.
+[th-ch/youtube-music](https://github.com/th-ch/youtube-music) for its Discord
+application. Icons from [Lucide](https://lucide.dev) (ISC); the
+[Inter](https://rsms.me/inter/) typeface (SIL OFL 1.1).
+
+MIT licensed. An independent project, not affiliated with Google or YouTube.

@@ -65,7 +65,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     ui.label(RichText::new("Audio comes straight from YouTube's servers, as Opus (about 130 kb/s) or AAC (128 kb/s). When YouTube refuses that, yt-dlp can find the stream instead.").color(theme::TEXT_DIM));
     ui.add_space(4.0);
     ui.checkbox(&mut draft.premium_quality, "Premium quality: 256 kb/s audio with a Music Premium account");
-    note(ui, "Signed in, songs come through yt-dlp with your account, which takes a few seconds for the first song (the next is fetched while one plays). Songs only Premium members can play always go this way.");
+    note(ui, "Signed in, a song starts at once at standard quality and switches to 256 kb/s mid-song, without a break, when yt-dlp has fetched it with your account; the next song is fetched while one plays. Songs only Premium members can play always come this way.");
     if draft.premium_quality && !app.signed_in {
         note(ui, "Sign in to use it.");
     }
@@ -103,6 +103,26 @@ pub fn show(app: &mut App, ui: &mut Ui) {
 
     group(ui, "Last.fm");
     lastfm(app, ui, &mut draft);
+
+    group(ui, "Songs on disk");
+    ui.label(RichText::new("Each song heard in full is kept on disk at the best quality heard, and plays from there next time: at once, and without the network. The least recently played go first.").color(theme::TEXT_DIM));
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.label("Keep up to");
+        ui.add(egui::Slider::new(&mut draft.cached_songs, 0..=1000).step_by(10.0).suffix(" songs"));
+    });
+    let (count, bytes) = app.audio_cache.usage();
+    note(
+        ui,
+        &format!(
+            "{count} songs kept, {:.0} MB. About 8 MB a song at 256 kb/s; 0 keeps none.",
+            bytes as f64 / 1_048_576.0
+        ),
+    );
+    ui.add_space(4.0);
+    if widgets::pill(ui, Some(Icon::Trash), "Clear kept songs", false).clicked() {
+        app.actions.push(Action::ClearSongCache);
+    }
 
     group(ui, "Storage");
     let size = crate::images::cache_size(&app.paths.images());

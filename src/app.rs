@@ -142,6 +142,8 @@ pub struct App {
     /// The stream the player has for the current token: its quality and
     /// container.
     loaded: Option<(u64, StreamInfo)>,
+    /// Songs kept on disk.
+    pub audio_cache: Arc<crate::cache::AudioCache>,
     /// A queue answer is on its way; the bar shows it loading.
     pub pending_queue: Option<u64>,
     extending: bool,
@@ -210,12 +212,14 @@ impl App {
             });
         }
         let (events_tx, player_events) = std::sync::mpsc::channel();
+        let audio_cache = crate::cache::AudioCache::open(paths.songs(), settings.cached_songs as usize);
         let mut player = Player::spawn(
             backend.runtime.handle().clone(),
             backend.http.clone(),
             events_tx,
             wake,
             settings.normalize,
+            audio_cache.clone(),
         );
         player.set_volume(if settings.muted { 0.0 } else { settings.volume });
         let ctx = egui::Context::default();
@@ -278,6 +282,7 @@ impl App {
             prefetching: HashSet::new(),
             upgrade: None,
             loaded: None,
+            audio_cache,
             pending_queue: None,
             extending: false,
             radio_dry: false,
@@ -816,12 +821,30 @@ impl App {
         let video_id = entry.track.video_id.clone();
         self.upgrade = None;
         self.loaded = None;
-        if let Some((stream, at)) = self.streams.get(&video_id)
-            && at.elapsed() < STREAM_FRESH
-        {
-            let stream = stream.clone();
+        if let Some(stream) = self.best_stream(&video_id) {
             self.loaded = Some((token, stream.clone()));
             self.player.load(token, stream, Duration::from_secs_f64(start), true);
+        } else if let Some(stream) = self.audio_cache.lookup(&video_id) {
+            // Kept at standard quality: it plays at once from disk, and the
+            // Premium stream takes over when it comes, as on a quick start.
+            self.loaded = Some((token, stream.clone()));
+            self.player.load(token, stream.clone(), Duration::from_secs_f64(start), true);
+            if self.account_streams() {
+                self.upgrade = Some(Upgrade {
+                    token,
+                    phase: UpgradePhase::Finding,
+                    from: Some(stream.quality.clone()),
+                    to: None,
+                    quick_failed: false,
+                });
+                self.backend.send(Request::Resolve {
+                    token,
+                    video_id: video_id.clone(),
+                    purpose: Purpose::Upgrade,
+                    start,
+                    how: How::Account,
+                });
+            }
         } else if self.account_streams() {
             // The account's stream takes seconds through yt-dlp: start on
             // the quick one and switch when the better one arrives.
@@ -956,6 +979,19 @@ impl App {
         }
     }
 
+    /// The song's stream at the quality wanted, if it is at hand: kept on
+    /// disk, or resolved within the hour.
+    fn best_stream(&mut self, video_id: &str) -> Option<StreamInfo> {
+        let wanted = if self.account_streams() { PREMIUM_KBPS } else { 1 };
+        if self.audio_cache.has_at_least(video_id, wanted) {
+            return self.audio_cache.lookup(video_id);
+        }
+        self.streams
+            .get(video_id)
+            .filter(|(_, at)| at.elapsed() < STREAM_FRESH)
+            .map(|(stream, _)| stream.clone())
+    }
+
     /// Streams come from the account (through yt-dlp, in seconds).
     fn account_streams(&self) -> bool {
         self.settings.premium_quality && self.signed_in && self.backend.ytdlp_found().is_some()
@@ -983,7 +1019,8 @@ impl App {
         let fresh = self
             .streams
             .get(&video_id)
-            .is_some_and(|(_, at)| at.elapsed() < STREAM_FRESH);
+            .is_some_and(|(_, at)| at.elapsed() < STREAM_FRESH)
+            || self.audio_cache.has_at_least(&video_id, PREMIUM_KBPS);
         if fresh || self.prefetching.contains(&video_id) || Some(video_id.as_str()) == self.current().map(|t| t.video_id.as_str()) {
             return;
         }
@@ -1008,6 +1045,11 @@ impl App {
         if purpose == Purpose::Prefetch {
             self.prefetching.remove(&video_id);
         }
+        // Tagged with its song: once wholly downloaded, the file is kept.
+        let result = result.map(|(mut stream, via)| {
+            stream.cache_key = Some(video_id.clone());
+            (stream, via)
+        });
         match (purpose, result) {
             (Purpose::Prefetch, Ok((stream, _))) => {
                 self.streams.insert(video_id, (stream, Instant::now()));
@@ -1199,7 +1241,16 @@ impl App {
                 }
                 let video_id = self.current().map(|t| t.video_id.clone()).unwrap_or_default();
                 self.streams.remove(&video_id);
-                if expired && self.retried != Some(token) {
+                // A kept file that would not play is dropped, and the song
+                // found again.
+                let from_disk = self
+                    .loaded
+                    .as_ref()
+                    .is_some_and(|(t, s)| *t == token && crate::cache::file_of(&s.url).is_some());
+                if from_disk {
+                    self.audio_cache.remove(&video_id);
+                }
+                if (expired || from_disk) && self.retried != Some(token) {
                     // The address ran out; find it again and carry on from
                     // the same place.
                     self.retried = Some(token);
@@ -1270,10 +1321,11 @@ impl App {
         self.preload_wanted_for = Some(entry.uid);
         let token = self.next_seq();
         self.preload = Some((token, entry.uid));
-        if let Some((stream, at)) = self.streams.get(&entry.track.video_id)
-            && at.elapsed() < STREAM_FRESH
+        if let Some(stream) = self
+            .best_stream(&entry.track.video_id)
+            .or_else(|| self.audio_cache.lookup(&entry.track.video_id))
         {
-            self.player.preload(token, stream.clone());
+            self.player.preload(token, stream);
         } else {
             self.backend.send(Request::Resolve {
                 token,
@@ -2074,6 +2126,9 @@ impl App {
                 if new.synced_lyrics != self.settings.synced_lyrics {
                     self.lyrics.clear();
                 }
+                if new.cached_songs != self.settings.cached_songs {
+                    self.audio_cache.set_limit(new.cached_songs as usize);
+                }
                 if (new.zoom - self.settings.zoom).abs() > f32::EPSILON {
                     self.ctx.set_zoom_factor(new.zoom.clamp(0.7, 2.0));
                 }
@@ -2089,6 +2144,11 @@ impl App {
             }
             Action::OpenUrl(url) => {
                 crate::platform::open_url(&url);
+            }
+            Action::ClearSongCache => {
+                let (_, bytes) = self.audio_cache.usage();
+                self.audio_cache.clear();
+                self.toast(format!("Freed {:.0} MB", bytes as f64 / 1_048_576.0), ToastKind::Info);
             }
             Action::ClearImageCache => {
                 let freed = crate::images::clear_cache(&self.paths.images());
@@ -2111,6 +2171,9 @@ impl App {
         false
     }
 }
+
+/// A bitrate at or above this is Premium quality (256 kb/s streams).
+const PREMIUM_KBPS: u32 = 200;
 
 /// How long a resolved stream address is used before it is resolved again;
 /// YouTube's last about six hours.
@@ -2322,6 +2385,7 @@ impl App {
     }
 
     pub fn shutdown(&mut self) {
+        self.audio_cache.save();
         self.save_session();
         self.save_settings();
         self.player.stop();

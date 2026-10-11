@@ -225,57 +225,31 @@ fastframe_icons::icons! {
     }
 }
 
-/// The app's icon, drawn rather than shipped: a red disc with a white ring
-/// and play triangle, at any size, supersampled for clean edges.
+/// The logo: a record with a red label and a play mark, ringed with how
+/// far the song has come. One drawing for the window, the tray, the
+/// sidebar, the executable and the README.
+pub const LOGO_SVG: &str = include_str!("../assets/logo.svg");
+
+/// The logo as straight RGBA, `size` pixels square, drawn from the SVG.
 pub fn app_icon_rgba(size: usize) -> Vec<u8> {
-    const SUB: usize = 4;
-    let mut out = vec![0u8; size * size * 4];
-    let n = size as f32;
-    let c = n / 2.0;
-    let r = n / 2.0;
-    let ring_r = r * 0.64;
-    let ring_w = (n * 0.06).max(1.2);
-    let s = r * 0.40;
-    let tri = [(-0.40 * s, -0.62 * s), (-0.40 * s, 0.62 * s), (0.66 * s, 0.0)];
-    let edge = |p: (f32, f32), a: (f32, f32), b: (f32, f32)| {
-        (b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0)
+    use resvg::{tiny_skia, usvg};
+    let size = size.max(1);
+    let Ok(tree) = usvg::Tree::from_str(LOGO_SVG, &usvg::Options::default()) else {
+        return vec![0; size * size * 4];
     };
-    for y in 0..size {
-        for x in 0..size {
-            let (mut disc, mut white) = (0.0f32, 0.0f32);
-            for sy in 0..SUB {
-                for sx in 0..SUB {
-                    let px = x as f32 + (sx as f32 + 0.5) / SUB as f32 - c;
-                    let py = y as f32 + (sy as f32 + 0.5) / SUB as f32 - c;
-                    let d = (px * px + py * py).sqrt();
-                    if d > r {
-                        continue;
-                    }
-                    disc += 1.0;
-                    let on_ring = (d - ring_r).abs() < ring_w / 2.0;
-                    let p = (px + s * 0.08, py);
-                    let e0 = edge(p, tri[0], tri[1]);
-                    let e1 = edge(p, tri[1], tri[2]);
-                    let e2 = edge(p, tri[2], tri[0]);
-                    let in_tri = (e0 <= 0.0 && e1 <= 0.0 && e2 <= 0.0) || (e0 >= 0.0 && e1 >= 0.0 && e2 >= 0.0);
-                    if on_ring || in_tri {
-                        white += 1.0;
-                    }
-                }
-            }
-            if disc == 0.0 {
-                continue;
-            }
-            let w = white / disc;
-            let mix = |v: f32| (v * (1.0 - w) + 255.0 * w).round() as u8;
-            let i = (y * size + x) * 4;
-            out[i] = mix(255.0);
-            out[i + 1] = mix(0.0);
-            out[i + 2] = mix(51.0);
-            out[i + 3] = (disc / (SUB * SUB) as f32 * 255.0).round() as u8;
-        }
-    }
-    out
+    let Some(mut pixmap) = tiny_skia::Pixmap::new(size as u32, size as u32) else {
+        return vec![0; size * size * 4];
+    };
+    let scale = size as f32 / tree.size().width().max(tree.size().height());
+    resvg::render(&tree, tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
+    pixmap
+        .pixels()
+        .iter()
+        .flat_map(|p| {
+            let c = p.demultiply();
+            [c.red(), c.green(), c.blue(), c.alpha()]
+        })
+        .collect()
 }
 
 pub fn app_icon(size: usize) -> egui::IconData {

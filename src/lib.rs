@@ -5,6 +5,7 @@
 pub mod api;
 pub mod app;
 pub mod backend;
+pub mod cache;
 pub mod discord;
 pub mod images;
 pub mod lastfm;

@@ -193,6 +193,8 @@ async fn native(api: &Innertube, client: &PlayerClient, video_id: &str) -> Resul
         loudness_db,
         quality: describe(&mime, kbps),
         mime,
+        kbps,
+        cache_key: None,
     })
 }
 
@@ -357,6 +359,8 @@ async fn ytdlp(
         loudness_db,
         quality: describe(&mime, kbps),
         mime,
+        kbps,
+        cache_key: None,
     })
 }
 

@@ -48,6 +48,8 @@ pub struct Settings {
     pub ytdlp_path: String,
     /// Signed in, ask for Premium's 256 kb/s streams (through yt-dlp).
     pub premium_quality: bool,
+    /// Songs kept on disk, at the best quality heard; 0 keeps none.
+    pub cached_songs: u32,
     /// Look up synced lyrics on LRCLIB.
     pub synced_lyrics: bool,
     /// Show what plays on Discord.
@@ -79,6 +81,7 @@ impl Default for Settings {
             use_ytdlp: true,
             ytdlp_path: String::new(),
             premium_quality: true,
+            cached_songs: 100,
             synced_lyrics: true,
             discord: true,
             discord_client_id: String::new(),
@@ -142,6 +145,10 @@ impl Paths {
 
     pub fn images(&self) -> PathBuf {
         self.cache.join("images")
+    }
+
+    pub fn songs(&self) -> PathBuf {
+        self.cache.join("songs")
     }
 
     pub fn logs(&self) -> PathBuf {

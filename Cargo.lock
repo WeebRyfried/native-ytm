@@ -2749,6 +2749,7 @@ dependencies = [
  "parking_lot",
  "raw-window-handle",
  "reqwest",
+ "resvg",
  "rubato",
  "serde",
  "serde_json",

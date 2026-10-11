@@ -59,6 +59,11 @@ pub struct StreamInfo {
     pub mime: String,
     /// What it is, for people: "Opus 256 kb/s".
     pub quality: String,
+    /// Its bitrate, to tell a better copy from a worse.
+    pub kbps: Option<u32>,
+    /// The song's video id, to keep the file in the cache once it is all
+    /// downloaded; none for a file that comes from the cache.
+    pub cache_key: Option<String>,
 }
 
 impl StreamInfo {
@@ -168,6 +173,7 @@ impl Player {
         events: Sender<Event>,
         wake: Arc<dyn Fn() + Send + Sync>,
         normalize: bool,
+        cache: Arc<crate::cache::AudioCache>,
     ) -> Self {
         let (tx, rx) = mpsc::channel();
         let shared = Arc::new(Shared {
@@ -184,6 +190,7 @@ impl Player {
             wake,
             runtime,
             client,
+            cache,
             shared: shared.clone(),
             report: report.clone(),
             volume: volume.clone(),
@@ -393,6 +400,7 @@ struct Engine {
     wake: Arc<dyn Fn() + Send + Sync>,
     runtime: tokio::runtime::Handle,
     client: reqwest::Client,
+    cache: Arc<crate::cache::AudioCache>,
     shared: Arc<Shared>,
     report: Arc<Report>,
     volume: Arc<AtomicU32>,
@@ -576,13 +584,7 @@ impl Engine {
                 if self.next.as_ref().is_some_and(|next| next.token == token) {
                     return;
                 }
-                let opened = RemoteSource::open(
-                    &self.runtime,
-                    self.client.clone(),
-                    stream.url.clone(),
-                    stream.header_map(),
-                    stream.content_length,
-                );
+                let opened = self.source_for(&stream);
                 self.next = Some(Next {
                     token,
                     stream,
@@ -708,6 +710,30 @@ impl Engine {
         *self.shared.seek_to.lock() = None;
     }
 
+    /// The bytes of a stream: read from the cache's file, or downloaded,
+    /// and then kept in the cache once whole.
+    fn source_for(&self, stream: &StreamInfo) -> (RemoteSource, Arc<source::Shared>) {
+        if let Some(path) = crate::cache::file_of(&stream.url) {
+            let bytes = std::fs::read(path).unwrap_or_else(|error| {
+                log::warn!("cannot read the cached song {}: {error}", path.display());
+                Vec::new()
+            });
+            return RemoteSource::from_bytes(bytes);
+        }
+        let complete = stream.cache_key.clone().filter(|_| self.cache.enabled()).map(|video_id| {
+            let (cache, stream) = (self.cache.clone(), stream.clone());
+            Box::new(move |bytes: Vec<u8>| cache.store(&video_id, &stream, bytes)) as source::Complete
+        });
+        RemoteSource::open(
+            &self.runtime,
+            self.client.clone(),
+            stream.url.clone(),
+            stream.header_map(),
+            stream.content_length,
+            complete,
+        )
+    }
+
     /// Takes over decoding from a better stream of the same song, at the end
     /// of what is queued. The queue's last moment is decoded again from the
     /// new stream and crossfaded, so the join cannot click.
@@ -758,15 +784,7 @@ impl Engine {
         start: Duration,
         opened: Option<(RemoteSource, Arc<source::Shared>)>,
     ) -> Result<Decoding, OpenError> {
-        let (reader, handle) = opened.unwrap_or_else(|| {
-            RemoteSource::open(
-                &self.runtime,
-                self.client.clone(),
-                stream.url.clone(),
-                stream.header_map(),
-                stream.content_length,
-            )
-        });
+        let (reader, handle) = opened.unwrap_or_else(|| self.source_for(&stream));
         *self.shared.source.lock() = Some(handle.clone());
         handle.clear_interrupt();
         let failed = |error: SymError, handle: &source::Shared| {

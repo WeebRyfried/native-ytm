@@ -236,6 +236,8 @@ pub enum Action {
     CopyLink(String),
     OpenUrl(String),
     ClearImageCache,
+    /// Deletes the songs kept on disk.
+    ClearSongCache,
     ShowWindow,
     Quit,
 }

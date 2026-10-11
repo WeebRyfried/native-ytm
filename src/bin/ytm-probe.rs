@@ -9,6 +9,7 @@
 //! ytm-probe dump watch dQw4w9WgXcQ
 //! ytm-probe play dQw4w9WgXcQ [--seek 120]
 //! ytm-probe icon assets/app.ico         (the executable's icon, drawn)
+//! ytm-probe logo docs/logo.png 512      (the logo as a PNG)
 //! ytm-probe lyrics TITLE ARTIST [SECONDS]  (synced lyrics from LRCLIB)
 //! ```
 
@@ -24,6 +25,14 @@ fn main() -> anyhow::Result<()> {
     match args.get(1).map(String::as_str) {
         Some("dump") if args.len() > 2 => return dump(&args[2..]),
         Some("icon") => return write_icon(args.get(2).map_or("assets/app.ico", String::as_str)),
+        Some("logo") => {
+            // The logo as a PNG, to look at or to publish.
+            let size: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(512);
+            let rgba = native_ytm::theme::app_icon_rgba(size);
+            let image = image::RgbaImage::from_raw(size as u32, size as u32, rgba).expect("size");
+            image.save(args.get(2).map_or("logo.png", String::as_str))?;
+            return Ok(());
+        }
         Some("lyrics") if args.len() > 3 => return lyrics(&args[2..]),
         Some("play") => {}
         _ => {
@@ -55,7 +64,7 @@ fn main() -> anyhow::Result<()> {
     let (info, via) = runtime.block_on(async { api.bootstrap().await; resolver.resolve(&api, &id).await })?;
     println!("resolved via {via:?} in {:?}: {} ({}), {} bytes, {:?}, loudness {:?}", started.elapsed(), info.quality, info.mime, info.content_length, info.duration, info.loudness_db);
     let (tx, rx) = std::sync::mpsc::channel();
-    let mut player = player::Player::spawn(runtime.handle().clone(), http, tx, Arc::new(|| {}), true); player.set_volume(if std::env::var_os("NATIVE_YTM_MUTE").is_some() { 0.0 } else { 0.35 });
+    let mut player = player::Player::spawn(runtime.handle().clone(), http, tx, Arc::new(|| {}), true, native_ytm::cache::AudioCache::disabled()); player.set_volume(if std::env::var_os("NATIVE_YTM_MUTE").is_some() { 0.0 } else { 0.35 });
     let t0 = std::time::Instant::now();
     player.load(1, info, Duration::ZERO, true);
     for i in 0..60 {

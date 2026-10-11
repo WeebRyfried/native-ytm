@@ -86,6 +86,9 @@ impl Shared {
     }
 }
 
+/// Called with the whole file once its download completes.
+pub type Complete = Box<dyn FnOnce(Vec<u8>) + Send>;
+
 /// The reader half handed to the demuxer.
 pub struct RemoteSource {
     shared: Arc<Shared>,
@@ -101,6 +104,7 @@ impl RemoteSource {
         url: String,
         headers: HeaderMap,
         len: u64,
+        on_complete: Option<Complete>,
     ) -> (Self, Arc<Shared>) {
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
@@ -116,7 +120,35 @@ impl RemoteSource {
             cancelled: AtomicBool::new(false),
             interrupt: AtomicBool::new(false),
         });
-        runtime.spawn(download(shared.clone(), client, url, headers));
+        runtime.spawn(download(shared.clone(), client, url, headers, on_complete));
+        (
+            Self {
+                shared: shared.clone(),
+                pos: 0,
+            },
+            shared,
+        )
+    }
+
+    /// A file already whole in memory (a song from the cache): nothing to
+    /// download. Empty bytes make a source that fails as if refused, so the
+    /// song is looked up again.
+    pub fn from_bytes(bytes: Vec<u8>) -> (Self, Arc<Shared>) {
+        let len = bytes.len() as u64;
+        let shared = Arc::new(Shared {
+            state: Mutex::new(State {
+                data: bytes,
+                have: if len > 0 { vec![0..len] } else { Vec::new() },
+                want: None,
+                cursor: None,
+                error: (len == 0).then_some(SourceError::Forbidden),
+            }),
+            ready: Condvar::new(),
+            jumped: tokio::sync::Notify::new(),
+            len,
+            cancelled: AtomicBool::new(false),
+            interrupt: AtomicBool::new(false),
+        });
         (
             Self {
                 shared: shared.clone(),
@@ -248,7 +280,13 @@ fn insert_span(have: &mut Vec<Range<u64>>, span: Range<u64>) {
     *have = merged;
 }
 
-async fn download(shared: Arc<Shared>, client: reqwest::Client, url: String, headers: HeaderMap) {
+async fn download(
+    shared: Arc<Shared>,
+    client: reqwest::Client,
+    url: String,
+    headers: HeaderMap,
+    mut on_complete: Option<Complete>,
+) {
     let len = shared.len;
     let mut failures = 0u32;
     loop {
@@ -265,6 +303,12 @@ async fn download(shared: Arc<Shared>, client: reqwest::Client, url: String, hea
                 }
                 None => {
                     state.cursor = None;
+                    // All here: hand a copy to whoever keeps it.
+                    let whole = on_complete.is_some().then(|| state.data.clone());
+                    drop(state);
+                    if let (Some(done), Some(bytes)) = (on_complete.take(), whole) {
+                        done(bytes);
+                    }
                     return;
                 }
             }
