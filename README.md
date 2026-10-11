@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="../../releases/latest"><img src="https://img.shields.io/badge/download-v0.2.1-ff0033?style=flat-square" alt="Download v0.2.1"></a>
+  <a href="../../releases/latest"><img src="https://img.shields.io/badge/download-v0.2.2-ff0033?style=flat-square" alt="Download v0.2.2"></a>
   <img src="https://img.shields.io/badge/Windows-x64-0078D4?style=flat-square&logo=windows11&logoColor=white" alt="Windows x64">
   <img src="https://img.shields.io/badge/Rust-2024-B7410E?style=flat-square&logo=rust&logoColor=white" alt="Rust 2024">
   <img src="https://img.shields.io/badge/UI-egui%20%2B%20OpenGL-1f1f1f?style=flat-square" alt="egui and OpenGL">
@@ -38,8 +38,11 @@ sounds as good as your account allows.
 - **Premium quality.** With Music Premium, 256 kb/s Opus or AAC. A song
   starts in under a second and switches up to Premium mid-song, without a
   gap, the full-window player showing it happen, codec symbol and all.
-- **Gapless**, Opus and AAC, resampled to your device, levelled the way
-  YouTube Music levels them, and never a click between songs.
+- **Gapless or crossfaded.** Songs follow without a gap, or fade into one
+  another over 1 to 12 seconds (an album still plays as one piece); Opus
+  and AAC, levelled the way YouTube Music levels them, never a click.
+- **Equalizer.** Ten bands with presets (Bass boost, Vocal, Rock, Late
+  night…) or a curve of your own, heard the moment you move a band.
 
 **Offline**
 - **Downloads.** Download a song, an album or a whole playlist, at the best
@@ -54,6 +57,8 @@ sounds as good as your account allows.
 **Lyrics and the full view**
 - **Synced lyrics** that follow the song: the line being sung lit, the rest
   dim, the view gliding along. Click a line to play from there.
+- **Readings over Japanese lyrics** in the full-window player: how each
+  word sounds, set small over it, in romaji or as furigana.
 - **A full-window player**: the artwork large over a wash of its own colours,
   with what plays next or the lyrics beside it.
 
@@ -162,7 +167,8 @@ cargo build --release
 | Network | `src/backend.rs` | a two-thread tokio runtime; the interface never waits on it |
 | API | `src/api/` | InnerTube (`WEB_REMIX`) requests and the parsers that turn renderers into the model; LRCLIB for synced lyrics |
 | Streams | `src/stream.rs` | finds a stream for a song (below) |
-| Audio | `src/player/` | range downloader, symphonia (MP4, WebM, AAC), libopus for Opus, rubato resampler, fastframe-audio output |
+| Audio | `src/player/` | range downloader, symphonia (MP4, WebM, AAC), libopus for Opus, rubato resampler, crossfades, the equaliser (`eq.rs`, in the audio callback), fastframe-audio output |
+| Lyric readings | `src/readings.rs` | Japanese words read longest match first from a table made from JMdict, then put in romaji or hiragana |
 | Songs on disk | `src/cache.rs` | downloads, and whole files kept from plays (the best quality heard, the least recently played going first) |
 | Offline | `src/net.rs` | whether there is internet, from Windows' Network List Manager, asked when a request fails and while offline |
 | Desktop | `src/discord.rs`, `src/lastfm.rs`, `src/platform.rs` | Discord's local pipe, Last.fm's API, DPAPI, the app's identity for the media flyout |
@@ -220,6 +226,8 @@ design this follows and its foundation. [egui and eframe](https://github.com/emi
 [libopus](https://opus-codec.org) (BSD) through
 [unsafe-libopus](https://github.com/DCNick3/unsafe-libopus).
 [LRCLIB](https://lrclib.net) for synced lyrics.
+[JMdict](https://www.edrdg.org/jmdict/j_jmdict.html) by the EDRDG
+(CC BY-SA 4.0) for the readings of Japanese lyrics.
 [th-ch/youtube-music](https://github.com/th-ch/youtube-music) for its Discord
 application. Icons from [Lucide](https://lucide.dev) (ISC); the Last.fm mark
 from [Simple Icons](https://simpleicons.org) (CC0); the Opus and AAC symbols

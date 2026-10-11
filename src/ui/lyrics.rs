@@ -4,13 +4,20 @@
 //! by hand pauses the following for a moment; a click on a line plays from
 //! there. Lyrics without times are shown as text.
 
-use egui::{Color32, CornerRadius, CursorIcon, Rect, RichText, Sense, Ui, pos2, vec2};
+use std::sync::Arc;
+
+use egui::{Color32, CornerRadius, CursorIcon, Galley, Pos2, Rect, RichText, Sense, Ui, pos2, vec2};
 
 use crate::api::model::{LyricLine, Lyrics};
 use crate::app::App;
 use crate::model::{Action, Loadable};
+use crate::readings::{self, Dictionary, Style};
 use crate::theme;
 use crate::ui::widgets;
+
+/// A line laid out, with the readings over it: each one's centre, from
+/// the line's top left, and its text.
+type LaidLine = (Arc<Galley>, Vec<(Pos2, Arc<Galley>)>);
 
 /// How long after a scroll by hand the view takes over again.
 const HAND_SCROLL: f64 = 3.0;
@@ -49,7 +56,7 @@ pub fn show(app: &mut App, ui: &mut Ui, big: bool) {
         Some(Loadable::Ready(Some(lyrics))) => {
             let lyrics = lyrics.clone();
             if lyrics.lines.is_empty() {
-                plain(ui, &lyrics, big);
+                plain(app, ui, &video_id, &lyrics, big);
             } else {
                 synced(app, ui, &video_id, &lyrics, big);
             }
@@ -64,7 +71,75 @@ fn message(ui: &mut Ui, text: &str) {
     ui.vertical_centered(|ui| ui.label(RichText::new(text).color(theme::TEXT_DIM)));
 }
 
-fn plain(ui: &mut Ui, lyrics: &Lyrics, big: bool) {
+/// Readings for these lyrics, when they are wanted and Japanese: the
+/// dictionary (once loaded) and the style.
+fn readings_for(app: &App, ui: &Ui, big: bool, texts: &[&str]) -> Option<(&'static Dictionary, Style)> {
+    if !big || !app.settings.lyric_readings || !readings::is_japanese(texts) {
+        return None;
+    }
+    let ctx = ui.ctx().clone();
+    readings::dictionary(move || ctx.request_repaint()).map(|dictionary| (dictionary, app.settings.reading_style))
+}
+
+/// A line of lyrics laid out to `width`, with room above each row for the
+/// readings of its words, and the readings placed.
+fn lay_line(
+    painter: &egui::Painter,
+    text: &str,
+    font: &egui::FontId,
+    width: f32,
+    readings: Option<(&Dictionary, Style)>,
+) -> LaidLine {
+    let base = painter.layout(text.to_owned(), font.clone(), Color32::WHITE, width);
+    let Some((dictionary, style)) = readings else {
+        return (base, Vec::new());
+    };
+    let rubies = readings::readings(dictionary, text, style);
+    if rubies.is_empty() {
+        return (base, Vec::new());
+    }
+    let size = font.size * if style == Style::Kana { 0.44 } else { 0.4 };
+    let ppp = painter.ctx().pixels_per_point();
+    let lift = (size * 1.3 * ppp).round() / ppp;
+    // Each row moved down to make room over it.
+    let mut galley = (*base).clone();
+    let rows = galley.rows.len() as f32;
+    for (i, row) in galley.rows.iter_mut().enumerate() {
+        row.pos.y += lift * (i + 1) as f32;
+    }
+    galley.rect.max.y += lift * rows;
+    galley.mesh_bounds.max.y += lift * rows;
+    let galley = Arc::new(galley);
+    let mut placed = Vec::with_capacity(rubies.len());
+    for ruby in rubies {
+        let a = galley.pos_from_cursor(egui::text::CCursor::new(ruby.start));
+        let b = galley.pos_from_cursor(egui::text::CCursor::new(ruby.end));
+        // A word broken over two rows has its reading over its first part.
+        let (left, right) = if (a.min.y - b.min.y).abs() < 1.0 { (a.min.x, b.min.x) } else { (a.min.x, a.min.x + font.size) };
+        let room = (right - left) + font.size * 0.35;
+        let mut reading = painter.layout_no_wrap(ruby.text.clone(), theme::medium(size), Color32::WHITE);
+        if reading.size().x > room {
+            // Too long for its word: a little smaller, so neighbours stay apart.
+            let fit = (size * room / reading.size().x).max(size * 0.72);
+            reading = painter.layout_no_wrap(ruby.text, theme::medium(fit), Color32::WHITE);
+        }
+        placed.push((pos2((left + right) / 2.0, a.min.y - lift / 2.0), reading));
+    }
+    (galley, placed)
+}
+
+/// Paints a laid line at `at`, its readings a little fainter than it.
+fn paint_line(painter: &egui::Painter, at: Pos2, line: &LaidLine, color: Color32) {
+    painter.galley_with_override_text_color(at, line.0.clone(), color);
+    let faint = color.gamma_multiply(0.72);
+    for (center, reading) in &line.1 {
+        painter.galley_with_override_text_color(at + center.to_vec2() - reading.size() / 2.0, reading.clone(), faint);
+    }
+}
+
+fn plain(app: &App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, big: bool) {
+    let texts: Vec<&str> = lyrics.text.lines().collect();
+    let readings = readings_for(app, ui, big, &texts);
     egui::ScrollArea::vertical()
         .id_salt("plain-lyrics")
         .auto_shrink([false, false])
@@ -72,7 +147,27 @@ fn plain(ui: &mut Ui, lyrics: &Lyrics, big: bool) {
             ui.add_space(12.0);
             let size = if big { 24.0 } else { 17.0 };
             ui.spacing_mut().item_spacing.y = size * 0.5;
-            ui.add(egui::Label::new(RichText::new(&lyrics.text).font(theme::semibold(size)).color(theme::TEXT)).wrap());
+            if let Some(readings) = readings {
+                // Line by line, each with its readings; laid out once.
+                let width = ui.available_width();
+                let font = theme::semibold(size);
+                let painter = ui.painter().clone();
+                let id = ui.id().with(("plain-readings", video_id, width.round() as i32, readings.1));
+                let laid: Arc<Vec<LaidLine>> = ui.data(|d| d.get_temp(id)).unwrap_or_else(|| {
+                    let laid = Arc::new(texts.iter().map(|t| lay_line(&painter, t, &font, width, Some(readings))).collect());
+                    ui.data_mut(|d| d.insert_temp(id, Arc::clone(&laid)));
+                    laid
+                });
+                ui.spacing_mut().item_spacing.y = size * 0.3;
+                for line in laid.iter() {
+                    let (rect, _) = ui.allocate_exact_size(vec2(width, line.0.size().y.max(size * 0.6)), Sense::hover());
+                    if ui.is_rect_visible(rect) {
+                        paint_line(ui.painter(), rect.min, line, theme::TEXT);
+                    }
+                }
+            } else {
+                ui.add(egui::Label::new(RichText::new(&lyrics.text).font(theme::semibold(size)).color(theme::TEXT)).wrap());
+            }
             if let Some(source) = &lyrics.source {
                 ui.add_space(20.0);
                 ui.label(RichText::new(source).color(theme::TEXT_FAINT).font(theme::regular(12.5)));
@@ -104,17 +199,17 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, big: bool
     let dots_h = size * 0.9;
 
     // Where each line sits, from the top of the lyrics.
-    // Laid out once per song, size and width, not every frame.
-    type Laid = std::sync::Arc<Vec<Option<std::sync::Arc<egui::Galley>>>>;
+    // Laid out once per song, size, width and readings, not every frame.
+    type Laid = Arc<Vec<Option<LaidLine>>>;
+    let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+    let readings = readings_for(app, ui, big, &texts);
     let scale = (ui.ctx().pixels_per_point() * 100.0).round() as i32;
-    let layout_id = ui.id().with(("lyrics-layout", video_id, width.round() as i32, big, scale));
+    let layout_id = ui.id().with(("lyrics-layout", video_id, width.round() as i32, big, scale, readings.map(|r| r.1)));
     let galleys: Laid = ui.data(|d| d.get_temp(layout_id)).unwrap_or_else(|| {
-        let laid: Laid = std::sync::Arc::new(
+        let laid: Laid = Arc::new(
             lines
                 .iter()
-                .map(|line| {
-                    (!line.text.is_empty()).then(|| painter.layout(line.text.clone(), font.clone(), Color32::WHITE, width))
-                })
+                .map(|line| (!line.text.is_empty()).then(|| lay_line(&painter, &line.text, &font, width, readings)))
                 .collect(),
         );
         ui.data_mut(|d| d.insert_temp(layout_id, laid.clone()));
@@ -125,7 +220,7 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, big: bool
     for (i, galley) in galleys.iter().enumerate() {
         tops.push(y);
         let h = match galley {
-            Some(galley) => galley.size().y,
+            Some((galley, _)) => galley.size().y,
             // A break takes room only while it is the one playing.
             None if current == Some(i) => dots_h,
             None => 0.0,
@@ -135,7 +230,7 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, big: bool
     let total = y;
     let height_of = |i: usize| -> f32 {
         match &galleys[i] {
-            Some(galley) => galley.size().y,
+            Some((galley, _)) => galley.size().y,
             None if current == Some(i) => dots_h,
             None => 0.0,
         }
@@ -223,7 +318,7 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, big: bool
         let edge = ((top - rect.top()) / fade).min((rect.bottom() - top - h) / fade).clamp(0.0, 1.0);
         let alpha = alpha * (0.25 + 0.75 * edge);
         match &galleys[i] {
-            Some(galley) => {
+            Some(laid) => {
                 let hovered = pointer.is_some_and(|p| line_rect.expand2(vec2(pad, gap / 2.0)).contains(p));
                 if hovered {
                     painter.rect_filled(line_rect.expand2(vec2(pad, gap / 3.0)), CornerRadius::same(8), Color32::from_white_alpha(12));
@@ -233,7 +328,7 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, big: bool
                     }
                 }
                 let color = Color32::from_white_alpha((alpha * 255.0) as u8);
-                painter.galley_with_override_text_color(line_rect.min, galley.clone(), color);
+                paint_line(&painter, line_rect.min, laid, color);
             }
             None => {
                 let next = lines.get(i + 1).map_or(line.time + 4.0, |l| l.time);

@@ -2725,7 +2725,7 @@ dependencies = [
 
 [[package]]
 name = "native-ytm"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "directories",
@@ -2746,6 +2746,7 @@ dependencies = [
  "image",
  "log",
  "md-5",
+ "miniz_oxide 0.8.9",
  "parking_lot",
  "raw-window-handle",
  "reqwest",

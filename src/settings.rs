@@ -34,6 +34,11 @@ pub struct Settings {
     pub normalize: bool,
     /// Keep playing related songs when the queue runs out.
     pub autoplay: bool,
+    /// Songs follow one another without a pause (off: a moment of silence).
+    pub gapless: bool,
+    /// Each song fades into the next, over `crossfade_secs`.
+    pub crossfade: bool,
+    pub crossfade_secs: f32,
     pub repeat: Repeat,
     pub shuffle: bool,
     /// Closing the window keeps the music playing in the tray.
@@ -52,6 +57,13 @@ pub struct Settings {
     pub cached_songs: u32,
     /// Look up synced lyrics on LRCLIB.
     pub synced_lyrics: bool,
+    /// The equaliser, its bands in dB, and the preset they came from.
+    pub eq: bool,
+    pub eq_gains: [f32; 10],
+    pub eq_preset: String,
+    /// Readings over Japanese lyrics, in the full-window player.
+    pub lyric_readings: bool,
+    pub reading_style: crate::readings::Style,
     /// Show what plays on Discord.
     pub discord: bool,
     /// Another Discord application than the default, whose name shows.
@@ -78,6 +90,9 @@ impl Default for Settings {
             muted: false,
             normalize: true,
             autoplay: true,
+            gapless: true,
+            crossfade: false,
+            crossfade_secs: 6.0,
             repeat: Repeat::Off,
             shuffle: false,
             close_to_tray: true,
@@ -88,6 +103,11 @@ impl Default for Settings {
             premium_quality: true,
             cached_songs: 100,
             synced_lyrics: true,
+            eq: false,
+            eq_gains: [0.0; 10],
+            eq_preset: "Flat".into(),
+            lyric_readings: true,
+            reading_style: crate::readings::Style::Romaji,
             discord: true,
             discord_client_id: String::new(),
             scrobble: true,
@@ -109,6 +129,16 @@ pub struct Session {
     pub current: Option<usize>,
     pub position_secs: f64,
     pub playlist_id: Option<String>,
+}
+
+impl Settings {
+    /// How songs follow one another, for the player: the crossfade (zero:
+    /// none), and the silence between songs (zero: gapless).
+    pub fn transitions(&self) -> (std::time::Duration, std::time::Duration) {
+        let crossfade = if self.crossfade { self.crossfade_secs.clamp(1.0, 12.0) } else { 0.0 };
+        let gap = if self.gapless || self.crossfade { 0.0 } else { 1.2 };
+        (std::time::Duration::from_secs_f32(crossfade), std::time::Duration::from_secs_f32(gap))
+    }
 }
 
 pub struct Paths {

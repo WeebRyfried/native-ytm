@@ -1,6 +1,6 @@
 [package]
 name = "native-ytm"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
@@ -52,6 +52,9 @@ unsafe-libopus = "0.2"
 # Sample-rate conversion to whatever rate the output device runs at.
 rubato = "5"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+# The readings table for Japanese lyrics is DEFLATE-compressed; the PNG
+# decoder already builds this inflater.
+miniz_oxide = "0.8"
 
 [target.'cfg(windows)'.dependencies]
 # DPAPI for the signed-in cookie, the title bar's colours, and message boxes.

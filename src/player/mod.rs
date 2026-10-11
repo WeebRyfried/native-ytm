@@ -6,6 +6,7 @@
 //! failed; the app decides what plays next. A stream given with
 //! [`Player::preload`] starts the moment the current one ends, with no gap.
 
+pub mod eq;
 mod opus;
 pub mod output;
 mod resample;
@@ -95,8 +96,16 @@ enum Command {
     Preload {
         token: u64,
         stream: StreamInfo,
+        /// Whether it may fade in over the end of the song before it.
+        crossfade: bool,
     },
     ClearPreload,
+    /// How songs follow one another: a crossfade this long (zero: none),
+    /// or else silence this long between them (zero: gapless).
+    Transitions {
+        crossfade: Duration,
+        gap: Duration,
+    },
     /// A better stream of the token playing, to carry on from without a
     /// break.
     Upgrade {
@@ -168,6 +177,7 @@ pub struct Player {
     report: Arc<Report>,
     volume: Arc<AtomicU32>,
     knob: f32,
+    eq: Arc<eq::EqControl>,
 }
 
 impl Player {
@@ -187,7 +197,9 @@ impl Player {
         });
         let report = Arc::new(Report::default());
         let volume = Arc::new(AtomicU32::new(curve(0.8).to_bits()));
+        let eq = Arc::new(eq::EqControl::default());
         let engine = Engine {
+            eq: eq.clone(),
             rx,
             pending: VecDeque::new(),
             events,
@@ -211,6 +223,9 @@ impl Player {
             normalize,
             last_maintain: Instant::now(),
             pause_due: None,
+            crossfade: Duration::ZERO,
+            gap: Duration::ZERO,
+            incoming: None,
         };
         std::thread::Builder::new()
             .name("player".into())
@@ -222,7 +237,13 @@ impl Player {
             report,
             volume,
             knob: 0.8,
+            eq,
         }
+    }
+
+    /// The equaliser: on or off, and its bands in dB.
+    pub fn set_eq(&self, on: bool, gains: &[f32; 10]) {
+        self.eq.set(on, gains);
     }
 
     fn interrupt(&self) {
@@ -249,8 +270,16 @@ impl Player {
         });
     }
 
-    pub fn preload(&self, token: u64, stream: StreamInfo) {
-        let _ = self.tx.send(Command::Preload { token, stream });
+    /// The song after this one, to start without a gap, or fading in over
+    /// this one's end when `crossfade` allows and crossfades are on.
+    pub fn preload(&self, token: u64, stream: StreamInfo, crossfade: bool) {
+        let _ = self.tx.send(Command::Preload { token, stream, crossfade });
+    }
+
+    /// Crossfades of `crossfade` (zero: none); otherwise `gap` of silence
+    /// between songs (zero: gapless).
+    pub fn set_transitions(&self, crossfade: Duration, gap: Duration) {
+        let _ = self.tx.send(Command::Transitions { crossfade, gap });
     }
 
     pub fn clear_preload(&self) {
@@ -391,6 +420,31 @@ struct Next {
     stream: StreamInfo,
     /// The download, started early so the switch does not wait for it.
     opened: Option<(RemoteSource, Arc<source::Shared>)>,
+    crossfade: bool,
+}
+
+/// The next song fading in over the end of the one playing.
+struct Incoming {
+    token: u64,
+    stream: StreamInfo,
+    decoding: Decoding,
+    /// Its decoded samples not yet mixed in.
+    fifo: VecDeque<f32>,
+    /// The fade's length, and how far it has come, in output frames.
+    total: usize,
+    done: usize,
+    /// Its own time at the next frame mixed in.
+    time: Duration,
+}
+
+/// What one packet of a stream gave.
+enum Block {
+    Samples(Vec<f32>),
+    /// The stream's end, with the resampler's last samples.
+    End(Vec<f32>),
+    Nothing,
+    Interrupted,
+    Failed { message: String, expired: bool },
 }
 
 enum OpenError {
@@ -409,6 +463,7 @@ struct Engine {
     shared: Arc<Shared>,
     report: Arc<Report>,
     volume: Arc<AtomicU32>,
+    eq: Arc<eq::EqControl>,
     queue: Arc<Mutex<Queue>>,
     output: Option<Output<Renderer>>,
     output_retry: Option<Instant>,
@@ -424,6 +479,9 @@ struct Engine {
     last_maintain: Instant,
     /// When the device stops, once a pause has settled (SETTLE).
     pause_due: Option<Instant>,
+    crossfade: Duration,
+    gap: Duration,
+    incoming: Option<Incoming>,
 }
 
 impl Engine {
@@ -516,7 +574,7 @@ impl Engine {
         if self.output_retry.is_some_and(|at| Instant::now() < at) {
             return false;
         }
-        let renderer = Renderer::new(self.queue.clone(), self.report.clone(), self.volume.clone());
+        let renderer = Renderer::new(self.queue.clone(), self.report.clone(), self.volume.clone(), self.eq.clone());
         let options = OutputOptions {
             buffer: Buffer::FixedOnWindows(BufferSize::Duration(Duration::from_millis(100))),
             ..OutputOptions::default()
@@ -577,6 +635,7 @@ impl Engine {
             } => {
                 self.current = None;
                 self.next = None;
+                self.incoming = None;
                 self.cut();
                 self.report.drained.store(false, Ordering::SeqCst);
                 self.report.audible.store(0, Ordering::SeqCst);
@@ -622,8 +681,10 @@ impl Engine {
                     }
                 }
             }
-            Command::Preload { token, stream } => {
-                if self.next.as_ref().is_some_and(|next| next.token == token) {
+            Command::Preload { token, stream, crossfade } => {
+                if self.next.as_ref().is_some_and(|next| next.token == token)
+                    || self.incoming.as_ref().is_some_and(|incoming| incoming.token == token)
+                {
                     return;
                 }
                 let opened = self.source_for(&stream);
@@ -631,12 +692,26 @@ impl Engine {
                     token,
                     stream,
                     opened: Some(opened),
+                    crossfade,
                 });
                 // A stream that had already ended can go on now.
                 self.queue.lock().end_of_stream = false;
                 self.ended_sent = false;
             }
             Command::ClearPreload => {
+                if let Some(incoming) = &self.incoming {
+                    if self.report.audible.load(Ordering::SeqCst) == incoming.token {
+                        // Already heard: the app has moved on to it.
+                        return;
+                    }
+                    // Not heard yet: the song playing goes on alone, decoded
+                    // again from where it is heard.
+                    self.incoming = None;
+                    self.next = None;
+                    let at = Duration::from_nanos(self.report.position_ns.load(Ordering::SeqCst));
+                    self.seek(at);
+                    return;
+                }
                 self.next = None;
                 let finished = self.current.as_ref().is_none_or(|d| d.finished);
                 if finished {
@@ -659,9 +734,14 @@ impl Engine {
             }
             Command::Upgrade { token, stream } => self.upgrade(token, stream),
             Command::Seek(to) => self.seek(to),
+            Command::Transitions { crossfade, gap } => {
+                self.crossfade = crossfade;
+                self.gap = gap;
+            }
             Command::Stop => {
                 self.current = None;
                 self.next = None;
+                self.incoming = None;
                 self.cut();
                 self.report.audible.store(0, Ordering::SeqCst);
                 *self.shared.source.lock() = None;
@@ -690,6 +770,20 @@ impl Engine {
         // The heard track may be a preloaded one the decoder already
         // finished; seeking means going back to it.
         let audible = self.report.audible.load(Ordering::SeqCst);
+        // Mid-crossfade: the song heard is the one to seek in; the other
+        // goes (the next one waiting its turn again).
+        if let Some(incoming) = self.incoming.take() {
+            if audible == incoming.token {
+                self.current = Some(incoming.decoding);
+            } else {
+                self.next = Some(Next {
+                    token: incoming.token,
+                    stream: incoming.stream,
+                    opened: None,
+                    crossfade: true,
+                });
+            }
+        }
         let (fade_out, fade_in, channels) = self.cut_params();
         let Some(decoding) = &mut self.current else {
             *self.shared.seek_to.lock() = None;
@@ -780,7 +874,7 @@ impl Engine {
     /// new stream and crossfaded, so the join cannot click.
     fn upgrade(&mut self, token: u64, mut stream: StreamInfo) {
         let (out_rate, _) = self.out_format();
-        let Some(old) = self.current.as_ref().filter(|d| d.token == token && !d.finished) else {
+        let Some(old) = self.current.as_ref().filter(|d| d.token == token && !d.finished && self.incoming.is_none()) else {
             self.send(Event::UpgradeFailed(token));
             return;
         };
@@ -932,7 +1026,7 @@ impl Engine {
             return false;
         }
         let work = match &self.current {
-            Some(decoding) => !decoding.finished || self.next.is_some(),
+            Some(decoding) => !decoding.finished || self.next.is_some() || self.incoming.is_some(),
             None => false,
         };
         let queued = self.queued();
@@ -966,36 +1060,32 @@ impl Engine {
     fn decode_one(&mut self) -> bool {
         let (out_rate, out_channels) = self.out_format();
         let normalize = self.normalize;
+        if self.incoming.is_some() {
+            return self.crossfade_step(out_rate, out_channels, normalize);
+        }
+        if self.crossfade_due() {
+            self.start_crossfade(out_rate);
+            if self.incoming.is_some() {
+                return true;
+            }
+        }
         let Some(decoding) = &mut self.current else {
             return false;
         };
         if decoding.finished {
             return self.switch_to_next();
         }
-        let packet = match decoding.format.next_packet() {
-            Ok(Some(packet)) => packet,
-            Ok(None) | Err(SymError::ResetRequired) => {
-                decoding.finish(&self.queue, out_rate, out_channels);
+        match decoding.next_block(out_rate, out_channels, normalize) {
+            Block::Samples(samples) => decoding.deliver(&self.queue, &samples, out_rate, out_channels),
+            Block::End(samples) => {
+                decoding.deliver(&self.queue, &samples, out_rate, out_channels);
                 if self.next.is_none() {
                     self.queue.lock().end_of_stream = true;
                 }
-                return true;
             }
-            Err(error) => {
-                let message = error.to_string();
-                if message.contains("interrupted") {
-                    return false;
-                }
-                let expired = matches!(decoding.source.error(), Some(SourceError::Forbidden));
-                if decoding.source.error().is_none() && matches!(error, SymError::IoError(_)) {
-                    // The demuxer ran past the end of a file whose length
-                    // was a little off: treat it as the end.
-                    decoding.finish(&self.queue, out_rate, out_channels);
-                    if self.next.is_none() {
-                        self.queue.lock().end_of_stream = true;
-                    }
-                    return true;
-                }
+            Block::Nothing => {}
+            Block::Interrupted => return false,
+            Block::Failed { message, expired } => {
                 let token = decoding.token;
                 let position = decoding.next_time;
                 log::warn!("stream failed: {message}");
@@ -1008,48 +1098,140 @@ impl Engine {
                 });
                 return false;
             }
-        };
-        if packet.track_id != decoding.track_id {
-            return true;
         }
-        let decoded = match &mut decoding.decoder {
-            Decoder::Symphonia(decoder) => match decoder.decode(&packet) {
-                Ok(buffer) => {
-                    let format = (buffer.spec().rate(), buffer.spec().channels().count().max(1));
-                    decoding.scratch.clear();
-                    buffer.copy_to_vec_interleaved(&mut decoding.scratch);
-                    Ok(format)
-                }
-                Err(SymError::DecodeError(error)) => Err(format!("decode error: {error}")),
-                Err(error) => {
-                    log::warn!("decoder: {error}");
+        true
+    }
+
+    /// The song playing is within a crossfade of its end, and the next may
+    /// fade in over it.
+    fn crossfade_due(&self) -> bool {
+        if self.crossfade.is_zero() || !self.next.as_ref().is_some_and(|next| next.crossfade) {
+            return false;
+        }
+        let Some(current) = &self.current else {
+            return false;
+        };
+        let Some(duration) = current.stream.duration.filter(|_| !current.finished && current.blend_left == 0) else {
+            return false;
+        };
+        let left = duration.saturating_sub(current.next_time);
+        // A fade much shorter than asked for is not worth it.
+        left <= self.crossfade && left >= Duration::from_millis(800)
+    }
+
+    /// Opens the next song to fade in over what is left of this one.
+    fn start_crossfade(&mut self, out_rate: u32) {
+        let left = match self.current.as_ref().and_then(|c| Some(c.stream.duration?.saturating_sub(c.next_time))) {
+            Some(left) => left,
+            None => return,
+        };
+        let Some(mut next) = self.next.take() else {
+            return;
+        };
+        let opened = next.opened.take();
+        match self.open(next.token, next.stream.clone(), Duration::ZERO, opened) {
+            Ok(decoding) => {
+                log::info!("crossfading over {:.1} s", left.as_secs_f64());
+                self.incoming = Some(Incoming {
+                    token: next.token,
+                    stream: next.stream,
+                    decoding,
+                    fifo: VecDeque::new(),
+                    total: (duration_to_frames(left, out_rate) as usize).max(1),
+                    done: 0,
+                    time: Duration::ZERO,
+                });
+            }
+            Err(OpenError::Interrupted) => self.next = Some(next),
+            Err(OpenError::Failed { message, expired }) => {
+                // The song playing ends on its own; the app hears why the
+                // next could not follow.
+                self.send(Event::Failed {
+                    token: next.token,
+                    message,
+                    expired,
+                    position: Duration::ZERO,
+                });
+            }
+        }
+    }
+
+    /// One packet of the song ending, mixed with as much of the song coming
+    /// in: the one fading out as the other fades in, at equal power. The
+    /// mix goes into the queue as the new song's, so it is shown from the
+    /// fade's start.
+    fn crossfade_step(&mut self, out_rate: u32, out_channels: usize, normalize: bool) -> bool {
+        let channels = out_channels.max(1);
+        let (samples, ended) = match self.current.as_mut().map(|c| c.next_block(out_rate, out_channels, normalize)) {
+            Some(Block::Samples(samples)) => (samples, false),
+            Some(Block::End(samples)) => (samples, true),
+            Some(Block::Nothing) => return true,
+            Some(Block::Interrupted) => return false,
+            Some(Block::Failed { message, .. }) => {
+                // The song ending gives out early: the new one carries on.
+                log::warn!("stream failed in a crossfade: {message}");
+                (Vec::new(), true)
+            }
+            None => (Vec::new(), true),
+        };
+        let Some(incoming) = self.incoming.as_mut() else {
+            return false;
+        };
+        // Enough of the new song to mix with.
+        while incoming.fifo.len() < samples.len() && !incoming.decoding.finished {
+            match incoming.decoding.next_block(out_rate, out_channels, normalize) {
+                Block::Samples(more) | Block::End(more) => incoming.fifo.extend(more),
+                Block::Nothing => {}
+                Block::Interrupted => return false,
+                Block::Failed { message, expired } => {
+                    let token = incoming.token;
+                    self.incoming = None;
+                    log::warn!("the song fading in failed: {message}");
+                    self.send(Event::Failed {
+                        token,
+                        message,
+                        expired,
+                        position: Duration::ZERO,
+                    });
+                    if let Some(current) = &mut self.current {
+                        current.deliver(&self.queue, &samples, out_rate, out_channels);
+                    }
                     return true;
                 }
-            },
-            Decoder::Opus(decoder) => decoder
-                .decode(&packet.data, &mut decoding.scratch)
-                .map(|()| (opus::RATE, decoder.channels)),
-        };
-        match decoded {
-            Ok((in_rate, in_channels)) => {
-                let gain = if normalize {
-                    decoding.stream.loudness_db.map_or(1.0, |db| {
-                        // YouTube only turns loud tracks down.
-                        if db > 0.0 { 10f32.powf(-db / 20.0) } else { 1.0 }
-                    })
-                } else {
-                    1.0
-                };
-                decoding.push(
-                    &self.queue,
-                    in_rate,
-                    in_channels,
-                    out_rate,
-                    out_channels,
-                    gain,
-                );
             }
-            Err(error) => log::debug!("{error}"),
+        }
+        let frames = samples.len() / channels;
+        let total = incoming.total as f32;
+        let mut mixed = Vec::with_capacity(samples.len());
+        for (f, frame) in samples.chunks_exact(channels).enumerate() {
+            let t = ((incoming.done + f) as f32 / total).min(1.0) * std::f32::consts::FRAC_PI_2;
+            let (out_gain, in_gain) = (t.cos(), t.sin());
+            for &sample in frame {
+                mixed.push(sample * out_gain + incoming.fifo.pop_front().unwrap_or(0.0) * in_gain);
+            }
+        }
+        incoming.done += frames;
+        self.queue.lock().push(incoming.token, incoming.time, &mixed, channels, out_rate);
+        incoming.time += frames_to_time(frames, out_rate);
+        if let Some(current) = &mut self.current {
+            current.next_time += frames_to_time(frames, out_rate);
+        }
+        if ended || incoming.done >= incoming.total {
+            // Over: the new song is the one playing, the rest of the old
+            // one (silent by now) let go.
+            let Some(incoming) = self.incoming.take() else {
+                return true;
+            };
+            let rest: Vec<f32> = incoming.fifo.into_iter().collect();
+            let mut decoding = incoming.decoding;
+            decoding.next_time = incoming.time;
+            decoding.deliver(&self.queue, &rest, out_rate, out_channels);
+            *self.shared.source.lock() = Some(decoding.source.clone());
+            let finished = decoding.finished;
+            self.current = Some(decoding);
+            if finished && self.next.is_none() {
+                self.queue.lock().end_of_stream = true;
+            }
         }
         true
     }
@@ -1063,6 +1245,12 @@ impl Engine {
         let opened = next.opened.take();
         match self.open(next.token, next.stream.clone(), Duration::ZERO, opened) {
             Ok(decoding) => {
+                if !self.gap.is_zero() {
+                    // Gapless playback off: a moment of silence first.
+                    let (rate, channels) = self.out_format();
+                    let frames = duration_to_frames(self.gap, rate) as usize;
+                    self.queue.lock().push(0, Duration::ZERO, &vec![0.0; frames * channels], channels, rate);
+                }
                 self.current = Some(decoding);
                 true
             }
@@ -1088,7 +1276,7 @@ impl Engine {
         let audible = self.report.audible.load(Ordering::SeqCst);
         if audible != 0 && audible != self.last_audible {
             self.last_audible = audible;
-            let duration = [self.current.as_ref()]
+            let duration = [self.current.as_ref(), self.incoming.as_ref().map(|i| &i.decoding)]
                 .into_iter()
                 .flatten()
                 .find(|d| d.token == audible)
@@ -1185,15 +1373,74 @@ impl Decoding {
         self.converter.as_mut().expect("just made")
     }
 
-    fn push(
-        &mut self,
-        queue: &Mutex<Queue>,
-        in_rate: u32,
-        in_channels: usize,
-        out_rate: u32,
-        out_channels: usize,
-        gain: f32,
-    ) {
+    /// Decodes one packet into output samples (the output's rate and
+    /// channels). The time is left for whoever takes the samples to move.
+    fn next_block(&mut self, out_rate: u32, out_channels: usize, normalize: bool) -> Block {
+        if self.finished {
+            return Block::End(Vec::new());
+        }
+        let packet = match self.format.next_packet() {
+            Ok(Some(packet)) => packet,
+            Ok(None) | Err(SymError::ResetRequired) => return Block::End(self.flush(out_channels)),
+            Err(error) => {
+                let message = error.to_string();
+                if message.contains("interrupted") {
+                    return Block::Interrupted;
+                }
+                if self.source.error().is_none() && matches!(error, SymError::IoError(_)) {
+                    // The demuxer ran past the end of a file whose length
+                    // was a little off: treat it as the end.
+                    return Block::End(self.flush(out_channels));
+                }
+                return Block::Failed {
+                    expired: matches!(self.source.error(), Some(SourceError::Forbidden)),
+                    message,
+                };
+            }
+        };
+        if packet.track_id != self.track_id {
+            return Block::Nothing;
+        }
+        let decoded = match &mut self.decoder {
+            Decoder::Symphonia(decoder) => match decoder.decode(&packet) {
+                Ok(buffer) => {
+                    let format = (buffer.spec().rate(), buffer.spec().channels().count().max(1));
+                    self.scratch.clear();
+                    buffer.copy_to_vec_interleaved(&mut self.scratch);
+                    Ok(format)
+                }
+                Err(SymError::DecodeError(error)) => Err(format!("decode error: {error}")),
+                Err(error) => {
+                    log::warn!("decoder: {error}");
+                    return Block::Nothing;
+                }
+            },
+            Decoder::Opus(decoder) => decoder
+                .decode(&packet.data, &mut self.scratch)
+                .map(|()| (opus::RATE, decoder.channels)),
+        };
+        match decoded {
+            Ok((in_rate, in_channels)) => {
+                let gain = if normalize {
+                    self.stream.loudness_db.map_or(1.0, |db| {
+                        // YouTube only turns loud tracks down.
+                        if db > 0.0 { 10f32.powf(-db / 20.0) } else { 1.0 }
+                    })
+                } else {
+                    1.0
+                };
+                Block::Samples(self.produce(in_rate, in_channels, out_rate, out_channels, gain))
+            }
+            Err(error) => {
+                log::debug!("{error}");
+                Block::Nothing
+            }
+        }
+    }
+
+    /// The packet just decoded, past any frames to skip, mapped to the
+    /// output's channels and resampled to its rate.
+    fn produce(&mut self, in_rate: u32, in_channels: usize, out_rate: u32, out_channels: usize, gain: f32) -> Vec<f32> {
         let mut frames = std::mem::take(&mut self.scratch);
         if self.skip_frames > 0 {
             let available = (frames.len() / in_channels) as u64;
@@ -1203,43 +1450,40 @@ impl Decoding {
         }
         let mapped = remix(&frames, in_channels, out_channels, gain);
         self.scratch = frames;
-        let token = self.token;
-        let mut next_time = self.next_time;
-        let (mut blend_left, blend_total) = (self.blend_left, self.blend_total);
-        let converter = self.converter(in_rate, out_rate, out_channels);
-        converter.process(&mapped, &mut |block| {
-            let mut queue = queue.lock();
-            let mut block = block;
-            if blend_left > 0 {
-                // The overlap: into the queue's tail, or dropped if that
-                // has already been heard; either way not appended twice.
-                let n = (block.len() / out_channels).min(blend_left);
-                let (overlap, rest) = block.split_at(n * out_channels);
-                queue.blend(token, overlap, out_channels, blend_left, blend_total);
-                blend_left -= n;
-                next_time += frames_to_time(n, out_rate);
-                block = rest;
-            }
-            queue.push(token, next_time, block, out_channels, out_rate);
-            next_time += frames_to_time(block.len() / out_channels, out_rate);
-        });
-        self.next_time = next_time;
-        self.blend_left = blend_left;
+        let mut out = Vec::with_capacity(mapped.len() * 2);
+        self.converter(in_rate, out_rate, out_channels)
+            .process(&mapped, &mut |block| out.extend_from_slice(block));
+        out
     }
 
-    fn finish(&mut self, queue: &Mutex<Queue>, out_rate: u32, out_channels: usize) {
+    /// The end: what the resampler still holds.
+    fn flush(&mut self, out_channels: usize) -> Vec<f32> {
         self.finished = true;
-        let token = self.token;
-        let mut next_time = self.next_time;
+        let mut out = Vec::new();
         if let Some(converter) = &mut self.converter {
-            converter.finish(&mut |block| {
-                queue
-                    .lock()
-                    .push(token, next_time, block, out_channels, out_rate);
-                next_time += frames_to_time(block.len() / out_channels, out_rate);
-            });
+            converter.finish(&mut |block| out.extend_from_slice(block));
         }
-        self.next_time = next_time;
+        let _ = out_channels;
+        out
+    }
+
+    /// Into the queue, the time moving on with it. While a better stream is
+    /// taking over, its first frames are mixed into the queue's tail
+    /// instead (or dropped if that was heard): never appended twice.
+    fn deliver(&mut self, queue: &Mutex<Queue>, samples: &[f32], out_rate: u32, out_channels: usize) {
+        let channels = out_channels.max(1);
+        let mut block = samples;
+        let mut queue = queue.lock();
+        if self.blend_left > 0 {
+            let n = (block.len() / channels).min(self.blend_left);
+            let (overlap, rest) = block.split_at(n * channels);
+            queue.blend(self.token, overlap, channels, self.blend_left, self.blend_total);
+            self.blend_left -= n;
+            self.next_time += frames_to_time(n, out_rate);
+            block = rest;
+        }
+        queue.push(self.token, self.next_time, block, channels, out_rate);
+        self.next_time += frames_to_time(block.len() / channels, out_rate);
     }
 }
 

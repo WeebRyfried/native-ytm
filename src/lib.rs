@@ -14,6 +14,7 @@ pub mod net;
 pub mod platform;
 pub mod player;
 pub mod queue;
+pub mod readings;
 pub mod settings;
 pub mod stream;
 pub mod theme;

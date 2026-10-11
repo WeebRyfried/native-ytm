@@ -56,9 +56,10 @@ impl Queue {
     /// is pushed next fades in over `fade_in` frames.
     pub fn cut(&mut self, fade_out: usize, fade_in: usize, channels: usize) {
         let channels = channels.max(1);
-        // Still fading out from an earlier cut: that fade stands.
+        // Still fading out from an earlier cut: that fade stands (and a
+        // silence between songs is cut short like anything else).
         let keep = match self.runs.front().filter(|run| run.token == 0) {
-            Some(run) => run.frames,
+            Some(run) => run.frames.min(fade_out),
             None => {
                 let keep = fade_out.min(self.frames(channels));
                 for i in 0..keep {
@@ -200,10 +201,12 @@ pub struct Renderer {
     rate: u32,
     /// Held and already faded out.
     silent: bool,
+    eq_control: Arc<super::eq::EqControl>,
+    eq: super::eq::Equalizer,
 }
 
 impl Renderer {
-    pub fn new(queue: Arc<Mutex<Queue>>, report: Arc<Report>, volume: Arc<AtomicU32>) -> Self {
+    pub fn new(queue: Arc<Mutex<Queue>>, report: Arc<Report>, volume: Arc<AtomicU32>, eq_control: Arc<super::eq::EqControl>) -> Self {
         Self {
             queue,
             report,
@@ -212,6 +215,8 @@ impl Renderer {
             channels: 2,
             rate: 48_000,
             silent: false,
+            eq_control,
+            eq: super::eq::Equalizer::default(),
         }
     }
 }
@@ -282,6 +287,8 @@ impl fastframe_audio::Render for Renderer {
         let end = queue.end_of_stream;
         drop(queue);
         out[written * channels..].fill(0.0);
+        // The equaliser, on what is heard now: a change is heard at once.
+        self.eq.process(&self.eq_control, &mut out[..written * channels], self.rate, channels);
         if hold {
             // From where the volume was down to silence.
             let n = written.max(1) as f32;
@@ -365,7 +372,7 @@ mod tests {
         let queue = Arc::new(Mutex::new(Queue::default()));
         let report = Arc::new(Report::default());
         let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
-        let mut renderer = Renderer::new(queue.clone(), report.clone(), volume);
+        let mut renderer = Renderer::new(queue.clone(), report.clone(), volume, Arc::default());
         // Ten frames of fade at 1 kHz.
         renderer.configure(1000, 1);
         queue.lock().push(1, Duration::ZERO, &[1.0; 100], 1, 1000);

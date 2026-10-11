@@ -72,6 +72,30 @@ fn playback(ui: &mut Ui, draft: &mut Settings) {
         toggle_row(ui, "Even out loudness", "Loud songs are turned down to match the rest, as YouTube Music does.", &mut draft.normalize);
         divider(ui);
         toggle_row(ui, "Pick up where you left off", "Open with the last queue, at the same moment of the same song.", &mut draft.restore_session);
+        divider(ui);
+        toggle_row(ui, "Gapless playback", "Songs follow one another without a pause. Off, a moment of silence between songs.", &mut draft.gapless);
+        divider(ui);
+        toggle_row(
+            ui,
+            "Crossfade",
+            "Each song fades into the next. Songs of the same album still follow without one, as they were made to.",
+            &mut draft.crossfade,
+        );
+        if draft.crossfade {
+            ui.horizontal(|ui| {
+                ui.add_space(2.0);
+                ui.label(RichText::new("Fade over").color(theme::TEXT_DIM));
+                ui.spacing_mut().slider_width = (ui.available_width() - 150.0).clamp(160.0, 420.0);
+                ui.add(
+                    egui::Slider::new(&mut draft.crossfade_secs, 1.0..=12.0)
+                        .step_by(1.0)
+                        .suffix(" s")
+                        .fixed_decimals(0)
+                        .trailing_fill(true),
+                );
+            });
+            ui.add_space(14.0);
+        }
     });
 }
 
@@ -104,7 +128,79 @@ fn quality(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
         }
         divider(ui);
         toggle_row(ui, "Synced lyrics", "Lyrics that follow the song, line by line, from LRCLIB, an open lyrics library. Otherwise YouTube Music's own.", &mut draft.synced_lyrics);
+        divider(ui);
+        toggle_row(
+            ui,
+            "Readings over Japanese lyrics",
+            "In the full-window player, how each word sounds, set small over it: romaji, or furigana over the kanji.",
+            &mut draft.lyric_readings,
+        );
+        if draft.lyric_readings {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                for (style, label) in [(crate::readings::Style::Romaji, "Romaji"), (crate::readings::Style::Kana, "Furigana")] {
+                    if widgets::chip(ui, label, draft.reading_style == style).clicked() {
+                        draft.reading_style = style;
+                    }
+                }
+            });
+            ui.add_space(16.0);
+        }
+        divider(ui);
+        toggle_row(ui, "Equalizer", "Shape the sound: more bass, clearer voices, or a curve of your own.", &mut draft.eq);
+        if draft.eq {
+            equalizer(ui, draft);
+        }
     });
+}
+
+/// The equaliser's presets, then its ten bands, each a slider.
+fn equalizer(ui: &mut Ui, draft: &mut Settings) {
+    use crate::player::eq::{BANDS, PRESETS, RANGE};
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+        for (name, gains) in PRESETS {
+            if widgets::chip(ui, name, draft.eq_preset == name).clicked() {
+                draft.eq_gains = gains;
+                draft.eq_preset = name.to_owned();
+            }
+        }
+        if draft.eq_preset == "Custom" {
+            widgets::chip(ui, "Custom", true);
+        }
+    });
+    ui.add_space(12.0);
+    let mut changed = false;
+    let column = ((ui.available_width() - 8.0) / BANDS.len() as f32).max(36.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.spacing_mut().slider_width = 120.0;
+        for (band, freq) in BANDS.iter().enumerate() {
+            ui.allocate_ui_with_layout(vec2(column, 170.0), Layout::top_down(Align::Center), |ui| {
+                let gain = &mut draft.eq_gains[band];
+                // In a box its own width, so the column centres it.
+                let thickness = ui.spacing().interact_size.y;
+                let response = ui
+                    .allocate_ui_with_layout(vec2(thickness, 124.0), Layout::top_down(Align::Center), |ui| {
+                        ui.add(egui::Slider::new(&mut *gain, -RANGE..=RANGE).vertical().step_by(0.5).show_value(false))
+                    })
+                    .inner;
+                if response.double_clicked() {
+                    *gain = 0.0;
+                    changed = true;
+                }
+                changed |= response.changed();
+                let response = response.on_hover_text(format!("{:+.1} dB", *gain));
+                let _ = response;
+                let label = if *freq >= 1000.0 { format!("{}k", freq / 1000.0) } else { format!("{freq}") };
+                ui.label(RichText::new(label).font(theme::regular(11.5)).color(theme::TEXT_DIM));
+            });
+        }
+    });
+    if changed {
+        draft.eq_preset = "Custom".into();
+    }
+    ui.add_space(10.0);
 }
 
 fn storage(app: &mut App, ui: &mut Ui, draft: &mut Settings) {

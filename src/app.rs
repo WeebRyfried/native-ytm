@@ -244,6 +244,9 @@ pub struct App {
     pub hide: bool,
     pub wants_show: bool,
     last_saved: Instant,
+    /// Settings changed and not yet written (a slider being dragged writes
+    /// once it rests).
+    settings_dirty: Option<Instant>,
     pub window_styled: bool,
     pub drag_from: Option<usize>,
     /// A scroll position to jump the page to once (screenshots).
@@ -283,6 +286,9 @@ impl App {
             audio_cache.clone(),
         );
         player.set_volume(if settings.muted { 0.0 } else { settings.volume });
+        player.set_eq(settings.eq, &settings.eq_gains);
+        let (crossfade, gap) = settings.transitions();
+        player.set_transitions(crossfade, gap);
         let ctx = egui::Context::default();
         let images = Images::new(
             ctx.clone(),
@@ -393,6 +399,7 @@ impl App {
             hide: false,
             wants_show: false,
             last_saved: Instant::now(),
+            settings_dirty: None,
             window_styled: false,
             drag_from: None,
             scroll_to: None,
@@ -510,6 +517,12 @@ impl App {
         self.toasts.retain(|t| t.until > Instant::now());
         if self.last_saved.elapsed() > Duration::from_secs(15) {
             self.save_session();
+        }
+        if self.settings_dirty.is_some_and(|at| at.elapsed() > Duration::from_millis(600)) {
+            self.settings_dirty = None;
+            self.save_settings();
+        } else if self.settings_dirty.is_some() {
+            crate::theme::repaint_in(&self.ctx, Duration::from_millis(650));
         }
         let actions = std::mem::take(&mut self.actions);
         for action in actions {
@@ -1281,8 +1294,11 @@ impl App {
             (Purpose::Preload, Ok((stream, _))) => {
                 self.streams
                     .insert(video_id, (stream.clone(), Instant::now()));
-                if self.preload.is_some_and(|(t, _)| t == token) {
-                    self.player.preload(token, stream);
+                if let Some((t, uid)) = self.preload
+                    && t == token
+                {
+                    let crossfade = self.queue.index_of(uid).is_some_and(|i| self.crossfade_into(&self.queue.entries[i].track));
+                    self.player.preload(token, stream, crossfade);
                 }
             }
             (Purpose::Load, Err(error)) => {
@@ -1725,7 +1741,9 @@ impl App {
             return;
         };
         let left = duration.saturating_sub(self.player.position());
-        if left > Duration::from_secs(20) {
+        // Early enough that a crossfade finds it ready.
+        let ahead = Duration::from_secs(20) + self.settings.transitions().0;
+        if left > ahead {
             return;
         }
         let Some(next) = self.queue.next_index(self.settings.repeat, false) else {
@@ -1744,7 +1762,8 @@ impl App {
             .best_stream(&entry.track.video_id)
             .or_else(|| self.audio_cache.lookup(&entry.track.video_id))
         {
-            self.player.preload(token, stream);
+            let crossfade = self.crossfade_into(&entry.track);
+            self.player.preload(token, stream, crossfade);
         } else {
             self.backend.send(Request::Resolve {
                 token,
@@ -1753,6 +1772,16 @@ impl App {
                 start: 0.0,
                 how: How::Full,
             });
+        }
+    }
+
+    /// Whether `next` may fade in over the song playing: not when they are
+    /// one album's, which plays as one piece.
+    fn crossfade_into(&self, next: &Track) -> bool {
+        let album = |t: &Track| t.album.as_ref().and_then(|a| a.id.clone());
+        match (self.current().and_then(album), album(next)) {
+            (Some(a), Some(b)) => a != b,
+            _ => true,
         }
     }
 
@@ -2543,6 +2572,9 @@ impl App {
                 if new.normalize != self.settings.normalize {
                     self.player.set_normalize(new.normalize);
                 }
+                if new.eq != self.settings.eq || new.eq_gains != self.settings.eq_gains {
+                    self.player.set_eq(new.eq, &new.eq_gains);
+                }
                 if new.discord != self.settings.discord || new.discord_client_id != self.settings.discord_client_id {
                     // Dropping it clears the activity and ends its thread.
                     self.presence = None;
@@ -2563,8 +2595,12 @@ impl App {
                 if !new.restore_session {
                     let _ = std::fs::remove_file(self.paths.session());
                 }
+                if new.transitions() != self.settings.transitions() {
+                    let (crossfade, gap) = new.transitions();
+                    self.player.set_transitions(crossfade, gap);
+                }
                 self.settings = new;
-                self.save_settings();
+                self.settings_dirty = Some(Instant::now());
             }
             Action::CopyLink(url) => {
                 self.ctx.copy_text(url);
