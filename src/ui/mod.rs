@@ -29,12 +29,15 @@ impl App {
             self.player.status().state,
             crate::player::State::Playing | crate::player::State::Buffering
         );
+        let online = self.online();
         Cx {
             images: &mut self.images,
             actions: &mut self.actions,
             current,
             playing,
             signed_in: self.signed_in,
+            offline: &self.offline,
+            online,
         }
     }
 }

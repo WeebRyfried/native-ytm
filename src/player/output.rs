@@ -32,6 +32,15 @@ pub struct Queue {
     /// The engine has nothing more to push: once the queue drains, playback
     /// has ended.
     pub end_of_stream: bool,
+    /// Frames still to fade in, of `fade_total`: what is pushed after a cut
+    /// starts from silence rather than with a step.
+    fade_in: usize,
+    fade_total: usize,
+}
+
+/// How long a cut fades out, and what follows it fades in, in frames: 10 ms.
+pub fn fade_frames(rate: u32) -> usize {
+    (rate as usize / 100).max(1)
 }
 
 impl Queue {
@@ -39,6 +48,41 @@ impl Queue {
         self.samples.clear();
         self.runs.clear();
         self.end_of_stream = false;
+        self.fade_in = 0;
+    }
+
+    /// Stops what is queued without a click: its first `fade_out` frames
+    /// stay, fading to silence, under no token (0), and the rest goes. What
+    /// is pushed next fades in over `fade_in` frames.
+    pub fn cut(&mut self, fade_out: usize, fade_in: usize, channels: usize) {
+        let channels = channels.max(1);
+        // Still fading out from an earlier cut: that fade stands.
+        let keep = match self.runs.front().filter(|run| run.token == 0) {
+            Some(run) => run.frames,
+            None => {
+                let keep = fade_out.min(self.frames(channels));
+                for i in 0..keep {
+                    let w = 1.0 - (i + 1) as f32 / (keep + 1) as f32;
+                    for c in 0..channels {
+                        self.samples[i * channels + c] *= w;
+                    }
+                }
+                keep
+            }
+        };
+        self.samples.truncate(keep * channels);
+        self.runs.clear();
+        if keep > 0 {
+            self.runs.push_back(Run {
+                token: 0,
+                start: Duration::ZERO,
+                frames: keep,
+                played: 0,
+            });
+        }
+        self.end_of_stream = false;
+        self.fade_in = fade_in;
+        self.fade_total = fade_in;
     }
 
     /// Frames queued, at the output's channel count.
@@ -53,7 +97,17 @@ impl Queue {
         if frames == 0 {
             return;
         }
-        self.samples.extend(samples.iter().copied());
+        if self.fade_in > 0 {
+            let total = self.fade_total.max(1);
+            for (i, frame) in samples.chunks_exact(channels.max(1)).enumerate() {
+                let left = self.fade_in.saturating_sub(i);
+                let w = if left > 0 { (total - left + 1) as f32 / (total + 1) as f32 } else { 1.0 };
+                self.samples.extend(frame.iter().map(|s| s * w));
+            }
+            self.fade_in = self.fade_in.saturating_sub(frames);
+        } else {
+            self.samples.extend(samples.iter().copied());
+        }
         if let Some(last) = self.runs.back_mut()
             && last.token == token
         {
@@ -129,6 +183,11 @@ pub struct Report {
     /// Bumped on every `configure`, so the engine notices a reopen at
     /// another rate.
     pub configured: AtomicU64,
+    /// Paused: the callback fades out, then plays silence and takes nothing
+    /// from the queue, until the device itself is stopped a moment later.
+    /// Stopped at once, the device would keep the last tenth of a second it
+    /// was given and play it when it starts again, into the next song.
+    pub hold: AtomicBool,
 }
 
 pub struct Renderer {
@@ -139,6 +198,8 @@ pub struct Renderer {
     gain: f32,
     channels: usize,
     rate: u32,
+    /// Held and already faded out.
+    silent: bool,
 }
 
 impl Renderer {
@@ -150,6 +211,7 @@ impl Renderer {
             gain: 0.0,
             channels: 2,
             rate: 48_000,
+            silent: false,
         }
     }
 }
@@ -165,12 +227,22 @@ impl fastframe_audio::Render for Renderer {
 
     fn render(&mut self, out: &mut [f32]) {
         let target = f32::from_bits(self.volume.load(Ordering::Relaxed));
+        let hold = self.report.hold.load(Ordering::Relaxed);
+        if hold && self.silent {
+            out.fill(0.0);
+            return;
+        }
         let Some(mut queue) = self.queue.try_lock_for(Duration::from_millis(1)) else {
             out.fill(0.0);
             return;
         };
         let channels = self.channels;
-        let wanted = out.len() / channels;
+        // Held: a short fade of what comes next, then nothing more taken.
+        let wanted = if hold {
+            (out.len() / channels).min(fade_frames(self.rate))
+        } else {
+            out.len() / channels
+        };
         let mut written = 0;
         while written < wanted {
             let Some(run) = queue.runs.front_mut() else {
@@ -179,11 +251,14 @@ impl fastframe_audio::Render for Renderer {
             let take = run.frames.min(wanted - written);
             run.frames -= take;
             run.played += take;
-            let position = run.start + frames_to_time(run.played, self.rate);
-            self.report.audible.store(run.token, Ordering::Relaxed);
-            self.report
-                .position_ns
-                .store(position.as_nanos() as u64, Ordering::Relaxed);
+            // Token 0 is a cut's fade: heard, but no track's.
+            if run.token != 0 {
+                let position = run.start + frames_to_time(run.played, self.rate);
+                self.report.audible.store(run.token, Ordering::Relaxed);
+                self.report
+                    .position_ns
+                    .store(position.as_nanos() as u64, Ordering::Relaxed);
+            }
             if run.frames == 0 {
                 queue.runs.pop_front();
             }
@@ -196,10 +271,31 @@ impl fastframe_audio::Render for Renderer {
             }
             written += take;
         }
+        if hold {
+            // What is left of a cut's fade is not wanted after the pause.
+            while let Some(frames) = queue.runs.front().filter(|run| run.token == 0).map(|run| run.frames) {
+                queue.samples.drain(..frames * channels);
+                queue.runs.pop_front();
+            }
+        }
         let drained = queue.runs.is_empty();
         let end = queue.end_of_stream;
         drop(queue);
         out[written * channels..].fill(0.0);
+        if hold {
+            // From where the volume was down to silence.
+            let n = written.max(1) as f32;
+            for (i, frame) in out[..written * channels].chunks_mut(channels).enumerate() {
+                let gain = self.gain * (1.0 - (i + 1) as f32 / n);
+                for sample in frame {
+                    *sample *= gain;
+                }
+            }
+            self.gain = 0.0;
+            self.silent = true;
+            return;
+        }
+        self.silent = false;
         if written < wanted && drained {
             if end {
                 self.report.drained.store(true, Ordering::Relaxed);
@@ -241,5 +337,52 @@ mod tests {
         // Another token, or more than is queued, is refused.
         assert!(!queue.blend(8, &[0.0; 2], 2, 1, 1));
         assert!(!queue.blend(7, &[0.0; 2], 2, 11, 11));
+    }
+
+    #[test]
+    fn a_cut_fades_out_and_what_follows_fades_in() {
+        let mut queue = Queue::default();
+        queue.push(1, Duration::ZERO, &[1.0; 40], 2, 48_000);
+        queue.cut(4, 4, 2);
+        // Four frames stay, fading toward silence, under no track.
+        assert_eq!(queue.runs.len(), 1);
+        assert_eq!(queue.runs[0].token, 0);
+        let fading: Vec<f32> = queue.samples.iter().step_by(2).copied().collect();
+        assert_eq!(fading.len(), 4);
+        assert!(fading.windows(2).all(|w| w[1] < w[0]) && fading[3] < 0.25);
+        // A second cut keeps that fade as it is.
+        queue.cut(4, 4, 2);
+        assert_eq!(queue.frames(2), 4);
+        queue.push(2, Duration::ZERO, &[1.0; 12], 2, 48_000);
+        let next: Vec<f32> = queue.samples.iter().skip(8).step_by(2).copied().collect();
+        assert!(next.windows(2).all(|w| w[1] >= w[0]));
+        assert!(next[0] < 0.25 && next[5] == 1.0);
+    }
+
+    #[test]
+    fn held_it_fades_then_takes_nothing() {
+        use fastframe_audio::Render;
+        let queue = Arc::new(Mutex::new(Queue::default()));
+        let report = Arc::new(Report::default());
+        let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+        let mut renderer = Renderer::new(queue.clone(), report.clone(), volume);
+        // Ten frames of fade at 1 kHz.
+        renderer.configure(1000, 1);
+        queue.lock().push(1, Duration::ZERO, &[1.0; 100], 1, 1000);
+        let mut out = [0.0f32; 20];
+        renderer.render(&mut out);
+        report.hold.store(true, Ordering::Relaxed);
+        renderer.render(&mut out);
+        assert!(out[..10].windows(2).all(|w| w[1] <= w[0]) && out[9] == 0.0);
+        assert!(out[10..].iter().all(|s| *s == 0.0));
+        assert_eq!(queue.lock().frames(1), 70);
+        renderer.render(&mut out);
+        assert!(out.iter().all(|s| *s == 0.0));
+        assert_eq!(queue.lock().frames(1), 70);
+        // Resumed, it fades in from silence and carries on.
+        report.hold.store(false, Ordering::Relaxed);
+        renderer.render(&mut out);
+        assert!(out[0] < 0.1 && (out[19] - 1.0).abs() < 1e-5);
+        assert_eq!(queue.lock().frames(1), 50);
     }
 }

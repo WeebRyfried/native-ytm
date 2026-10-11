@@ -5,6 +5,7 @@ use egui::{Align, Color32, CornerRadius, CursorIcon, Layout, Rect, RichText, Sen
 use crate::api::model::*;
 use crate::api::music::Filter;
 use crate::app::App;
+use crate::cache::Mark;
 use crate::model::{Action, LibraryTab, Loadable, Route};
 use crate::queue::Source;
 use crate::theme::{self, Icon};
@@ -80,6 +81,7 @@ fn browse(app: &mut App, ui: &mut Ui, route: &Route, key: &str) {
     let current = app.queue.current_track().map(|t| t.video_id.clone());
     let playing = app.playing();
     let signed_in = app.signed_in;
+    let online = app.online();
     let pages = &app.pages;
     let mut cx = Cx {
         images: &mut app.images,
@@ -87,10 +89,13 @@ fn browse(app: &mut App, ui: &mut Ui, route: &Route, key: &str) {
         current: current.as_deref(),
         playing,
         signed_in,
+        offline: &app.offline,
+        online,
     };
     let state = pages.get(key).expect("checked");
     match &state.data {
         Loadable::Loading => widgets::spinner(ui),
+        Loadable::Failed(_) if !online => offline_note(ui, &mut cx),
         Loadable::Failed(error) => widgets::failed(ui, &friendly(error), Some(Action::Refresh), &mut cx),
         Loadable::Ready(page) => {
             if *route == Route::Home {
@@ -147,6 +152,28 @@ fn browse(app: &mut App, ui: &mut Ui, route: &Route, key: &str) {
             }
         }
     }
+}
+
+/// In place of a page that cannot load without the network.
+fn offline_note(ui: &mut Ui, cx: &mut Cx<'_>) {
+    ui.add_space(56.0);
+    ui.vertical_centered(|ui| {
+        Icon::Offline.image(theme::TEXT_DIM, 40.0).paint_at(
+            ui,
+            Rect::from_center_size(ui.cursor().center_top() + vec2(0.0, 20.0), Vec2::splat(40.0)),
+        );
+        ui.add_space(52.0);
+        ui.label(RichText::new("You're offline").font(theme::semibold(20.0)));
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new("This page loads when the connection is back. Your downloads play now.")
+                .color(theme::TEXT_DIM),
+        );
+        ui.add_space(16.0);
+        if widgets::pill(ui, Some(Icon::CircleCheck), "Go to your downloads", true).clicked() {
+            cx.push(Action::Navigate(Route::Library(LibraryTab::Cached)));
+        }
+    });
 }
 
 fn friendly(error: &str) -> String {
@@ -248,6 +275,7 @@ fn collection_header(ui: &mut Ui, cx: &mut Cx<'_>, header: &Header, page: &Page,
                         cx.push(Action::SavePlaylist(target, !saved));
                     }
                 }
+                download_pill(ui, cx, &tracks, &playlist_id, page.tracks_continuation.is_some(), &header.title);
                 let more = widgets::icon_button(ui, Icon::More, 20.0, theme::TEXT, "More");
                 egui::Popup::menu(&more).show(|ui| {
                     ui.set_min_width(220.0);
@@ -297,6 +325,38 @@ fn collection_header(ui: &mut Ui, cx: &mut Cx<'_>, header: &Header, page: &Page,
         });
     });
     ui.add_space(20.0);
+}
+
+/// Download, for a whole album or playlist: "Downloaded" once every song
+/// is, "Downloading" with how far while they come.
+fn download_pill(ui: &mut Ui, cx: &mut Cx<'_>, tracks: &[Track], playlist_id: &Option<String>, has_more: bool, title: &str) {
+    if tracks.is_empty() && playlist_id.is_none() {
+        return;
+    }
+    let marks: Vec<Option<&Mark>> = tracks.iter().map(|t| cx.offline.get(&t.video_id)).collect();
+    let saved = marks.iter().filter(|m| matches!(m, Some(Mark::Saved))).count();
+    let coming = marks.iter().filter(|m| matches!(m, Some(Mark::Saving(_) | Mark::Waiting))).count();
+    if !tracks.is_empty() && saved == tracks.len() && !has_more {
+        let response = widgets::pill(ui, Some(Icon::CircleCheck), "Downloaded", false)
+            .on_hover_text("Every song is on this PC and plays offline. Click to remove the downloads.");
+        if response.clicked() {
+            cx.push(Action::RemoveOffline(tracks.iter().map(|t| t.video_id.clone()).collect()));
+        }
+    } else if coming > 0 {
+        let label = format!("Downloading {} of {}", saved + 1, saved + coming);
+        widgets::pill(ui, Some(Icon::Download), &label, false).on_hover_text("Downloading for offline listening");
+    } else if widgets::pill(ui, Some(Icon::Download), "Download", false)
+        .on_hover_text("Keep every song on this PC, to play offline")
+        .clicked()
+    {
+        match playlist_id {
+            Some(id) if has_more || tracks.is_empty() => cx.push(Action::SaveOfflinePlaylist {
+                playlist_id: id.clone(),
+                title: title.to_owned(),
+            }),
+            _ => cx.push(Action::SaveOffline(tracks.to_vec())),
+        }
+    }
 }
 
 /// Play every song of a page: the list in hand when it is all there, or the
@@ -408,8 +468,23 @@ fn library(app: &mut App, ui: &mut Ui, tab: LibraryTab, key: &str) {
     ui.add_space(8.0);
     ui.label(RichText::new("Library").font(theme::bold(30.0)));
     ui.add_space(12.0);
+    // Downloads are the person's whether signed in or not.
+    let tabs: &[LibraryTab] = if app.signed_in { &LibraryTab::ALL } else { &[LibraryTab::Cached] };
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+        for &t in tabs {
+            if widgets::chip(ui, t.label(), t == tab).clicked() && t != tab {
+                app.actions.push(Action::Navigate(Route::Library(t)));
+            }
+        }
+    });
+    ui.add_space(20.0);
+    if tab == LibraryTab::Cached {
+        cached(app, ui);
+        return;
+    }
     if !app.signed_in {
-        ui.add_space(24.0);
+        ui.add_space(4.0);
         ui.label(RichText::new("Sign in to see your playlists, liked songs, albums and history.").color(theme::TEXT_DIM));
         ui.add_space(12.0);
         if widgets::pill(ui, Some(Icon::SignIn), "Sign in", true).clicked() {
@@ -417,16 +492,116 @@ fn library(app: &mut App, ui: &mut Ui, tab: LibraryTab, key: &str) {
         }
         return;
     }
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-        for t in LibraryTab::ALL {
-            if widgets::chip(ui, t.label(), t == tab).clicked() && t != tab {
-                app.actions.push(Action::Navigate(Route::Library(t)));
+    browse(app, ui, &Route::Library(tab), key);
+}
+
+/// The songs on this PC: the downloads, then the songs kept from recent
+/// plays, every one playing without the network.
+fn cached(app: &mut App, ui: &mut Ui) {
+    let (saved, kept) = app.cached_lists();
+    let usage = app.audio_cache.usage();
+    let downloading = app.downloads.active().map(|(track, done)| (track.title.clone(), done));
+    let waiting = app.downloads.waiting.len();
+    let current = app.queue.current_track().map(|t| t.video_id.clone());
+    let playing = app.playing();
+    let signed_in = app.signed_in;
+    let online = app.online();
+    let mut cx = Cx {
+        images: &mut app.images,
+        actions: &mut app.actions,
+        current: current.as_deref(),
+        playing,
+        signed_in,
+        offline: &app.offline,
+        online,
+    };
+
+    // What is downloading, while anything is.
+    if let Some((title, done)) = downloading {
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width().min(640.0), 64.0), Sense::hover());
+        ui.painter().rect_filled(rect, CornerRadius::same(10), theme::SURFACE);
+        let mut row = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(16.0, 0.0))).layout(Layout::left_to_right(Align::Center)));
+        row.spacing_mut().item_spacing.x = 12.0;
+        widgets::offline_mark(&mut row, Mark::Saving(done));
+        row.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            let line = if waiting > 0 { format!("Downloading \u{201c}{title}\u{201d} \u{00b7} {waiting} more to go") } else { format!("Downloading \u{201c}{title}\u{201d}") };
+            widgets::clipped_label(ui, &line, theme::medium(14.0), theme::TEXT, rect.width() - 160.0, Sense::hover());
+            ui.label(RichText::new(format!("{:.0}%", done * 100.0)).font(theme::regular(12.5)).color(theme::TEXT_DIM));
+        });
+        row.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if widgets::pill(ui, None, "Stop", false).clicked() {
+                cx.push(Action::CancelDownloads);
             }
+        });
+        ui.add_space(20.0);
+    } else if waiting > 0 && !online {
+        ui.label(RichText::new(format!("{} wait for the connection to download.", widgets::songs(waiting))).color(theme::TEXT_DIM));
+        ui.add_space(16.0);
+    }
+
+    // The downloads.
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Downloaded").font(theme::bold(22.0)));
+        if usage.saved > 0 {
+            ui.label(
+                RichText::new(format!("{} \u{00b7} {:.0} MB", widgets::songs(usage.saved), usage.saved_bytes as f64 / 1_048_576.0))
+                    .color(theme::TEXT_DIM),
+            );
         }
     });
-    ui.add_space(20.0);
-    browse(app, ui, &Route::Library(tab), key);
+    ui.add_space(10.0);
+    if saved.is_empty() {
+        ui.label(
+            RichText::new("Nothing downloaded yet. Choose Download on an album or a playlist, or in a song's menu, and it plays here without the network.")
+                .color(theme::TEXT_DIM),
+        );
+    } else {
+        let source = Source {
+            title: Some("Downloaded".into()),
+            ..Source::default()
+        };
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            if widgets::pill(ui, Some(Icon::Play), "Play", true).clicked() {
+                cx.push(Action::SetShuffle(false));
+                cx.push(Action::PlayTracks { tracks: saved.to_vec(), start: 0, source: source.clone() });
+            }
+            if widgets::pill(ui, Some(Icon::Shuffle), "Shuffle", false).clicked() {
+                cx.push(Action::SetShuffle(true));
+                cx.push(Action::PlayTracks { tracks: saved.to_vec(), start: fastrand::usize(..saved.len()), source: source.clone() });
+            }
+            let more = widgets::icon_button(ui, Icon::More, 20.0, theme::TEXT, "More");
+            egui::Popup::menu(&more).show(|ui| {
+                ui.set_min_width(220.0);
+                if ui
+                    .add(egui::Button::image_and_text(Icon::Trash.image(theme::TEXT, 18.0), "Remove every download").frame_when_inactive(false))
+                    .clicked()
+                {
+                    cx.push(Action::ClearDownloads);
+                }
+            });
+        });
+        ui.add_space(8.0);
+        widgets::track_list(ui, &mut cx, &saved, RowPlace::List, &source, true);
+    }
+
+    // The songs kept from plays.
+    if !kept.is_empty() {
+        ui.add_space(32.0);
+        ui.label(RichText::new("Played lately").font(theme::bold(22.0)));
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new("Kept on this PC from your recent plays, so they play offline too, until newer songs take their place. Download one to keep it.")
+                .color(theme::TEXT_DIM),
+        );
+        ui.add_space(10.0);
+        let source = Source {
+            title: Some("Played lately".into()),
+            ..Source::default()
+        };
+        widgets::track_list(ui, &mut cx, &kept, RowPlace::List, &source, true);
+    }
 }
 
 fn search(app: &mut App, ui: &mut Ui) {
@@ -444,6 +619,7 @@ fn search(app: &mut App, ui: &mut Ui) {
     let current = app.queue.current_track().map(|t| t.video_id.clone());
     let playing = app.playing();
     let signed_in = app.signed_in;
+    let online = app.online();
     let loading_more = app.search.loading_more;
     let search = &app.search;
     let mut cx = Cx {
@@ -452,9 +628,12 @@ fn search(app: &mut App, ui: &mut Ui) {
         current: current.as_deref(),
         playing,
         signed_in,
+        offline: &app.offline,
+        online,
     };
     match &search.results {
         Loadable::Loading => widgets::spinner(ui),
+        Loadable::Failed(_) if !online => offline_note(ui, &mut cx),
         Loadable::Failed(error) => widgets::failed(ui, &friendly(error), Some(Action::Search(search.query.clone())), &mut cx),
         Loadable::Ready(sections) => {
             if sections.is_empty() {

@@ -222,34 +222,30 @@ fastframe_icons::icons! {
         Sidebar => lucide "panel-left",
         Expand => lucide "maximize-2",
         Collapse => lucide "minimize-2",
+        Download => "download",
+        Offline => "wifi-off",
+        LastFm => "lastfm",
+        CircleCheck => lucide "circle-check",
+        ChevronUp => lucide "chevron-up",
+        Info => lucide "info",
     }
 }
 
-/// The logo: a record with a red label and a play mark, ringed with how
-/// far the song has come. One drawing for the window, the tray, the
-/// sidebar, the executable and the README.
-pub const LOGO_SVG: &str = include_str!("../assets/logo.svg");
+/// The app's icon: a player window with a red disc, a play mark and a
+/// note on it. One picture for the window, the tray, the sidebar, the
+/// executable (assets/app.ico) and the README.
+pub const ICON_PNG: &[u8] = include_bytes!("../assets/icon.png");
 
-/// The logo as straight RGBA, `size` pixels square, drawn from the SVG.
+/// The icon as straight RGBA, `size` pixels square.
 pub fn app_icon_rgba(size: usize) -> Vec<u8> {
-    use resvg::{tiny_skia, usvg};
     let size = size.max(1);
-    let Ok(tree) = usvg::Tree::from_str(LOGO_SVG, &usvg::Options::default()) else {
-        return vec![0; size * size * 4];
-    };
-    let Some(mut pixmap) = tiny_skia::Pixmap::new(size as u32, size as u32) else {
-        return vec![0; size * size * 4];
-    };
-    let scale = size as f32 / tree.size().width().max(tree.size().height());
-    resvg::render(&tree, tiny_skia::Transform::from_scale(scale, scale), &mut pixmap.as_mut());
-    pixmap
-        .pixels()
-        .iter()
-        .flat_map(|p| {
-            let c = p.demultiply();
-            [c.red(), c.green(), c.blue(), c.alpha()]
-        })
-        .collect()
+    match image::load_from_memory(ICON_PNG) {
+        Ok(icon) => icon
+            .resize_exact(size as u32, size as u32, image::imageops::FilterType::Lanczos3)
+            .to_rgba8()
+            .into_raw(),
+        Err(_) => vec![0; size * size * 4],
+    }
 }
 
 pub fn app_icon(size: usize) -> egui::IconData {

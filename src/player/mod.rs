@@ -46,6 +46,10 @@ const LOW_WATER: Duration = Duration::from_millis(2250);
 /// a stream mid-song.
 const BLEND: Duration = Duration::from_millis(60);
 
+/// How long after a pause the device itself stops: time for it to play out
+/// the fade and fill its own buffer (a tenth of a second) with silence.
+const SETTLE: Duration = Duration::from_millis(300);
+
 /// A stream the resolver found: where the bytes are and how to ask for them.
 #[derive(Clone, Debug)]
 pub struct StreamInfo {
@@ -67,7 +71,7 @@ pub struct StreamInfo {
 }
 
 impl StreamInfo {
-    fn header_map(&self) -> HeaderMap {
+    pub fn header_map(&self) -> HeaderMap {
         let mut map = HeaderMap::new();
         for (name, value) in &self.headers {
             if let (Ok(name), Ok(value)) = (
@@ -206,6 +210,7 @@ impl Player {
             ended_sent: false,
             normalize,
             last_maintain: Instant::now(),
+            pause_due: None,
         };
         std::thread::Builder::new()
             .name("player".into())
@@ -417,6 +422,8 @@ struct Engine {
     ended_sent: bool,
     normalize: bool,
     last_maintain: Instant,
+    /// When the device stops, once a pause has settled (SETTLE).
+    pause_due: Option<Instant>,
 }
 
 impl Engine {
@@ -440,6 +447,10 @@ impl Engine {
                 } else {
                     Duration::from_secs(1)
                 };
+                let wait = match self.pause_due {
+                    Some(due) => wait.min(due.saturating_duration_since(Instant::now())),
+                    None => wait,
+                };
                 match self.rx.recv_timeout(wait) {
                     Ok(command) => Some(command),
                     Err(RecvTimeoutError::Timeout) => None,
@@ -458,7 +469,33 @@ impl Engine {
             self.decode_for(Duration::from_millis(30));
             self.poll();
             self.maintain();
+            self.settle_pause();
         }
+    }
+
+    /// Stops the device once a pause has had time to settle.
+    fn settle_pause(&mut self) {
+        if self.pause_due.is_some_and(|due| Instant::now() >= due) {
+            self.pause_due = None;
+            if !self.playing
+                && let Some(output) = &mut self.output
+            {
+                output.pause();
+            }
+        }
+    }
+
+    /// Empties the queue without a click: what the device was about to play
+    /// fades out (when it is playing), and what comes next fades in.
+    fn cut_params(&self) -> (usize, usize, usize) {
+        let (rate, channels) = self.out_format();
+        let fade = output::fade_frames(rate);
+        (if self.playing { fade } else { 0 }, fade, channels)
+    }
+
+    fn cut(&mut self) {
+        let (out, fade_in, channels) = self.cut_params();
+        self.queue.lock().cut(out, fade_in, channels);
     }
 
     fn send(&self, event: Event) {
@@ -493,6 +530,7 @@ impl Engine {
                     output.channels()
                 );
                 self.configured = self.report.configured.load(Ordering::SeqCst);
+                self.report.hold.store(!self.playing, Ordering::SeqCst);
                 if !self.playing {
                     output.pause();
                 }
@@ -510,14 +548,18 @@ impl Engine {
 
     fn set_playing(&mut self, playing: bool) {
         self.playing = playing;
+        self.report.hold.store(!playing, Ordering::SeqCst);
         if playing {
+            self.pause_due = None;
             if self.ensure_output()
                 && let Some(output) = &mut self.output
             {
                 output.resume();
             }
-        } else if let Some(output) = &mut self.output {
-            output.pause();
+        } else if self.output.as_ref().is_some_and(|output| !output.is_paused()) {
+            // Not at once: the callback fades out and plays silence first
+            // (see Report::hold), so the device keeps nothing to replay.
+            self.pause_due.get_or_insert(Instant::now() + SETTLE);
         }
     }
 
@@ -535,7 +577,7 @@ impl Engine {
             } => {
                 self.current = None;
                 self.next = None;
-                self.queue.lock().clear();
+                self.cut();
                 self.report.drained.store(false, Ordering::SeqCst);
                 self.report.audible.store(0, Ordering::SeqCst);
                 self.last_audible = 0;
@@ -620,7 +662,7 @@ impl Engine {
             Command::Stop => {
                 self.current = None;
                 self.next = None;
-                self.queue.lock().clear();
+                self.cut();
                 self.report.audible.store(0, Ordering::SeqCst);
                 *self.shared.source.lock() = None;
                 *self.shared.seek_to.lock() = None;
@@ -648,6 +690,7 @@ impl Engine {
         // The heard track may be a preloaded one the decoder already
         // finished; seeking means going back to it.
         let audible = self.report.audible.load(Ordering::SeqCst);
+        let (fade_out, fade_in, channels) = self.cut_params();
         let Some(decoding) = &mut self.current else {
             *self.shared.seek_to.lock() = None;
             return;
@@ -680,9 +723,7 @@ impl Engine {
                 decoding.next_time = to;
                 decoding.blend_left = 0;
                 decoding.finished = false;
-                let mut queue = self.queue.lock();
-                queue.clear();
-                drop(queue);
+                self.queue.lock().cut(fade_out, fade_in, channels);
                 self.report.drained.store(false, Ordering::SeqCst);
                 self.report
                     .position_ns

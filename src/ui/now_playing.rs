@@ -32,13 +32,16 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect, rise: f32) {
     let content = Rect::from_min_max(rect.min + vec2(56.0, 72.0), rect.max - vec2(48.0, 28.0)).translate(vec2(0.0, rise));
     let narrow = content.width() < 820.0;
     let right_w = if narrow { content.width() * 0.48 } else { (content.width() * 0.4).clamp(360.0, 560.0) };
-    let gap = if narrow { 32.0 } else { 64.0 };
-    let left = Rect::from_min_max(content.min, pos2(content.right() - right_w - gap, content.bottom()));
-    let right = Rect::from_min_max(pos2(content.right() - right_w, content.top()), content.max);
-
+    let gap = if narrow { 32.0 } else { (content.width() * 0.07).clamp(56.0, 112.0) };
     // The artwork, as large as fits above its titles.
     let titles_h = 112.0;
-    let art_size = left.width().min(left.height() - titles_h).clamp(140.0, 660.0);
+    let art_size = (content.width() - right_w - gap).min(content.height() - titles_h).clamp(140.0, 660.0);
+    // The artwork and the list as one piece, centred: the same margin on
+    // either side, and the list close to the artwork it belongs to.
+    let total = art_size + gap + right_w;
+    let x0 = content.left() + ((content.width() - total) / 2.0).max(0.0);
+    let left = Rect::from_min_max(pos2(x0, content.top()), pos2(x0 + art_size, content.bottom()));
+    let right = Rect::from_min_max(pos2(left.right() + gap, content.top()), pos2((left.right() + gap + right_w).min(content.right()), content.bottom()));
     let block_h = art_size + titles_h;
     let art_top = left.top() + ((left.height() - block_h) / 2.0).max(0.0);
     let art = Rect::from_min_size(pos2(left.center().x - art_size / 2.0, art_top), vec2(art_size, art_size));
@@ -142,11 +145,14 @@ fn quality_chip(ui: &mut Ui, quality: Option<&str>, upgrade: Option<&Upgrade>) {
     };
     let premium = upgrade.is_some_and(|u| matches!(u.phase, UpgradePhase::Done(_)) && u.to.is_some());
     let painter = ui.painter().clone();
+    let mark = codec_mark(&label);
     let galley = painter.layout_no_wrap(label, font.clone(), theme::TEXT_DIM);
     let note_galley = note.map(|n| painter.layout_no_wrap(n, font.clone(), theme::TEXT));
     let sparkle = if premium { 15.0 } else { 0.0 };
+    let mark_h = 11.0;
+    let mark_w = mark.map_or(0.0, |(_, _, aspect)| mark_h * aspect + 5.0);
     let note_w = note_galley.as_ref().map_or(0.0, |g| g.size().x + 10.0);
-    let target_w = galley.size().x + 14.0 + sparkle + note_w;
+    let target_w = galley.size().x + 14.0 + sparkle + mark_w + note_w;
     // The chip grows and shrinks with what it says.
     let width = ui.ctx().animate_value_with_time(id.with("w"), target_w, 0.28);
     let (rect, response) = ui.allocate_exact_size(vec2(width, galley.size().y + 8.0), Sense::hover());
@@ -184,6 +190,16 @@ fn quality_chip(ui: &mut Ui, quality: Option<&str>, upgrade: Option<&Upgrade>) {
     }
     // The new label fades in over the old.
     let fade_in = done_for.map_or(1.0, |s| (s / 0.4).min(1.0));
+    // The codec's own symbol before its name.
+    if let Some((uri, bytes, aspect)) = mark {
+        let at = Rect::from_min_size(pos2(x, rect.center().y - mark_h / 2.0), vec2(mark_h * aspect, mark_h));
+        if clip.clip_rect().intersects(at) {
+            egui::Image::from_bytes(uri, bytes)
+                .tint(Color32::WHITE.gamma_multiply(fade_in))
+                .paint_at(ui, at);
+        }
+        x += mark_w;
+    }
     let label_color = theme::TEXT_DIM.gamma_multiply(fade_in);
     clip.galley_with_override_text_color(pos2(x, rect.center().y - galley.size().y / 2.0), galley.clone(), label_color);
     if let Some(note) = note_galley {
@@ -213,6 +229,18 @@ fn quality_chip(ui: &mut Ui, quality: Option<&str>, upgrade: Option<&Upgrade>) {
         _ => "The stream playing: its codec and bitrate",
     };
     response.on_hover_cursor(CursorIcon::Default).on_hover_text(tip);
+}
+
+/// The codec's symbol for a label such as "OPUS 257 KB/S": its image and
+/// its width for its height.
+fn codec_mark(label: &str) -> Option<(&'static str, &'static [u8], f32)> {
+    if label.starts_with("OPUS") {
+        Some(("bytes://codec-opus.svg", include_bytes!("../../assets/codecs/opus.svg"), 193.2 / 129.2))
+    } else if label.starts_with("AAC") {
+        Some(("bytes://codec-aac.svg", include_bytes!("../../assets/codecs/aac.svg"), 908.0 / 783.0))
+    } else {
+        None
+    }
 }
 
 /// Eases to 1 with a small overshoot, for things that pop in.

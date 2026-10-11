@@ -23,6 +23,8 @@ pub enum Purpose {
     Prefetch,
     /// A better stream of the song already starting, to switch to.
     Upgrade,
+    /// Downloading the song for offline listening.
+    Download,
 }
 
 /// Which way to resolve a stream.
@@ -122,6 +124,10 @@ pub enum Request {
     },
     Account,
     LibraryPlaylists,
+    /// The song started: into the account's history.
+    History {
+        video_id: String,
+    },
     SetAuth(Option<Auth>),
     SetLanguage {
         language: String,
@@ -479,6 +485,13 @@ async fn run(
         Request::Account => Response::Account(api.account().await.map_err(err)),
         Request::LibraryPlaylists => {
             Response::LibraryPlaylists(api.library_playlists().await.map_err(err))
+        }
+        Request::History { video_id } => {
+            match api.add_to_history(&video_id).await {
+                Ok(()) => log::info!("{video_id} added to the history"),
+                Err(error) => log::info!("history: {error:#}"),
+            }
+            return None;
         }
         Request::SetAuth(_)
         | Request::SetLanguage { .. }

@@ -178,6 +178,22 @@ fn now(app: &mut App, ui: &mut Ui) {
     let width = ui.available_width();
     ui.spacing_mut().item_spacing.x = 12.0;
     let (art, art_response) = ui.allocate_exact_size(Vec2::splat(48.0), Sense::click());
+    // With Last.fm connected, how often the person has played the song and
+    // its artist there, before its logo.
+    let plays = match track.artists.first() {
+        Some(artist) if app.lastfm.status() == crate::lastfm::Status::Connected => {
+            Some((app.lastfm.plays(&artist.name, &track.title), artist.name.clone()))
+        }
+        _ => None,
+    };
+    let counts = plays.as_ref().map(|(plays, _)| {
+        let painter = ui.painter();
+        let font = theme::regular(11.5);
+        [plays.and_then(|p| p.track), plays.and_then(|p| p.artist)]
+            .map(|n| painter.layout_no_wrap(n.map_or_else(|| "\u{2013}".to_owned(), thousands), font.clone(), theme::TEXT_DIM))
+    });
+    let counts_w = counts.as_ref().map_or(0.0, |[a, b]| 16.0 + a.size().x.max(b.size().x));
+    let lastfm_w = if plays.is_some() { counts_w + 12.0 + 38.0 + 12.0 } else { 0.0 };
     let full = app.full_view;
     let mut cx = app.cx();
     widgets::paint_art(ui, cx.images, track.thumbnail.as_deref(), art, 4.0, false);
@@ -188,7 +204,7 @@ fn now(app: &mut App, ui: &mut Ui) {
         cx.push(Action::ToggleFullView);
     }
     // Dislike, like and more: three icon buttons and their gaps.
-    let buttons_w = 3.0 * 38.0 + 2.0 * 12.0 + 12.0;
+    let buttons_w = 3.0 * 38.0 + 2.0 * 12.0 + 12.0 + lastfm_w;
     let text_w = (width - 48.0 - 12.0 - buttons_w).max(60.0);
     ui.allocate_ui_with_layout(vec2(text_w, 44.0), Layout::top_down(Align::Min), |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
@@ -221,6 +237,35 @@ fn now(app: &mut App, ui: &mut Ui) {
     } else {
         1.0
     };
+    if let (Some((plays, artist)), Some([song, by])) = (&plays, counts) {
+        let (rect, response) = ui.allocate_exact_size(vec2(counts_w, 36.0), Sense::hover());
+        let shown = ui.ctx().animate_bool_with_time(ui.id().with(("plays", &track.video_id)), plays.is_some(), 0.25);
+        for (i, (icon, galley)) in [(Icon::Music, song), (Icon::User, by)].into_iter().enumerate() {
+            let y = rect.center().y + if i == 0 { -8.5 } else { 8.5 };
+            icon.image(theme::TEXT_FAINT.gamma_multiply(shown), 11.0)
+                .paint_at(ui, Rect::from_center_size(pos2(rect.left() + 5.5, y), Vec2::splat(11.0)));
+            ui.painter().galley_with_override_text_color(
+                pos2(rect.left() + 16.0, y - galley.size().y / 2.0),
+                galley,
+                theme::TEXT_DIM.gamma_multiply(shown),
+            );
+        }
+        if let Some(plays) = plays {
+            let times = |n: Option<u64>| match n {
+                Some(1) => "once".to_owned(),
+                Some(n) => format!("{} times", thousands(n)),
+                None => "\u{2013}".to_owned(),
+            };
+            response.on_hover_text(format!(
+                "On Last.fm you've played this song {}, and {artist} {}",
+                times(plays.track),
+                times(plays.artist)
+            ));
+        }
+        if widgets::icon_button(ui, Icon::LastFm, 20.0, theme::TEXT, "Open the song on Last.fm").clicked() {
+            app.actions.push(Action::OpenUrl(crate::lastfm::LastFm::track_url(artist, &track.title)));
+        }
+    }
     let mut cx = app.cx();
     if widgets::icon_button(ui, dislike_icon, 20.0, theme::TEXT, "Dislike").clicked() {
         cx.push(Action::Rate(
@@ -294,6 +339,19 @@ fn extras(app: &mut App, ui: &mut Ui) {
     }
     ui.add_space(8.0);
     volume(app, ui);
+}
+
+/// 1248 as "1,248".
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// The small dot under a toggle that is on.

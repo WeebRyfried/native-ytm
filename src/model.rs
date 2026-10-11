@@ -39,6 +39,7 @@ impl Route {
         match self {
             Route::Home => Some(("FEmusic_home".into(), None)),
             Route::Explore => Some(("FEmusic_explore".into(), None)),
+            Route::Library(LibraryTab::Cached) => None,
             Route::Library(tab) => Some((tab.browse_id().into(), None)),
             Route::Browse { browse_id, params } => Some((browse_id.clone(), params.clone())),
             _ => None,
@@ -54,16 +55,19 @@ pub enum LibraryTab {
     Artists,
     Subscriptions,
     History,
+    /// Songs on this PC, for listening offline.
+    Cached,
 }
 
 impl LibraryTab {
-    pub const ALL: [LibraryTab; 6] = [
+    pub const ALL: [LibraryTab; 7] = [
         LibraryTab::Playlists,
         LibraryTab::Songs,
         LibraryTab::Albums,
         LibraryTab::Artists,
         LibraryTab::Subscriptions,
         LibraryTab::History,
+        LibraryTab::Cached,
     ];
 
     pub fn label(self) -> &'static str {
@@ -74,6 +78,7 @@ impl LibraryTab {
             LibraryTab::Artists => "Artists",
             LibraryTab::Subscriptions => "Subscriptions",
             LibraryTab::History => "History",
+            LibraryTab::Cached => "Cached",
         }
     }
 
@@ -85,6 +90,7 @@ impl LibraryTab {
             LibraryTab::Artists => "FEmusic_library_corpus_track_artists",
             LibraryTab::Subscriptions => "FEmusic_library_corpus_artists",
             LibraryTab::History => "FEmusic_history",
+            LibraryTab::Cached => "",
         }
     }
 }
@@ -236,8 +242,21 @@ pub enum Action {
     CopyLink(String),
     OpenUrl(String),
     ClearImageCache,
-    /// Deletes the songs kept on disk.
+    /// Deletes the songs kept from plays.
     ClearSongCache,
+    /// Downloads songs for offline listening.
+    SaveOffline(Vec<Track>),
+    /// Downloads a whole playlist or album, more than its page has loaded.
+    SaveOfflinePlaylist {
+        playlist_id: String,
+        title: String,
+    },
+    /// No longer downloaded.
+    RemoveOffline(Vec<String>),
+    /// Stops the downloads waiting and the one under way.
+    CancelDownloads,
+    /// Deletes every downloaded song.
+    ClearDownloads,
     ShowWindow,
     Quit,
 }

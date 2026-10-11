@@ -6,8 +6,11 @@ use egui::{
     Stroke, StrokeKind, Ui, Vec2, pos2, vec2,
 };
 
+use std::collections::HashMap;
+
 use crate::api::model::*;
 use crate::api::music::Rating;
+use crate::cache::Mark;
 use crate::images::Images;
 use crate::model::Action;
 use crate::queue::Source;
@@ -20,6 +23,9 @@ pub struct Cx<'a> {
     pub current: Option<&'a str>,
     pub playing: bool,
     pub signed_in: bool,
+    /// Songs on this PC and downloading, by video id.
+    pub offline: &'a HashMap<String, Mark>,
+    pub online: bool,
 }
 
 impl Cx<'_> {
@@ -400,31 +406,39 @@ pub fn track_row(
     };
     let text_w = (right - x - album_w - 16.0).max(40.0);
     let title_color = if current { theme::ACCENT_TEXT } else { theme::TEXT };
-    let mut child = ui.new_child(
+    // The title and the artists as one block, centred in the row. (In a
+    // horizontal layout the title line took a button's height, which
+    // pushed the artists down against the row's bottom edge.)
+    let title_font = theme::medium(14.5);
+    let line_font = theme::regular(13.0);
+    let (title_h, line_h) = ui.fonts_mut(|f| (f.row_height(&title_font), f.row_height(&line_font)));
+    let gap = 3.0;
+    let top = (rect.center().y - (title_h + gap + line_h) / 2.0).round();
+    let mut title = ui.new_child(
         egui::UiBuilder::new()
-            .max_rect(Rect::from_min_max(pos2(x, rect.top()), pos2(x + text_w, rect.bottom())))
-            .layout(EguiLayout::top_down(Align::Min)),
+            .max_rect(Rect::from_min_size(pos2(x, top), vec2(text_w, title_h)))
+            .layout(EguiLayout::left_to_right(Align::Center)),
     );
-    child.add_space((height - 38.0) / 2.0);
-    child.spacing_mut().item_spacing.y = 2.0;
-    child.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 6.0;
-        if track.explicit {
-            explicit_badge(ui);
-        }
-        clipped_label(ui, &track.title, theme::medium(14.5), title_color, text_w - 20.0, Sense::hover());
-    });
+    title.spacing_mut().item_spacing.x = 6.0;
+    if track.explicit {
+        explicit_badge(&mut title);
+    }
+    let title_w = title.available_width();
+    clipped_label(&mut title, &track.title, title_font, title_color, title_w, Sense::hover());
+    let mut line = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(Rect::from_min_size(pos2(x, top + title_h + gap), vec2(text_w, line_h)))
+            .layout(EguiLayout::left_to_right(Align::Center)),
+    );
+    line.spacing_mut().item_spacing.x = 5.0;
+    if let Some(mark) = cx.offline.get(&track.video_id) {
+        offline_mark(&mut line, *mark);
+    }
+    let line_w = line.available_width();
     if track.artists.is_empty() {
-        clipped_label(
-            &mut child,
-            track.extra.as_deref().unwrap_or(""),
-            theme::regular(13.0),
-            theme::TEXT_DIM,
-            text_w,
-            Sense::hover(),
-        );
+        clipped_label(&mut line, track.extra.as_deref().unwrap_or(""), line_font, theme::TEXT_DIM, line_w, Sense::hover());
     } else {
-        links(&mut child, cx, &track.artists, theme::regular(13.0), theme::TEXT_DIM, text_w);
+        links(&mut line, cx, &track.artists, line_font, theme::TEXT_DIM, line_w);
     }
     if album_w > 0.0
         && let Some(album) = &track.album
@@ -462,6 +476,62 @@ pub fn track_row(
         play = true;
     }
     RowResponse { play, response }
+}
+
+/// "1 song", "12 songs".
+pub fn songs(n: usize) -> String {
+    if n == 1 { "1 song".to_owned() } else { format!("{n} songs") }
+}
+
+/// The mark of a song that plays without the network: a filled circle with
+/// a tick once downloaded, an outline while only kept from a recent play,
+/// and a ring filling up while it downloads.
+pub fn offline_mark(ui: &mut Ui, mark: Mark) {
+    let size = 13.0;
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let c = rect.center();
+    let r = size / 2.0 - 0.5;
+    let painter = ui.painter();
+    let tick = |color: Color32| {
+        painter.add(egui::Shape::line(
+            vec![c + vec2(-3.0, 0.1), c + vec2(-0.9, 2.2), c + vec2(3.0, -2.0)],
+            Stroke::new(1.5, color),
+        ));
+    };
+    let tip = match mark {
+        Mark::Saved => {
+            painter.circle_filled(c, r, theme::TEXT_DIM);
+            tick(theme::BG);
+            "Downloaded: plays offline"
+        }
+        Mark::Kept => {
+            painter.circle_stroke(c, r - 0.6, Stroke::new(1.2, theme::TEXT_FAINT));
+            tick(theme::TEXT_FAINT);
+            "On this PC from a recent play: plays offline for now"
+        }
+        Mark::Saving(done) => {
+            painter.circle_stroke(c, r - 0.8, Stroke::new(1.6, Color32::from_white_alpha(36)));
+            if done > 0.0 {
+                let end = done.clamp(0.0, 1.0) * std::f32::consts::TAU;
+                let points: Vec<Pos2> = (0..=24)
+                    .map(|i| {
+                        let a = -std::f32::consts::FRAC_PI_2 + end * i as f32 / 24.0;
+                        c + vec2(a.cos(), a.sin()) * (r - 0.8)
+                    })
+                    .collect();
+                painter.add(egui::Shape::line(points, Stroke::new(1.6, theme::TEXT_DIM)));
+            }
+            "Downloading"
+        }
+        Mark::Waiting => {
+            painter.circle_stroke(c, r - 0.8, Stroke::new(1.2, Color32::from_white_alpha(36)));
+            "Waiting to download"
+        }
+    };
+    response.on_hover_text(tip);
 }
 
 fn explicit_badge(ui: &mut Ui) {
@@ -516,6 +586,18 @@ pub fn track_menu(ui: &mut Ui, cx: &mut Cx<'_>, track: &Track, place: RowPlace<'
         }
     }
     ui.separator();
+    match cx.offline.get(&track.video_id) {
+        Some(Mark::Saved | Mark::Saving(_) | Mark::Waiting) => {
+            if item(ui, Icon::CircleCheck, "Remove download") {
+                cx.push(Action::RemoveOffline(vec![track.video_id.clone()]));
+            }
+        }
+        _ => {
+            if item(ui, Icon::Download, "Download") {
+                cx.push(Action::SaveOffline(vec![track.clone()]));
+            }
+        }
+    }
     if item(ui, Icon::Like, "Like") {
         cx.push(Action::Rate(track.video_id.clone(), Rating::Like));
     }

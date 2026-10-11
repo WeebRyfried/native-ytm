@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.svg" width="112" alt="Native YTM">
+  <img src="assets/icon.png" width="128" alt="Native YTM">
 </p>
 
 <h1 align="center">Native YTM</h1>
@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="../../releases/latest"><img src="https://img.shields.io/badge/download-v0.1.0-ff0033?style=flat-square" alt="Download v0.1.0"></a>
+  <a href="../../releases/latest"><img src="https://img.shields.io/badge/download-v0.2.0-ff0033?style=flat-square" alt="Download v0.2.0"></a>
   <img src="https://img.shields.io/badge/Windows-x64-0078D4?style=flat-square&logo=windows11&logoColor=white" alt="Windows x64">
   <img src="https://img.shields.io/badge/Rust-2024-B7410E?style=flat-square&logo=rust&logoColor=white" alt="Rust 2024">
   <img src="https://img.shields.io/badge/UI-egui%20%2B%20OpenGL-1f1f1f?style=flat-square" alt="egui and OpenGL">
@@ -37,11 +37,19 @@ sounds as good as your account allows.
 **Sound**
 - **Premium quality.** With Music Premium, 256 kb/s Opus or AAC. A song
   starts in under a second and switches up to Premium mid-song, without a
-  gap, the full-window player showing it happen.
-- **Songs kept on disk.** The last 100 songs you heard (or as many as you
-  like) are kept at the best quality heard, and play from disk at once.
+  gap, the full-window player showing it happen, codec symbol and all.
 - **Gapless**, Opus and AAC, resampled to your device, levelled the way
-  YouTube Music levels them.
+  YouTube Music levels them, and never a click between songs.
+
+**Offline**
+- **Downloads.** Download a song, an album or a whole playlist, at the best
+  quality your account gets; they're in **Library, Cached**, ticked
+  wherever they appear, and play without the network.
+- **Songs kept on disk.** The last 100 songs you heard (or as many as you
+  like) stay on disk too, so they start at once and play offline.
+- **Knows when you're offline.** Downloaded songs carry on, the queue skips
+  to the next song on disk, pages wait, and everything picks up again on its
+  own when the connection is back.
 
 **Lyrics and the full view**
 - **Synced lyrics** that follow the song: the line being sung lit, the rest
@@ -60,9 +68,12 @@ sounds as good as your account allows.
 **At home on Windows**
 - The media keys and the volume flyout, with the song's name and artwork.
 - Closes to the tray and keeps playing. One copy at a time.
+- **Your YouTube Music history** gets what you play, as on the web.
 - **Discord**: "Listening to" the artist, with the artwork, the song and a
   progress bar on your profile.
-- **Last.fm** scrobbling and now playing.
+- **Last.fm**: scrobbling and now playing, and in the player bar how many
+  times you've played the song and the artist.
+- Settings in plain words, the technical ones tucked under Advanced.
 - Light animations throughout, each drawing frames only while it moves.
 
 <p align="center">
@@ -84,6 +95,9 @@ Measured with the release build on a laptop drawing on Intel UHD graphics:
 The interface draws a frame only when something on screen changes, and
 never faster than the screen shows them; the system's Japanese, Chinese and
 Korean fonts are mapped rather than loaded; artwork stays within a budget.
+Resizing the window makes some graphics drivers (Intel's among them) hold
+on to a buffer for every size it passed through, hundreds of megabytes;
+the app hands that memory back to Windows a second after a resize ends.
 
 ## Install
 
@@ -112,7 +126,7 @@ Korean fonts are mapped rather than loaded; artwork stays within a budget.
 **Discord** works with the Discord app running. **Last.fm** asks for an API
 account of your own (free and instant at
 <https://www.last.fm/api/account/create>): paste its key and secret in
-Settings and press **Connect**.
+Settings, Advanced, and press **Connect** under Sharing.
 
 ## Keyboard
 
@@ -149,7 +163,8 @@ cargo build --release
 | API | `src/api/` | InnerTube (`WEB_REMIX`) requests and the parsers that turn renderers into the model; LRCLIB for synced lyrics |
 | Streams | `src/stream.rs` | finds a stream for a song (below) |
 | Audio | `src/player/` | range downloader, symphonia (MP4, WebM, AAC), libopus for Opus, rubato resampler, fastframe-audio output |
-| Song cache | `src/cache.rs` | whole files kept on disk, the best quality heard, the least recently played going first |
+| Songs on disk | `src/cache.rs` | downloads, and whole files kept from plays (the best quality heard, the least recently played going first) |
+| Offline | `src/net.rs` | whether there is internet, from Windows' Network List Manager, asked when a request fails and while offline |
 | Desktop | `src/discord.rs`, `src/lastfm.rs`, `src/platform.rs` | Discord's local pipe, Last.fm's API, DPAPI, the app's identity for the media flyout |
 
 **Streams.** The player endpoint is asked as one of the clients YouTube
@@ -165,6 +180,9 @@ it from the end of the three seconds already queued, 60 ms early, and
 crossfades the overlap, so the join cannot click. The next song's Premium
 stream is fetched while one plays.
 
+**History.** A song that starts is reported the way the web player does:
+the signed-in player request, then the playback address it names.
+
 **Frames.** egui runs a frame for every pointer movement. The vendored
 eframe (`vendor/eframe`, search for "native-ytm patch") puts off a frame
 asked for before the screen could show the last, and neither draws nor
@@ -176,16 +194,19 @@ system's fallback fonts instead of reading them in.
 **For development**, the app takes a few environment variables:
 `NATIVE_YTM_ROUTE` opens pages or plays at start (`search:QUERY`,
 `browse:ID`, `play:VIDEO_ID`, `explore`, `library`, `settings`, `queue`,
-`lyrics`, `signin`, `full`, joined with `|`); `NATIVE_YTM_SHOT=out.png`
+`lyrics`, `signin`, `full`, `cached`, and `download` for the song playing,
+joined with `|`); `NATIVE_YTM_SHOT=out.png`
 saves a screenshot after `NATIVE_YTM_SHOT_DELAY` ms and quits;
 `NATIVE_YTM_SCROLL`, `NATIVE_YTM_SEEK`, `NATIVE_YTM_MUTE`;
 `NATIVE_YTM_NO_DISCORD`; `NATIVE_YTM_PROFILE=DIR` runs a separate copy with
 its own data; `NATIVE_YTM_WIGGLE=x,y` and `NATIVE_YTM_WHEEL=x,y` make up
-pointer input; `NATIVE_YTM_NO_FRAME_SKIP` draws identical frames anyway.
+pointer input; `NATIVE_YTM_NO_FRAME_SKIP` draws identical frames anyway;
+`NATIVE_YTM_OFFLINE` makes the app believe it is offline.
 `ytm-probe` is a console tool for when YouTube changes something: `dump`
 prints what the parsers make of live pages, `play` resolves and plays a
 stream (`--cookies FILE --premium` for the account's), `lyrics` looks lyrics
-up, `logo` and `icon` draw the logo.
+up, `history VIDEO_ID --cookies FILE` checks the history report, `logo` and
+`icon` write the icon out.
 
 </details>
 
@@ -200,7 +221,9 @@ design this follows and its foundation. [egui and eframe](https://github.com/emi
 [unsafe-libopus](https://github.com/DCNick3/unsafe-libopus).
 [LRCLIB](https://lrclib.net) for synced lyrics.
 [th-ch/youtube-music](https://github.com/th-ch/youtube-music) for its Discord
-application. Icons from [Lucide](https://lucide.dev) (ISC); the
+application. Icons from [Lucide](https://lucide.dev) (ISC); the Last.fm mark
+from [Simple Icons](https://simpleicons.org) (CC0); the Opus and AAC symbols
+from Wikimedia Commons. Those marks belong to their owners. The
 [Inter](https://rsms.me/inter/) typeface (SIL OFL 1.1).
 
 MIT licensed. An independent project, not affiliated with Google or YouTube.

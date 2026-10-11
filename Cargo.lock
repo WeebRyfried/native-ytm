@@ -2725,7 +2725,7 @@ dependencies = [
 
 [[package]]
 name = "native-ytm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "directories",
@@ -2749,7 +2749,6 @@ dependencies = [
  "parking_lot",
  "raw-window-handle",
  "reqwest",
- "resvg",
  "rubato",
  "serde",
  "serde_json",

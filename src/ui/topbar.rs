@@ -41,7 +41,35 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         if widgets::icon_button(ui, Icon::Settings, 20.0, if settings_on { theme::TEXT } else { theme::TEXT_DIM }, "Settings").clicked() {
             app.actions.push(Action::Navigate(Route::Settings));
         }
+        if !app.online() {
+            ui.add_space(6.0);
+            offline_chip(app, ui);
+        }
     });
+}
+
+/// "Offline", while there is no connection; it leads to the downloads.
+fn offline_chip(app: &mut App, ui: &mut Ui) {
+    let galley = ui.painter().layout_no_wrap("Offline".to_owned(), theme::medium(13.0), theme::TEXT);
+    let size = vec2(galley.size().x + 44.0, 30.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let response = response
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text("No connection. Downloaded songs still play: see them in Library, Cached.");
+    let shown = theme::appear(ui.ctx(), egui::Id::new("offline-chip"), 1, 0.25);
+    let fill = if response.hovered() { Color32::from_white_alpha(30) } else { Color32::from_white_alpha(16) };
+    ui.painter().rect_filled(rect, CornerRadius::same(15), fill.gamma_multiply(shown));
+    Icon::Offline
+        .image(theme::TEXT.gamma_multiply(shown), 16.0)
+        .paint_at(ui, Rect::from_center_size(pos2(rect.left() + 20.0, rect.center().y), Vec2::splat(16.0)));
+    ui.painter().galley_with_override_text_color(
+        pos2(rect.left() + 34.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        theme::TEXT.gamma_multiply(shown),
+    );
+    if response.clicked() {
+        app.actions.push(Action::Navigate(Route::Library(crate::model::LibraryTab::Cached)));
+    }
 }
 
 fn search_field(app: &mut App, ui: &mut Ui, width: f32) {

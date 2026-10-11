@@ -79,7 +79,15 @@ fn main() {
                 }
                 dev_route(&mut app);
                 let seek = std::env::var("NATIVE_YTM_SEEK").ok().and_then(|v| v.parse().ok());
-                Ok(Box::new(Window { app, shot: Shot::from_env(), seek, simulate: Simulate::from_env() }))
+                Ok(Box::new(Window {
+                    app,
+                    shot: Shot::from_env(),
+                    seek,
+                    simulate: Simulate::from_env(),
+                    size: None,
+                    resized_at: None,
+                    released_once: false,
+                }))
             }),
         )
     });
@@ -94,6 +102,12 @@ struct Window {
     /// `NATIVE_YTM_SEEK`: a position to jump to once the song plays.
     seek: Option<f64>,
     simulate: Option<Simulate>,
+    /// The window's size last frame, and when it last changed: a second
+    /// after a resize, the memory the graphics driver kept for the sizes
+    /// passed through goes back to Windows.
+    size: Option<egui::Vec2>,
+    resized_at: Option<std::time::Instant>,
+    released_once: bool,
 }
 
 /// A screenshot taken on its own and saved, for checking the interface
@@ -148,6 +162,9 @@ impl Simulate {
     }
 }
 
+/// `download` in NATIVE_YTM_ROUTE: download the song playing, once one is.
+static DOWNLOAD_PLAYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn dev_route(app: &mut App) {
     use native_ytm::model::{Action, LibraryTab, Route, SideTab};
     let Ok(route) = std::env::var("NATIVE_YTM_ROUTE") else {
@@ -164,6 +181,11 @@ fn dev_route(app: &mut App) {
             "browse" => Action::Navigate(Route::Browse { browse_id: arg.to_owned(), params: None }),
             "explore" => Action::Navigate(Route::Explore),
             "library" => Action::Navigate(Route::Library(LibraryTab::Playlists)),
+            "cached" => Action::Navigate(Route::Library(LibraryTab::Cached)),
+            "download" => {
+                DOWNLOAD_PLAYING.store(true, std::sync::atomic::Ordering::Relaxed);
+                continue;
+            }
             "settings" => Action::Navigate(Route::Settings),
             "queue" => Action::ShowSidePanel(SideTab::UpNext),
             "lyrics" => Action::ShowSidePanel(SideTab::Lyrics),
@@ -214,6 +236,35 @@ impl eframe::App for Window {
             self.app.on_close_requested();
         }
         fastframe_shell::window::recover_offscreen(ctx, frame);
+        let size = ctx.content_rect().size();
+        if self.size.is_some_and(|last| last != size) {
+            self.resized_at = Some(std::time::Instant::now());
+            self.released_once = false;
+        }
+        self.size = Some(size);
+        if let Some(at) = self.resized_at {
+            // Once a second after, and again a little later: the driver
+            // goes over its old buffers once more as it lets them go.
+            let (first, again) = (std::time::Duration::from_secs(1), std::time::Duration::from_secs(6));
+            let since = at.elapsed();
+            if since >= again {
+                self.resized_at = None;
+                platform::release_unused_memory();
+            } else if since >= first && !self.released_once {
+                self.released_once = true;
+                platform::release_unused_memory();
+                theme::repaint_in(ctx, again - since);
+            } else {
+                theme::repaint_in(ctx, if since < first { first - since } else { again - since });
+            }
+        }
+        if DOWNLOAD_PLAYING.load(Ordering::Relaxed)
+            && self.app.playing()
+            && let Some(track) = self.app.current().cloned()
+        {
+            DOWNLOAD_PLAYING.store(false, Ordering::Relaxed);
+            self.app.actions.push(native_ytm::model::Action::SaveOffline(vec![track]));
+        }
         if self.seek.is_some() && self.app.playing() && self.app.position() > 0.5 {
             let to = self.seek.take().unwrap_or_default();
             self.app.actions.push(native_ytm::model::Action::Seek(to));

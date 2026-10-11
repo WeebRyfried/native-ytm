@@ -34,6 +34,7 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Some("lyrics") if args.len() > 3 => return lyrics(&args[2..]),
+        Some("history") if args.len() > 2 => return history(&args[2..]),
         Some("play") => {}
         _ => {
             eprintln!("usage: ytm-probe dump home|browse ID|search QUERY [songs|albums|artists]|suggest TEXT|watch ID
@@ -75,6 +76,28 @@ fn main() -> anyhow::Result<()> {
         if i == 24 { if let Some(to) = seek { println!("seek to {to}"); player.seek(Duration::from_secs(to)); } }
     }
     Ok(())
+}
+
+/// `history VIDEO_ID --cookies FILE`: adds the song to the account's
+/// history as the app does, then says whether the history now starts with it.
+fn history(args: &[String]) -> anyhow::Result<()> {
+    let video_id = &args[0];
+    let path = args.iter().position(|a| a == "--cookies").and_then(|i| args.get(i + 1)).ok_or_else(|| anyhow::anyhow!("--cookies FILE"))?;
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let http = reqwest::Client::builder().gzip(true).build()?;
+    let api = api::client::Innertube::new(http, "en");
+    let text = std::fs::read_to_string(path)?;
+    api.set_auth(Some(api::client::Auth { cookies: api::client::parse_cookies(&text), auth_user: 0 }));
+    runtime.block_on(async {
+        api.bootstrap().await;
+        api.add_to_history(video_id).await?;
+        println!("reported");
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let page = api.browse("FEmusic_history", None).await?;
+        let first = page.sections.iter().flat_map(|s| s.items.iter()).find_map(|i| i.track.as_ref());
+        println!("history starts with it: {}", first.is_some_and(|t| &t.video_id == video_id));
+        anyhow::Ok(())
+    })
 }
 
 fn env_logger_lite() {

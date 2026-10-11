@@ -5,7 +5,7 @@
 //! frame. The interface is optimistic: a clicked song is the playing song at
 //! once, and the backend catches up behind it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Receiver;
@@ -15,12 +15,13 @@ use crate::api::client::{Auth, parse_cookies};
 use crate::api::model::*;
 use crate::api::music::{Filter, Rating};
 use crate::backend::{Backend, How, Purpose, Request, Response};
+use crate::cache::Mark;
 use crate::images::Images;
 use crate::model::*;
 use crate::player::{self, Player, State as PlayState, StreamInfo};
 use crate::queue::{Queue, Source};
 use crate::settings::{self, Paths, Repeat, Session, Settings};
-use crate::{discord, lastfm};
+use crate::{discord, lastfm, net};
 
 /// Set by another launch of the app, which asks for the window.
 pub static SHOW_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -45,6 +46,45 @@ enum WatchPurpose {
     Extend,
     /// Lyrics and rating for the song now playing.
     Info { video_id: String },
+    /// A whole playlist's songs, to download.
+    Offline { title: String },
+}
+
+/// Songs being downloaded for offline listening, one at a time.
+#[derive(Default)]
+pub struct Downloads {
+    /// Waiting their turn.
+    pub waiting: VecDeque<Track>,
+    active: Option<Download>,
+    /// This round: downloaded, and failed, for the line on the Cached page
+    /// and the note at the end.
+    pub done: usize,
+    pub failed: usize,
+}
+
+struct Download {
+    track: Track,
+    /// The stream's resolve, by its token.
+    token: u64,
+    /// The file coming down, once its stream is found.
+    source: Option<(crate::player::source::RemoteSource, Arc<crate::player::source::Shared>)>,
+    progress: f32,
+}
+
+impl Downloads {
+    pub fn busy(&self) -> bool {
+        self.active.is_some() || !self.waiting.is_empty()
+    }
+
+    /// The song downloading, and how far it is.
+    pub fn active(&self) -> Option<(&Track, f32)> {
+        self.active.as_ref().map(|d| (&d.track, d.progress))
+    }
+
+    fn has(&self, video_id: &str) -> bool {
+        self.active.as_ref().is_some_and(|d| d.track.video_id == video_id)
+            || self.waiting.iter().any(|t| t.video_id == video_id)
+    }
 }
 
 #[derive(Default)]
@@ -144,6 +184,27 @@ pub struct App {
     loaded: Option<(u64, StreamInfo)>,
     /// Songs kept on disk.
     pub audio_cache: Arc<crate::cache::AudioCache>,
+    /// How each song on disk stands, for the marks beside their names.
+    pub offline: HashMap<String, Mark>,
+    offline_gen: u64,
+    marks_dirty: bool,
+    pub downloads: Downloads,
+    download_done: (std::sync::mpsc::Sender<(String, bool)>, Receiver<(String, bool)>),
+    /// Whether the internet is there.
+    network: net::Network,
+    was_online: bool,
+    /// Playback stopped for want of the network; it carries on when it
+    /// is back, from `start_at`.
+    stalled: bool,
+    /// The token last added to the account's history.
+    history_sent: u64,
+    /// Found once, for Settings: whether yt-dlp has a JavaScript runtime.
+    js_runtime: Option<bool>,
+    /// The artwork cache's size, and when it was measured.
+    artwork: Option<(u64, Instant)>,
+    /// The Cached page's lists (downloaded, played lately), as of a
+    /// generation of the cache.
+    cached_lists: Option<(u64, Arc<Vec<Track>>, Arc<Vec<Track>>)>,
     /// A queue answer is on its way; the bar shows it loading.
     pub pending_queue: Option<u64>,
     extending: bool,
@@ -231,7 +292,14 @@ impl App {
         );
         let mut queue = Queue::default();
         queue.shuffle = settings.shuffle;
-        let lastfm = lastfm::LastFm::new(&paths.config, backend.runtime.handle().clone(), backend.http.clone());
+        let lastfm = lastfm::LastFm::new(&paths.config, backend.runtime.handle().clone(), backend.http.clone(), {
+            let waker = waker.clone();
+            Arc::new(move || waker.wake())
+        });
+        let network = net::Network::start({
+            let waker = waker.clone();
+            Arc::new(move || waker.wake())
+        });
         let ticking = Arc::new(AtomicBool::new(false));
         {
             let (ticking, waker) = (ticking.clone(), waker.clone());
@@ -283,6 +351,18 @@ impl App {
             upgrade: None,
             loaded: None,
             audio_cache,
+            offline: HashMap::new(),
+            offline_gen: 0,
+            marks_dirty: true,
+            downloads: Downloads::default(),
+            download_done: std::sync::mpsc::channel(),
+            network,
+            was_online: true,
+            stalled: false,
+            history_sent: 0,
+            js_runtime: None,
+            artwork: None,
+            cached_lists: None,
             pending_queue: None,
             extending: false,
             radio_dry: false,
@@ -417,6 +497,9 @@ impl App {
         self.images.poll();
         self.media_controls();
         self.tray_events();
+        self.connectivity();
+        self.download_tick();
+        self.refresh_marks();
         self.maybe_preload();
         self.maybe_extend();
         self.upgrade_tick();
@@ -431,6 +514,45 @@ impl App {
         let actions = std::mem::take(&mut self.actions);
         for action in actions {
             self.apply(action);
+        }
+    }
+
+    /// Whether the internet is there, as far as the app knows.
+    pub fn online(&self) -> bool {
+        self.network.online()
+    }
+
+    /// Whether yt-dlp will find a JavaScript runtime (Deno or Node.js).
+    pub fn js_runtime_found(&mut self) -> bool {
+        *self.js_runtime.get_or_insert_with(|| {
+            ["deno.exe", "node.exe"].iter().any(|name| crate::stream::find_on_path(name).is_some())
+        })
+    }
+
+    /// The downloaded songs and those kept from plays, for the Cached page:
+    /// made again only when what is on disk changes.
+    pub fn cached_lists(&mut self) -> (Arc<Vec<Track>>, Arc<Vec<Track>>) {
+        let generation = self.audio_cache.generation();
+        match &self.cached_lists {
+            Some((at, saved, kept)) if *at == generation => (saved.clone(), kept.clone()),
+            _ => {
+                let saved = Arc::new(self.audio_cache.saved_tracks());
+                let kept = Arc::new(self.audio_cache.kept_tracks());
+                self.cached_lists = Some((generation, saved.clone(), kept.clone()));
+                (saved, kept)
+            }
+        }
+    }
+
+    /// The artwork cache's size on disk, measured at most every ten seconds.
+    pub fn artwork_bytes(&mut self) -> u64 {
+        match self.artwork {
+            Some((bytes, at)) if at.elapsed() < Duration::from_secs(10) => bytes,
+            _ => {
+                let bytes = crate::images::cache_size(&self.paths.images());
+                self.artwork = Some((bytes, Instant::now()));
+                bytes
+            }
         }
     }
 
@@ -471,7 +593,8 @@ impl App {
             return true;
         }
         let status = self.player.status();
-        self.current().is_some()
+        !self.stalled
+            && self.current().is_some()
             && self.want_play
             && (status.token != self.current_token
                 || matches!(status.state, PlayState::Loading | PlayState::Buffering))
@@ -485,6 +608,11 @@ impl App {
         match response {
             Response::Ready => self.ready = true,
             Response::Page { key, result } => {
+                if let Err(error) = &result
+                    && net::unreachable(error)
+                {
+                    self.network.check_now();
+                }
                 let state = self.pages.entry(key).or_insert_with(PageState::loading);
                 state.data = match result {
                     Ok(page) => Loadable::Ready(page),
@@ -569,6 +697,9 @@ impl App {
                         self.search.continuation = token;
                     }
                     Err(error) => {
+                        if net::unreachable(&error) {
+                            self.network.check_now();
+                        }
                         if !more {
                             self.search.results = Loadable::Failed(error);
                         }
@@ -587,8 +718,19 @@ impl App {
                 self.on_watch(purpose, result, more, seq);
             }
             Response::PlaylistTracks { seq, result } => {
-                let Some(WatchPurpose::Start { title, .. }) = self.watch_purposes.remove(&seq) else {
-                    return;
+                let title = match self.watch_purposes.remove(&seq) {
+                    Some(WatchPurpose::Start { title, .. }) => title,
+                    Some(WatchPurpose::Offline { title }) => {
+                        match result {
+                            Ok(tracks) if !tracks.is_empty() => self.save_offline(tracks),
+                            Ok(_) => self.toast(format!("{title} has no songs to download"), ToastKind::Info),
+                            Err(error) => {
+                                self.toast(format!("Could not get the songs of {title}: {error}"), ToastKind::Error)
+                            }
+                        }
+                        return;
+                    }
+                    _ => return,
                 };
                 if self.pending_queue == Some(seq) {
                     self.pending_queue = None;
@@ -780,6 +922,7 @@ impl App {
                     }
                 }
             }
+            WatchPurpose::Offline { .. } => {}
             WatchPurpose::Info { video_id } => {
                 if self.now.video_id != video_id {
                     return;
@@ -821,6 +964,14 @@ impl App {
         let video_id = entry.track.video_id.clone();
         self.upgrade = None;
         self.loaded = None;
+        self.stalled = false;
+        // Its names go with the file, should it be kept.
+        self.audio_cache.note(&entry.track);
+        if !self.online() && !self.audio_cache.has_at_least(&video_id, 1) && !self.network.check_now() {
+            self.track_info(&video_id);
+            self.offline_skip(&entry.track.title);
+            return;
+        }
         if let Some(stream) = self.best_stream(&video_id) {
             self.loaded = Some((token, stream.clone()));
             self.player.load(token, stream, Duration::from_secs_f64(start), true);
@@ -1147,6 +1298,252 @@ impl App {
                     self.preload = None;
                 }
             }
+            (Purpose::Download, Ok((stream, _))) => {
+                let Some(active) = self.downloads.active.as_mut().filter(|d| d.token == token) else {
+                    return;
+                };
+                let (cache, track, stream_kept) = (self.audio_cache.clone(), active.track.clone(), stream.clone());
+                let (tx, waker) = (self.download_done.0.clone(), self.waker.clone());
+                let complete: crate::player::source::Complete = Box::new(move |bytes| {
+                    let id = track.video_id.clone();
+                    cache.save_offline(track, stream_kept, bytes, move |ok| {
+                        let _ = tx.send((id, ok));
+                        waker.wake();
+                    });
+                });
+                active.source = Some(crate::player::source::RemoteSource::open(
+                    self.backend.runtime.handle(),
+                    self.backend.http.clone(),
+                    stream.url.clone(),
+                    stream.header_map(),
+                    stream.content_length,
+                    Some(complete),
+                ));
+            }
+            (Purpose::Download, Err(error)) => {
+                if self.downloads.active.as_ref().is_some_and(|d| d.token == token) {
+                    self.download_failed(&error);
+                }
+            }
+        }
+    }
+
+    /// The song started: into the account's history, as on the web.
+    fn report_played(&mut self) {
+        if !(self.signed_in && self.settings.history) || self.history_sent == self.current_token {
+            return;
+        }
+        self.history_sent = self.current_token;
+        if let Some(video_id) = self.current().map(|t| t.video_id.clone()) {
+            self.backend.send(Request::History { video_id });
+        }
+    }
+
+    // ---- Offline ------------------------------------------------------------
+
+    /// Notices the connection going and coming back.
+    fn connectivity(&mut self) {
+        let online = self.online();
+        if online == self.was_online {
+            return;
+        }
+        self.was_online = online;
+        if !online {
+            self.toast("You're offline. Downloaded songs still play.", ToastKind::Info);
+            return;
+        }
+        self.toast("Back online", ToastKind::Info);
+        self.lastfm.forget_unanswered();
+        // What could not load, now can.
+        let route = self.route.clone();
+        let failed = match &route {
+            Route::Search { .. } => matches!(self.search.results, Loadable::Failed(_)),
+            _ => self.pages.get(&route.key()).is_some_and(|p| matches!(p.data, Loadable::Failed(_))),
+        };
+        if failed {
+            self.request_page(&route, true);
+        }
+        if self.signed_in && self.account.is_none() {
+            self.backend.send(Request::Account);
+            self.backend.send(Request::LibraryPlaylists);
+        }
+        if std::mem::take(&mut self.stalled) && self.current().is_some() {
+            let at = self.start_at;
+            self.start_current(at);
+        }
+    }
+
+    /// The quality a download should have: Premium's when the account
+    /// streams it, else any.
+    fn wanted_kbps(&self) -> u32 {
+        if self.account_streams() { PREMIUM_KBPS } else { 1 }
+    }
+
+    fn save_offline(&mut self, tracks: Vec<Track>) {
+        let wanted = self.wanted_kbps();
+        let (mut queued, mut at_once) = (0, 0);
+        for track in tracks {
+            let id = track.video_id.clone();
+            if self.offline.get(&id) == Some(&Mark::Saved) || self.downloads.has(&id) {
+                continue;
+            }
+            // On disk already, as good as a download would be.
+            if self.audio_cache.has_at_least(&id, wanted) && self.audio_cache.pin(&track) {
+                at_once += 1;
+                continue;
+            }
+            self.downloads.waiting.push_back(track);
+            queued += 1;
+        }
+        self.marks_dirty = true;
+        let total = queued + at_once;
+        if total == 0 {
+            self.toast("Already downloaded", ToastKind::Info);
+        } else if queued == 0 {
+            self.toast(
+                if total == 1 { "Downloaded for offline".to_owned() } else { format!("{total} songs downloaded for offline") },
+                ToastKind::Info,
+            );
+        } else if !self.online() {
+            self.toast("You're offline: the downloads start when the connection is back", ToastKind::Info);
+        } else {
+            self.toast(
+                if total == 1 { "Downloading for offline".to_owned() } else { format!("Downloading {total} songs for offline") },
+                ToastKind::Info,
+            );
+        }
+    }
+
+    /// Takes in finished downloads, follows the one under way, and starts
+    /// the next.
+    fn download_tick(&mut self) {
+        while let Ok((video_id, ok)) = self.download_done.1.try_recv() {
+            if self.downloads.active.as_ref().is_some_and(|d| d.track.video_id == video_id) {
+                self.downloads.active = None;
+            }
+            if ok {
+                self.downloads.done += 1;
+            } else {
+                self.downloads.failed += 1;
+            }
+            self.download_round_end();
+        }
+        if let Some(active) = &mut self.downloads.active
+            && let Some((_, source)) = &active.source
+        {
+            if let Some(error) = source.error() {
+                let message = match error {
+                    crate::player::source::SourceError::Forbidden => "the stream was refused".to_owned(),
+                    crate::player::source::SourceError::Other(message) => message,
+                };
+                self.download_failed(&message);
+            } else {
+                let have: u64 = source.downloaded().iter().map(|span| span.end - span.start).sum();
+                active.progress = (have as f32 / source.len().max(1) as f32).clamp(0.0, 1.0);
+                crate::theme::repaint_in(&self.ctx, Duration::from_millis(250));
+            }
+        }
+        // One yt-dlp at a time: the song playing gets its better stream first.
+        let upgrading = self.upgrade.as_ref().is_some_and(|u| u.phase == UpgradePhase::Finding);
+        if self.downloads.active.is_none() && self.online() && !upgrading {
+            while let Some(track) = self.downloads.waiting.pop_front() {
+                // Played meanwhile, and kept as good as a download would be.
+                if self.audio_cache.has_at_least(&track.video_id, self.wanted_kbps()) && self.audio_cache.pin(&track) {
+                    self.downloads.done += 1;
+                    continue;
+                }
+                let token = self.next_seq();
+                self.backend.send(Request::Resolve {
+                    token,
+                    video_id: track.video_id.clone(),
+                    purpose: Purpose::Download,
+                    start: 0.0,
+                    how: How::Full,
+                });
+                self.downloads.active = Some(Download { track, token, source: None, progress: 0.0 });
+                break;
+            }
+            self.download_round_end();
+        }
+    }
+
+    fn download_failed(&mut self, error: &str) {
+        let Some(active) = self.downloads.active.take() else {
+            return;
+        };
+        if net::unreachable(error) && !self.network.check_now() {
+            // Offline: it waits for the connection, first in line.
+            self.downloads.waiting.push_front(active.track);
+            return;
+        }
+        log::warn!("cannot download {}: {error}", active.track.video_id);
+        self.downloads.failed += 1;
+        self.download_round_end();
+    }
+
+    /// Once the last download of a round is done, says how it went.
+    fn download_round_end(&mut self) {
+        self.marks_dirty = true;
+        if self.downloads.busy() {
+            return;
+        }
+        let (done, failed) = (std::mem::take(&mut self.downloads.done), std::mem::take(&mut self.downloads.failed));
+        let songs = |n: usize| if n == 1 { "1 song".to_owned() } else { format!("{n} songs") };
+        match (done, failed) {
+            (0, 0) => {}
+            (done, 0) => self.toast(format!("Downloaded {} for offline", songs(done)), ToastKind::Info),
+            (0, failed) => self.toast(format!("Could not download {}", songs(failed)), ToastKind::Error),
+            (done, failed) => self.toast(
+                format!("Downloaded {} for offline; {} could not be downloaded", songs(done), songs(failed)),
+                ToastKind::Error,
+            ),
+        }
+    }
+
+    /// The marks beside songs' names: what is on disk, and what is
+    /// downloading. Rebuilt only when either changes.
+    fn refresh_marks(&mut self) {
+        let generation = self.audio_cache.generation();
+        let busy = self.downloads.busy();
+        if generation == self.offline_gen && !busy && !self.marks_dirty {
+            return;
+        }
+        self.offline_gen = generation;
+        self.marks_dirty = busy;
+        let mut marks = self.audio_cache.marks();
+        for track in &self.downloads.waiting {
+            marks.insert(track.video_id.clone(), Mark::Waiting);
+        }
+        if let Some(active) = &self.downloads.active {
+            marks.insert(active.track.video_id.clone(), Mark::Saving(active.progress));
+        }
+        self.offline = marks;
+    }
+
+    /// Offline, and the song is not on this PC: on to the next song in the
+    /// queue that is, or else wait for the connection.
+    fn offline_skip(&mut self, title: &str) {
+        let next = self.queue.current.and_then(|current| {
+            (current + 1..self.queue.entries.len())
+                .find(|&i| self.audio_cache.has_at_least(&self.queue.entries[i].track.video_id, 1))
+        });
+        match next {
+            Some(index) => {
+                self.toast(
+                    format!("You're offline, and \u{201c}{title}\u{201d} isn't downloaded: on to the next song on this PC"),
+                    ToastKind::Info,
+                );
+                self.queue.current = Some(index);
+                self.start_current(0.0);
+            }
+            None => {
+                self.player.stop();
+                self.stalled = true;
+                self.toast(
+                    format!("You're offline. \u{201c}{title}\u{201d} plays when the connection is back; downloaded songs play now (Library, Cached)"),
+                    ToastKind::Info,
+                );
+            }
         }
     }
 
@@ -1155,6 +1552,10 @@ impl App {
     fn cannot_play(&mut self, video_id: &str, error: &str) {
         let title = self.current().map(|t| t.title.clone()).unwrap_or_default();
         log::warn!("cannot play {video_id}: {error}");
+        if net::unreachable(error) && !self.network.check_now() {
+            self.offline_skip(&title);
+            return;
+        }
         self.failures += 1;
         let why = if error.contains("Premium members") {
             if self.signed_in {
@@ -1182,6 +1583,7 @@ impl App {
                     self.failures = 0;
                     self.retried = None;
                     self.start_at = 0.0;
+                    self.report_played();
                     self.prefetch_next();
                 } else if let Some((preload_token, uid)) = self.preload
                     && preload_token == token
@@ -1199,6 +1601,7 @@ impl App {
                     if let Some(video_id) = self.current().map(|t| t.video_id.clone()) {
                         self.track_info(&video_id);
                     }
+                    self.report_played();
                     self.prefetch_next();
                 }
             }
@@ -1263,6 +1666,16 @@ impl App {
                         start: position.as_secs_f64(),
                         how: How::Full,
                     });
+                    return;
+                }
+                if net::unreachable(&message) && !self.network.check_now() {
+                    // The connection went mid-song: it carries on from here
+                    // once it is back.
+                    self.stalled = true;
+                    self.start_at = position.as_secs_f64();
+                    self.loaded = None;
+                    self.upgrade = None;
+                    self.toast("Connection lost. The song carries on when you're back online.", ToastKind::Info);
                     return;
                 }
                 log::warn!("playback failed: {message}");
@@ -1431,7 +1844,11 @@ impl App {
                 }
             }
             PlayState::Idle => {
-                if self.current().is_some() {
+                if self.stalled {
+                    // Waiting for the connection: try again now.
+                    let at = self.start_at;
+                    self.start_current(at);
+                } else if self.current().is_some() {
                     if self.current_token != 0 && status.token == self.current_token {
                         // It played to the end: from the top.
                         self.start_current(0.0);
@@ -1510,6 +1927,9 @@ impl App {
     }
 
     pub fn navigate(&mut self, route: Route) {
+        // A page asked for from the full view (an artist's name, an
+        // album's) shows once the full view makes way for it.
+        self.full_view = false;
         if route == self.route {
             if matches!(route, Route::Search { .. }) {
                 self.request_page(&route, true);
@@ -1592,6 +2012,7 @@ impl App {
         match action {
             Action::Navigate(route) => self.navigate(route),
             Action::Back => {
+                self.full_view = false;
                 if let Some(route) = self.history.pop() {
                     let current = std::mem::replace(&mut self.route, route.clone());
                     self.forward.push(current);
@@ -1599,6 +2020,7 @@ impl App {
                 }
             }
             Action::Forward => {
+                self.full_view = false;
                 if let Some(route) = self.forward.pop() {
                     let current = std::mem::replace(&mut self.route, route.clone());
                     self.history.push(current);
@@ -2146,11 +2568,43 @@ impl App {
                 crate::platform::open_url(&url);
             }
             Action::ClearSongCache => {
-                let (_, bytes) = self.audio_cache.usage();
-                self.audio_cache.clear();
+                let bytes = self.audio_cache.usage().kept_bytes;
+                self.audio_cache.clear(false);
                 self.toast(format!("Freed {:.0} MB", bytes as f64 / 1_048_576.0), ToastKind::Info);
             }
+            Action::ClearDownloads => {
+                self.downloads = Downloads::default();
+                let bytes = self.audio_cache.usage().saved_bytes;
+                self.audio_cache.clear(true);
+                self.marks_dirty = true;
+                self.toast(format!("Removed every download, {:.0} MB", bytes as f64 / 1_048_576.0), ToastKind::Info);
+            }
+            Action::SaveOffline(tracks) => self.save_offline(tracks),
+            Action::SaveOfflinePlaylist { playlist_id, title } => {
+                let seq = self.next_seq();
+                self.watch_purposes.insert(seq, WatchPurpose::Offline { title });
+                self.backend.send(Request::PlaylistTracks { seq, playlist_id });
+            }
+            Action::RemoveOffline(ids) => {
+                self.downloads.waiting.retain(|t| !ids.contains(&t.video_id));
+                if self.downloads.active.as_ref().is_some_and(|d| ids.contains(&d.track.video_id)) {
+                    self.downloads.active = None;
+                }
+                self.audio_cache.unsave(&ids);
+                self.marks_dirty = true;
+                self.toast(
+                    if ids.len() == 1 { "Removed from downloads".to_owned() } else { format!("Removed {} songs from downloads", ids.len()) },
+                    ToastKind::Info,
+                );
+            }
+            Action::CancelDownloads => {
+                let left = self.downloads.waiting.len() + usize::from(self.downloads.active.is_some());
+                self.downloads = Downloads::default();
+                self.marks_dirty = true;
+                self.toast(format!("Stopped; {} not downloaded", crate::ui::widgets::songs(left)), ToastKind::Info);
+            }
             Action::ClearImageCache => {
+                self.artwork = None;
                 let freed = crate::images::clear_cache(&self.paths.images());
                 self.toast(format!("Freed {:.1} MB", freed as f64 / 1_048_576.0), ToastKind::Info);
             }

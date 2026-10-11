@@ -1,6 +1,6 @@
 [package]
 name = "native-ytm"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
@@ -28,9 +28,6 @@ eframe = { version = "0.36", default-features = false, features = ["accesskit", 
 egui = "0.36"
 # SVG icons through egui's image loaders.
 egui_extras = { version = "0.36", features = ["svg"] }
-# The logo, drawn from its SVG at any size: the version egui_extras already
-# builds, so nothing more to compile.
-resvg = { version = "0.45", default-features = false }
 # Spotifast's shared foundation (crmne/fastframe), every crate from one
 # revision: move them together.
 fastframe-audio = { git = "https://github.com/crmne/fastframe", rev = "bb79dbddef01e660f9cfc37ccd9dff1c299a8d47" }
@@ -58,11 +55,12 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 
 [target.'cfg(windows)'.dependencies]
 # DPAPI for the signed-in cookie, the title bar's colours, and message boxes.
-windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_Graphics_Dwm", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_Memory"] }
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_Graphics_Dwm", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_Memory", "Win32_System_Threading"] }
 
-# The Start menu shortcut that names the app in the media overlay (COM).
+# The Start menu shortcut that names the app in the media overlay, and
+# whether there is internet (the Network List Manager): COM.
 # The same version and features eframe and the audio output already build.
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem", "Win32_Networking_NetworkListManager"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

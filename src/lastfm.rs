@@ -7,7 +7,9 @@
 //! minutes, whichever comes first, as Last.fm asks; songs under 30 seconds
 //! are not. Scrobbles wait in a file while Last.fm cannot be reached.
 
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -53,6 +55,21 @@ pub enum Notice {
     Toast { text: String, error: bool },
 }
 
+/// How many times the person has played a song, and its artist, as
+/// Last.fm counts them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Plays {
+    pub track: Option<u64>,
+    pub artist: Option<u64>,
+}
+
+/// A song's key for its counts: artist and title, as Last.fm matches them.
+type PlaysKey = (String, String);
+
+fn plays_key(artist: &str, title: &str) -> PlaysKey {
+    (artist.trim().to_lowercase(), title.trim().to_lowercase())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
     Disconnected,
@@ -66,6 +83,7 @@ enum Done {
     Session(Result<(String, String), ApiError>),
     Scrobbled { count: usize, result: Result<(), ApiError> },
     NowPlaying(Result<(), ApiError>),
+    Plays { key: PlaysKey, plays: Plays },
 }
 
 #[derive(Debug)]
@@ -108,10 +126,20 @@ pub struct LastFm {
     rx: Receiver<Done>,
     runtime: tokio::runtime::Handle,
     http: reqwest::Client,
+    /// Runs when an answer arrives, so the window shows it.
+    wake: Arc<dyn Fn() + Send + Sync>,
+    /// Play counts by song, and those being asked for.
+    plays: HashMap<PlaysKey, Plays>,
+    asking: HashSet<PlaysKey>,
 }
 
 impl LastFm {
-    pub fn new(config: &std::path::Path, runtime: tokio::runtime::Handle, http: reqwest::Client) -> Self {
+    pub fn new(
+        config: &std::path::Path,
+        runtime: tokio::runtime::Handle,
+        http: reqwest::Client,
+        wake: Arc<dyn Fn() + Send + Sync>,
+    ) -> Self {
         let path = config.join("lastfm.bin");
         let queue_path = config.join("scrobbles.json");
         let stored = std::fs::read(&path)
@@ -134,7 +162,61 @@ impl LastFm {
             rx,
             runtime,
             http,
+            wake,
+            plays: HashMap::new(),
+            asking: HashSet::new(),
         }
+    }
+
+    /// Sends an answer back to the interface thread, and wakes it.
+    fn sender(&self) -> impl Fn(Done) + Send + 'static {
+        let (tx, wake) = (self.tx.clone(), self.wake.clone());
+        move |done| {
+            let _ = tx.send(done);
+            wake();
+        }
+    }
+
+    /// How often the person has played this song and its artist, once
+    /// Last.fm has said; asks the first time. None when not connected.
+    pub fn plays(&mut self, artist: &str, title: &str) -> Option<Plays> {
+        let user = self.stored.user.clone().filter(|_| self.stored.session.is_some())?;
+        let key = plays_key(artist, title);
+        if let Some(plays) = self.plays.get(&key) {
+            return Some(*plays);
+        }
+        if self.asking.insert(key.clone()) {
+            if self.plays.len() > 500 {
+                self.plays.clear();
+            }
+            let (http, stored, send) = (self.http.clone(), self.stored.clone(), self.sender());
+            let (artist, title) = (artist.to_owned(), title.to_owned());
+            self.runtime.spawn(async move {
+                let track_params = [("artist", artist.as_str()), ("track", title.as_str()), ("username", user.as_str())];
+                let artist_params = [("artist", artist.as_str()), ("username", user.as_str())];
+                let (track, by) = tokio::join!(
+                    read(&http, &stored, "track.getInfo", &track_params),
+                    read(&http, &stored, "artist.getInfo", &artist_params)
+                );
+                let plays = Plays {
+                    track: track.ok().and_then(|v| count(&v["track"]["userplaycount"])),
+                    artist: by.ok().and_then(|v| count(&v["artist"]["stats"]["userplaycount"])),
+                };
+                send(Done::Plays { key, plays });
+            });
+        }
+        None
+    }
+
+    /// Forgets counts Last.fm never gave (asked while offline), so they
+    /// are asked again.
+    pub fn forget_unanswered(&mut self) {
+        self.plays.retain(|_, plays| plays.track.is_some() || plays.artist.is_some());
+    }
+
+    /// The song's page on Last.fm.
+    pub fn track_url(artist: &str, title: &str) -> String {
+        format!("https://www.last.fm/music/{}/_/{}", path_part(artist), path_part(title))
     }
 
     pub fn status(&self) -> Status {
@@ -159,19 +241,20 @@ impl LastFm {
             session: None,
             user: None,
         };
-        let (http, tx, stored) = (self.http.clone(), self.tx.clone(), self.stored.clone());
+        let (http, stored, send) = (self.http.clone(), self.stored.clone(), self.sender());
         self.runtime.spawn(async move {
             let result = call(&http, &stored, "auth.getToken", Vec::new(), false)
                 .await
                 .map_err(|e| describe(&e))
                 .and_then(|v| v["token"].as_str().map(str::to_owned).ok_or_else(|| "no token".to_owned()));
-            let _ = tx.send(Done::Token(result));
+            send(Done::Token(result));
         });
     }
 
     pub fn disconnect(&mut self) {
         self.stored.session = None;
         self.stored.user = None;
+        self.plays.clear();
         self.authorising = None;
         self.play = None;
         self.save();
@@ -264,6 +347,11 @@ impl LastFm {
         if !play.done && length >= 30.0 && play.heard >= (length / 2.0).min(240.0) {
             play.done = true;
             log::info!("scrobbling {} - {}", play.scrobble.artist, play.scrobble.track);
+            // One more play of each, shown at once.
+            if let Some(plays) = self.plays.get_mut(&plays_key(&play.scrobble.artist, &play.scrobble.track)) {
+                plays.track = plays.track.map(|n| n + 1);
+                plays.artist = plays.artist.map(|n| n + 1);
+            }
             self.pending.push(play.scrobble.clone());
             self.save_queue();
             self.next_send = Instant::now();
@@ -271,7 +359,7 @@ impl LastFm {
     }
 
     fn now_playing(&self, scrobble: Scrobble) {
-        let (http, tx, stored) = (self.http.clone(), self.tx.clone(), self.stored.clone());
+        let (http, stored, send) = (self.http.clone(), self.stored.clone(), self.sender());
         self.runtime.spawn(async move {
             let mut params = vec![("artist".to_owned(), scrobble.artist), ("track".to_owned(), scrobble.track)];
             if let Some(album) = scrobble.album {
@@ -281,7 +369,7 @@ impl LastFm {
                 params.push(("duration".into(), duration.to_string()));
             }
             let result = call(&http, &stored, "track.updateNowPlaying", params, true).await.map(|_| ());
-            let _ = tx.send(Done::NowPlaying(result));
+            send(Done::NowPlaying(result));
         });
     }
 
@@ -289,7 +377,7 @@ impl LastFm {
         self.sending = true;
         let batch: Vec<Scrobble> = self.pending.iter().take(50).cloned().collect();
         let count = batch.len();
-        let (http, tx, stored) = (self.http.clone(), self.tx.clone(), self.stored.clone());
+        let (http, stored, send) = (self.http.clone(), self.stored.clone(), self.sender());
         self.runtime.spawn(async move {
             let mut params = Vec::new();
             for (i, s) in batch.into_iter().enumerate() {
@@ -304,7 +392,7 @@ impl LastFm {
                 }
             }
             let result = call(&http, &stored, "track.scrobble", params, true).await.map(|_| ());
-            let _ = tx.send(Done::Scrobbled { count, result });
+            send(Done::Scrobbled { count, result });
         });
     }
 
@@ -319,7 +407,7 @@ impl LastFm {
         }
         auth.polling = true;
         let token = auth.token.clone();
-        let (http, tx, stored) = (self.http.clone(), self.tx.clone(), self.stored.clone());
+        let (http, stored, send) = (self.http.clone(), self.stored.clone(), self.sender());
         self.runtime.spawn(async move {
             let result = call(&http, &stored, "auth.getSession", vec![("token".into(), token)], false)
                 .await
@@ -331,7 +419,7 @@ impl LastFm {
                         _ => Err(ApiError::Network("no session in the answer".into())),
                     }
                 });
-            let _ = tx.send(Done::Session(result));
+            send(Done::Session(result));
         });
     }
 
@@ -406,6 +494,10 @@ impl LastFm {
                         self.signed_out(&error, notices);
                     }
                 }
+                Done::Plays { key, plays } => {
+                    self.asking.remove(&key);
+                    self.plays.insert(key, plays);
+                }
             }
         }
     }
@@ -451,6 +543,46 @@ fn signature(params: &[(String, String)], secret: &str) -> String {
     Md5::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// A read-only method: asked with the API key alone, unsigned.
+async fn read(http: &reqwest::Client, stored: &Stored, method: &str, params: &[(&str, &str)]) -> Result<Value, ApiError> {
+    let mut query: Vec<(&str, &str)> = vec![("method", method), ("api_key", &stored.key), ("autocorrect", "1"), ("format", "json")];
+    query.extend_from_slice(params);
+    let response = http
+        .get(API)
+        .query(&query)
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| ApiError::Network(e.without_url().to_string()))?;
+    let value: Value = response
+        .json()
+        .await
+        .map_err(|e| ApiError::Network(e.without_url().to_string()))?;
+    if let Some(code) = value["error"].as_i64() {
+        return Err(ApiError::Api(code, value["message"].as_str().unwrap_or("error").to_owned()));
+    }
+    Ok(value)
+}
+
+/// A count, which Last.fm sends as a string or a number.
+fn count(value: &Value) -> Option<u64> {
+    value.as_u64().or_else(|| value.as_str().and_then(|s| s.trim().parse().ok()))
+}
+
+/// A name as Last.fm puts it in its addresses: spaces as +, the rest
+/// percent-encoded.
+fn path_part(name: &str) -> String {
+    let mut out = String::new();
+    for byte in name.trim().bytes() {
+        match byte {
+            b' ' => out.push('+'),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(byte as char),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 async fn call(
     http: &reqwest::Client,
     stored: &Stored,
@@ -489,6 +621,18 @@ async fn call(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn counts_and_addresses() {
+        assert_eq!(count(&serde_json::json!("1248")), Some(1248));
+        assert_eq!(count(&serde_json::json!(87)), Some(87));
+        assert_eq!(count(&serde_json::json!(null)), None);
+        assert_eq!(
+            LastFm::track_url("Mojo", "Andai Ku Bercinta lagi"),
+            "https://www.last.fm/music/Mojo/_/Andai+Ku+Bercinta+lagi"
+        );
+        assert_eq!(path_part("AC/DC & Me"), "AC%2FDC+%26+Me");
+    }
 
     #[test]
     fn signature_sorts_and_skips_format() {

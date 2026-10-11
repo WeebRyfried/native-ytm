@@ -361,6 +361,40 @@ impl Innertube {
         Ok(value)
     }
 
+    /// Adds a song to the account's history, as the web player does when a
+    /// song starts: the player request, then the playback report it names.
+    pub async fn add_to_history(&self, video_id: &str) -> Result<()> {
+        const CPN: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let response = self.post("player", json!({ "videoId": video_id })).await?;
+        let report = response
+            .pointer("/playbackTracking/videostatsPlaybackUrl/baseUrl")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("no playback report address"))?;
+        // The playback's own id, as the web player makes one.
+        let cpn: String = (0..16).map(|_| CPN[fastrand::usize(..CPN.len())] as char).collect();
+        let mut request = self
+            .http
+            .get(report)
+            .query(&[("ver", "2"), ("c", "WEB_REMIX"), ("cpn", cpn.as_str())])
+            .timeout(Duration::from_secs(15))
+            .header("User-Agent", BROWSER_UA)
+            .header("Origin", ORIGIN)
+            .header("Referer", format!("{ORIGIN}/"))
+            .header("Cookie", self.cookie_with_consent());
+        if let Some(auth) = self.auth.read().clone()
+            && let Some(hash) = auth.sapisid_hash()
+        {
+            request = request
+                .header("Authorization", hash)
+                .header("X-Goog-AuthUser", auth.auth_user.to_string());
+        }
+        let status = request.send().await.context("playback report")?.status();
+        if !status.is_success() {
+            bail!("playback report: HTTP {status}");
+        }
+        Ok(())
+    }
+
     /// The player request as another client, for stream addresses that
     /// need no JavaScript challenge. The client is configurable since
     /// YouTube changes which clients work.

@@ -58,6 +58,8 @@ pub struct Settings {
     pub discord_client_id: String,
     /// Scrobble to Last.fm, once connected.
     pub scrobble: bool,
+    /// Signed in, add the songs played to the account's history.
+    pub history: bool,
     pub sidebar: bool,
     pub side_panel: bool,
     /// Pick up where the last session left off.
@@ -86,6 +88,7 @@ impl Default for Settings {
             discord: true,
             discord_client_id: String::new(),
             scrobble: true,
+            history: true,
             sidebar: true,
             side_panel: false,
             restore_session: true,
