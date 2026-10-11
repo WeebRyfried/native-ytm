@@ -33,7 +33,13 @@ impl Cx<'_> {
 /// Artwork filling `rect`, cropped to its shape, or a quiet placeholder
 /// while it loads.
 pub fn paint_art(ui: &Ui, images: &mut Images, url: Option<&str>, rect: Rect, radius: f32, round: bool) {
+    paint_art_faded(ui, images, url, rect, radius, round, 1.0);
+}
+
+/// The same, at `opacity`, for crossfades.
+pub fn paint_art_faded(ui: &Ui, images: &mut Images, url: Option<&str>, rect: Rect, radius: f32, round: bool, opacity: f32) {
     let painter = ui.painter_at(rect.expand(1.0));
+    let tint = Color32::WHITE.gamma_multiply(opacity);
     let corner = if round {
         CornerRadius::same((rect.width() / 2.0).min(255.0) as u8)
     } else {
@@ -45,7 +51,7 @@ pub fn paint_art(ui: &Ui, images: &mut Images, url: Option<&str>, rect: Rect, ra
         Some(texture) => {
             let size = texture.size_vec2();
             let uv = crop_uv(size, rect.size());
-            let mut mesh = egui::epaint::RectShape::filled(rect, corner, Color32::WHITE);
+            let mut mesh = egui::epaint::RectShape::filled(rect, corner, tint);
             mesh.brush = Some(std::sync::Arc::new(egui::epaint::Brush {
                 fill_texture_id: texture.id(),
                 uv,
@@ -53,11 +59,11 @@ pub fn paint_art(ui: &Ui, images: &mut Images, url: Option<&str>, rect: Rect, ra
             painter.add(mesh);
         }
         None => {
-            painter.rect_filled(rect, corner, theme::SURFACE);
+            painter.rect_filled(rect, corner, theme::SURFACE.gamma_multiply(opacity));
             let icon = (rect.width() * 0.36).clamp(14.0, 64.0);
             let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(icon));
             Icon::Music
-                .image(theme::TEXT_FAINT, icon)
+                .image(theme::TEXT_FAINT.gamma_multiply(opacity), icon)
                 .paint_at(ui, icon_rect);
         }
     }
@@ -80,21 +86,27 @@ fn crop_uv(size: Vec2, target: Vec2) -> Rect {
 
 /// An icon on a round hover highlight.
 pub fn icon_button(ui: &mut Ui, icon: Icon, size: f32, tint: Color32, tip: &str) -> Response {
+    icon_button_scaled(ui, icon, size, tint, tip, 1.0)
+}
+
+/// The same, its icon drawn at `scale` (for a pop) in the same room.
+pub fn icon_button_scaled(ui: &mut Ui, icon: Icon, size: f32, tint: Color32, tip: &str, scale: f32) -> Response {
     let pad = (size * 0.45).max(6.0);
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(size + pad * 2.0), Sense::click());
     let response = response.on_hover_cursor(CursorIcon::PointingHand);
     if ui.is_rect_visible(rect) {
-        if response.hovered() {
+        // The hover circle fades in and out rather than blinking.
+        let hover = ui.ctx().animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
+        if hover > 0.0 {
             ui.painter()
-                .circle_filled(rect.center(), rect.width() / 2.0, Color32::from_white_alpha(22));
+                .circle_filled(rect.center(), rect.width() / 2.0, Color32::from_white_alpha((22.0 * hover) as u8));
         }
-        let tint = if response.is_pointer_button_down_on() {
-            tint.gamma_multiply(0.8)
-        } else {
-            tint
-        };
-        icon.image(tint, size)
-            .paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(size)));
+        // Pressed: dimmer and a touch smaller.
+        let pressed = response.is_pointer_button_down_on();
+        let tint = if pressed { tint.gamma_multiply(0.8) } else { tint };
+        let drawn = size * scale * if pressed { 0.92 } else { 1.0 };
+        icon.image(tint, drawn)
+            .paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(drawn)));
     }
     if tip.is_empty() {
         response
@@ -173,8 +185,28 @@ pub fn chip(ui: &mut Ui, text: &str, selected: bool) -> Response {
 pub fn spinner(ui: &mut Ui) {
     ui.add_space(48.0);
     ui.vertical_centered(|ui| {
-        ui.add(egui::Spinner::new().size(28.0).color(theme::TEXT_DIM));
+        spinner_of(ui, 28.0, theme::TEXT_DIM);
     });
+}
+
+/// A turning arc, as egui's spinner draws it, but at 60 frames a second
+/// rather than the screen's full rate.
+pub fn spinner_of(ui: &mut Ui, size: f32, color: Color32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let t = ui.input(|i| i.time) as f32;
+    let start = t * 5.0;
+    let radius = rect.width() / 2.0 - 2.0;
+    let points: Vec<Pos2> = (0..=24)
+        .map(|i| {
+            let a = start + i as f32 / 24.0 * std::f32::consts::PI * 1.4;
+            rect.center() + vec2(a.cos(), a.sin()) * radius
+        })
+        .collect();
+    ui.painter().add(egui::Shape::line(points, Stroke::new(2.5, color)));
+    theme::next_frame(ui.ctx());
 }
 
 pub fn failed(ui: &mut Ui, message: &str, retry: Option<Action>, cx: &mut Cx<'_>) {
@@ -310,9 +342,10 @@ pub fn track_row(
     // Where the pointer is, not which widget has it: the artwork and the
     // menu button sit over the row and would take its hover away.
     let hovered = response.contains_pointer() || response.context_menu_opened();
-    if hovered {
+    let shade = ui.ctx().animate_bool_with_time(response.id.with("hover"), hovered, 0.1);
+    if shade > 0.0 {
         ui.painter()
-            .rect_filled(rect, CornerRadius::same(6), Color32::from_white_alpha(14));
+            .rect_filled(rect, CornerRadius::same(6), Color32::from_white_alpha((14.0 * shade) as u8));
     } else if current && matches!(place, RowPlace::Queue(_)) {
         ui.painter()
             .rect_filled(rect, CornerRadius::same(6), Color32::from_white_alpha(10));
@@ -448,7 +481,7 @@ fn explicit_badge(ui: &mut Ui) {
 fn equalizer(ui: &Ui, center: Pos2, playing: bool) {
     let t = ui.input(|i| i.time) as f32;
     if playing {
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+        theme::repaint_in(ui.ctx(), std::time::Duration::from_millis(100));
     }
     for (i, phase) in [0.0f32, 1.7, 3.1].iter().enumerate() {
         let h = if playing {
@@ -620,23 +653,25 @@ pub fn card(ui: &mut Ui, cx: &mut Cx<'_>, item: &Item, width: f32) -> Response {
     let hovered = response.contains_pointer() || response.context_menu_opened();
     let playable = item.track.is_some() || item.play_playlist.is_some();
     let mut play_clicked = false;
-    if hovered && !round {
+    // The dim and the play button fade in, the button rising a little.
+    let shown = ui.ctx().animate_bool_with_time(response.id.with("hover"), hovered, 0.14);
+    if shown > 0.0 && !round {
         ui.painter().rect_filled(
             art,
             CornerRadius::same(6),
-            Color32::from_black_alpha(90),
+            Color32::from_black_alpha((90.0 * shown) as u8),
         );
     }
-    if hovered && playable {
-        let c = art.right_bottom() - vec2(28.0, 28.0);
+    if shown > 0.0 && playable {
+        let c = art.right_bottom() - vec2(28.0, 28.0 - 6.0 * (1.0 - shown));
         let button = Rect::from_center_size(c, Vec2::splat(40.0));
         let play = ui.interact(button, response.id.with("play"), Sense::click());
         let fill = if play.hovered() { Color32::from_black_alpha(230) } else { Color32::from_black_alpha(170) };
-        ui.painter().circle_filled(c, 20.0, fill);
+        ui.painter().circle_filled(c, 20.0 * (0.85 + 0.15 * shown), fill.gamma_multiply(shown));
         Icon::Play
-            .image(Color32::WHITE, 18.0)
+            .image(Color32::WHITE.gamma_multiply(shown), 18.0)
             .paint_at(ui, Rect::from_center_size(c + vec2(1.0, 0.0), Vec2::splat(18.0)));
-        play_clicked = play.clicked();
+        play_clicked = play.clicked() && hovered;
     }
     let text_rect = Rect::from_min_max(pos2(rect.left(), art.bottom() + 8.0), rect.max);
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(text_rect).layout(if round {

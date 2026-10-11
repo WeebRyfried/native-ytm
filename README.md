@@ -22,7 +22,9 @@ This is a personal experiment, not affiliated with Google or YouTube.
   this one ends), instant seeking, and YouTube Music's loudness
   normalisation.
 - **Premium quality**: signed in with a Music Premium account, 256 kb/s
-  Opus (or AAC), and the songs only Premium members can play.
+  Opus (or AAC), and the songs only Premium members can play. A song starts
+  at once on the quick stream and switches to the Premium one mid-song with
+  no break (the full-window player shows the switch).
 - **Queue**: play next, add to queue, drag to reorder, shuffle, repeat
   (all or one), and **autoplay radio** that keeps going when the queue runs
   out, as YouTube Music does.
@@ -30,7 +32,10 @@ This is a personal experiment, not affiliated with Google or YouTube.
   the view following it, a click on a line to play from there (from
   [LRCLIB](https://lrclib.net); YouTube's own lyrics otherwise).
 - **A full-window player**: the artwork large over a wash of its colours,
-  with what plays next or the lyrics beside it.
+  with what plays next or the lyrics beside it, fading and rising in.
+- Light animations throughout (page and toast transitions, hover fades, the
+  play button's morph, a like's pop, the artwork crossfading between
+  songs), each drawing frames only while it moves.
 - **Discord**: "Listening to" the artist, with the artwork, the song and a
   progress bar on your profile.
 - **Last.fm** scrobbling, with now-playing updates.
@@ -81,9 +86,18 @@ whose addresses need its JavaScript run. With **Premium quality** on (in
 Settings) and an account signed in, the app asks
 [yt-dlp](https://github.com/yt-dlp/yt-dlp) for them with the account's
 cookie, written to a file in `%LOCALAPPDATA%\native-ytm\cache\scratch`
-for the few seconds yt-dlp runs and removed after. That takes four or
-five seconds a song, so the next song is resolved while one plays and
-starts at once. Premium members' songs go this way whatever the setting.
+for the few seconds yt-dlp runs and removed after. Premium members' songs
+go this way whatever the setting.
+
+That takes four to eight seconds, so a song is not kept waiting for it: it
+starts on the quick signed-out stream (Opus at about 130 kb/s) in under a
+second, and when yt-dlp has the Premium stream, the player switches to it
+where its decoded audio runs out (about three seconds ahead of what is
+heard). The new stream's first 60 ms are decoded over the last 60 ms queued
+and crossfaded, so the join cannot click, and both are levelled to the
+same loudness. The switch happens only between streams of the same codec,
+which line up to the sample. The next song's Premium stream is fetched
+while this one plays, so it starts in Premium quality at once.
 
 YouTube changes which clients work. When none does, the app falls back to
 yt-dlp if it is installed (it is looked for on `PATH`, or set its path in
@@ -196,13 +210,36 @@ your friends; and, once connected, scrobbles to Last.fm.
 
 ## Footprint
 
-Measured on this machine with the release build: a 15 MB executable, the
-window up about 0.1 s after launch, about 0.2% of one core when idle and
-4% while playing with the window open (7% in the full-window player with
-synced lyrics moving, 0.3% closed to the tray), and about 160 MB of private
-memory with the window open (87 MB in the tray). Some 58 MB of that is the
-system fonts for Chinese, Japanese, Korean and other scripts, loaded so
-every title draws.
+Measured on this machine (a laptop drawing on Intel UHD graphics, at 144
+and 60 Hz) with the release build, in private memory, share of one CPU
+core, and the GPU's 3D engine:
+
+| | Memory | CPU | GPU |
+| --- | --- | --- | --- |
+| Idle, window open | 101 MB | 0.2% | 0% |
+| Playing, window open | 110 MB | 4% | 1.6% |
+| Full-window player, synced lyrics moving | 115 MB | 6% | 2.7% |
+| Playing, closed to the tray | 33 MB | 0.5% | none |
+
+A 15 MB executable; the window is up about 0.1 s after launch. What keeps
+it there:
+
+- The fonts for Chinese, Japanese, Korean and other scripts are the
+  system's own, memory-mapped rather than read in (58 MB that would
+  otherwise be the app's): only the parts glyphs are drawn from are loaded,
+  and those are shared with every other program using the fonts. This is
+  the one change to the vendored `fastframe-fonts` (in `vendor/`).
+- Frames are drawn only when something changes. Animations the app drives
+  are held to 60 frames a second (egui takes a frame off every delay asked
+  for, which `theme::repaint_in` makes up), the lyrics glide and the
+  breathing dots pace themselves, and nothing spins at the screen's full
+  rate.
+- Artwork is kept on the GPU within a 48 MB budget and reloaded from the
+  disk cache when drawn again; the media overlay's artwork is read from
+  disk without becoming a texture.
+- The audio engine decodes in bursts (topping three seconds of audio back
+  up whenever it falls below two and a quarter) and otherwise sleeps.
+  Decoding Opus and resampling cost about 0.3% of a core.
 
 ## Limits
 
@@ -223,6 +260,8 @@ every title draws.
 - [ytmusicapi](https://github.com/sigma67/ytmusicapi) and
   [yt-dlp](https://github.com/yt-dlp/yt-dlp): what YouTube Music's API looks
   like, and which clients still get streams.
+- `vendor/fastframe-fonts` is fastframe's font crate (MIT) with its
+  fallback fonts memory-mapped.
 - [libopus](https://opus-codec.org) (BSD), by way of
   [unsafe-libopus](https://github.com/DCNick3/unsafe-libopus), for Opus.
 - [LRCLIB](https://lrclib.net) for synced lyrics, and

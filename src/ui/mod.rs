@@ -48,14 +48,31 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         .show_separator_line(false)
         .frame(Frame::new().fill(theme::PLAYER))
         .show(ui, |ui| player_bar::show(app, ui));
-    if app.full_view {
-        egui::CentralPanel::default()
-            .frame(Frame::new().fill(theme::BG))
-            .show(ui, |ui| now_playing::show(app, ui));
-        dialogs::show(app, &ctx);
-        toasts(app, &ctx);
-        return;
+    // The full view fades in over the window and rises into place, and
+    // fades out the same way. Fully open, the window beneath is not drawn.
+    let rest = ui.available_rect_before_wrap();
+    let open = ctx.animate_bool_with_time(egui::Id::new("full-view-open"), app.full_view, 0.22);
+    if open < 1.0 {
+        windowed(app, ui);
     }
+    if open > 0.0 {
+        let eased = theme::ease_out(open);
+        egui::Area::new(egui::Id::new("full-view"))
+            .order(egui::Order::Middle)
+            .fixed_pos(rest.min)
+            .show(&ctx, |area| {
+                let mut ui = area.new_child(egui::UiBuilder::new().max_rect(rest));
+                ui.set_clip_rect(rest);
+                ui.multiply_opacity(eased);
+                now_playing::show(app, &mut ui, rest, (1.0 - eased) * 28.0);
+            });
+    }
+    dialogs::show(app, &ctx);
+    toasts(app, &ctx);
+}
+
+/// The window as usual: the sidebar, the side panel and the page.
+fn windowed(app: &mut App, ui: &mut egui::Ui) {
     if app.settings.sidebar {
         egui::Panel::left("sidebar")
             .exact_size(theme::SIDEBAR_WIDTH)
@@ -83,8 +100,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             topbar::show(app, ui);
             pages::show(app, ui);
         });
-    dialogs::show(app, &ctx);
-    toasts(app, &ctx);
 }
 
 fn toasts(app: &App, ctx: &egui::Context) {
@@ -103,8 +118,17 @@ fn toasts(app: &App, ctx: &egui::Context) {
             )
         });
         let size = galley.size() + vec2(32.0, 20.0);
+        // In: rising and fading in. Out: fading as it sinks a little.
+        let now = std::time::Instant::now();
+        let shown = theme::ease_out(now.duration_since(toast.born).as_secs_f32() / 0.22);
+        let left = toast.until.saturating_duration_since(now).as_secs_f32();
+        let leaving = (left / 0.25).clamp(0.0, 1.0);
+        let presence = shown.min(leaving);
+        if presence < 1.0 {
+            theme::next_frame(ctx);
+        }
         let rect = Rect::from_center_size(
-            egui::pos2(screen.center().x, y - size.y / 2.0),
+            egui::pos2(screen.center().x, y - size.y / 2.0 + (1.0 - presence) * 14.0),
             size,
         );
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("toasts")));
@@ -112,13 +136,13 @@ fn toasts(app: &App, ctx: &egui::Context) {
             ToastKind::Info => Color32::from_rgb(0x2b, 0x2b, 0x2b),
             ToastKind::Error => Color32::from_rgb(0x5c, 0x1a, 0x1f),
         };
-        painter.rect_filled(rect.translate(vec2(0.0, 3.0)), CornerRadius::same(8), Color32::from_black_alpha(90));
-        painter.rect_filled(rect, CornerRadius::same(8), fill);
-        painter.galley(rect.center() - galley.size() / 2.0, galley, theme::TEXT);
+        painter.rect_filled(rect.translate(vec2(0.0, 3.0)), CornerRadius::same(8), Color32::from_black_alpha(90).gamma_multiply(presence));
+        painter.rect_filled(rect, CornerRadius::same(8), fill.gamma_multiply(presence));
+        painter.galley_with_override_text_color(rect.center() - galley.size() / 2.0, galley, theme::TEXT.gamma_multiply(presence));
         y -= size.y + 8.0;
         let _ = Align2::CENTER_CENTER;
     }
     if let Some(next) = app.toasts.iter().map(|t| t.until).min() {
-        ctx.request_repaint_after(next.saturating_duration_since(std::time::Instant::now()));
+        theme::repaint_in(ctx, next.saturating_duration_since(std::time::Instant::now()));
     }
 }

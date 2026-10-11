@@ -61,6 +61,32 @@ impl Resolver {
         }
     }
 
+    /// The signed-out clients alone: the quickest stream, to start on.
+    pub async fn resolve_native(&self, api: &Innertube, video_id: &str) -> Result<(StreamInfo, Via)> {
+        let mut errors = Vec::new();
+        for client in &self.clients {
+            match native(api, client, video_id).await {
+                Ok(stream) => return Ok((stream, Via::Native)),
+                Err(error) => {
+                    log::info!("{} could not resolve {video_id}: {error:#}", client.name);
+                    errors.push(format!("{}: {error}", client.name));
+                }
+            }
+        }
+        Err(anyhow!(errors.join("; ")))
+    }
+
+    /// The account's own stream through yt-dlp: Premium's 256 kb/s, or a
+    /// song only Premium members can play.
+    pub async fn resolve_account(&self, api: &Innertube, video_id: &str) -> Result<(StreamInfo, Via)> {
+        let auth = api.auth().filter(Auth::is_usable).ok_or_else(|| anyhow!("not signed in"))?;
+        let path = self.ytdlp.as_ref().ok_or_else(|| anyhow!("yt-dlp: not installed"))?;
+        let quality = if self.premium { Quality::Premium } else { Quality::Standard };
+        ytdlp(api, path, video_id, Some(&auth), quality, &self.scratch)
+            .await
+            .map(|stream| (stream, Via::Account))
+    }
+
     pub async fn resolve(&self, api: &Innertube, video_id: &str) -> Result<(StreamInfo, Via)> {
         let auth = api.auth().filter(Auth::is_usable);
         let mut errors = Vec::new();

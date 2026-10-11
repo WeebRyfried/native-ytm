@@ -84,7 +84,7 @@ fn sign_in(app: &mut App, ctx: &egui::Context) {
                 ui.spacing_mut().item_spacing.x = 10.0;
                 let busy = dialog.busy;
                 if busy {
-                    ui.add(egui::Spinner::new().color(theme::TEXT));
+                    widgets::spinner_of(ui, 20.0, theme::TEXT);
                 } else if widgets::pill(ui, None, "Sign in", true).clicked() {
                     submit = Some(dialog.text.clone());
                 }
@@ -92,7 +92,7 @@ fn sign_in(app: &mut App, ctx: &egui::Context) {
                     close = true;
                 }
                 if widgets::pill(ui, Some(Icon::External), "Open YouTube Music", false).clicked() {
-                    ui.ctx().open_url(egui::OpenUrl::new_tab("https://music.youtube.com"));
+                    crate::platform::open_url("https://music.youtube.com");
                 }
             });
         });
@@ -137,7 +137,7 @@ fn picker(app: &mut App, ctx: &egui::Context) {
             ui.add_space(8.0);
             egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
                 if playlists.is_empty() {
-                    ui.add(egui::Spinner::new());
+                    widgets::spinner_of(ui, 20.0, theme::TEXT_DIM);
                 }
                 for item in playlists.iter() {
                     let Some(Target::Browse { browse_id, .. }) = &item.target else {

@@ -73,6 +73,41 @@ impl Queue {
     }
 }
 
+impl Queue {
+    /// Mixes `samples`, another stream's version of the same stretch of
+    /// `token`, into the queue's last `left` frames, fading from what is
+    /// queued to them: frame `i` of the fade is `total - left + i` of
+    /// `total`. False when those frames are no longer queued.
+    pub fn blend(&mut self, token: u64, samples: &[f32], channels: usize, left: usize, total: usize) -> bool {
+        let frames = samples.len() / channels.max(1);
+        let Some(last) = self.runs.back() else {
+            return false;
+        };
+        if last.token != token || last.frames < left || frames > left {
+            return false;
+        }
+        let start = self.samples.len() - left * channels;
+        for i in 0..frames {
+            // Linear: the two are the same recording, so their sum keeps
+            // its level all through the fade.
+            let w = (total - left + i + 1) as f32 / (total + 1) as f32;
+            for c in 0..channels {
+                let slot = &mut self.samples[start + i * channels + c];
+                *slot += (samples[i * channels + c] - *slot) * w;
+            }
+        }
+        true
+    }
+
+    /// Frames still queued at the end for `token`.
+    pub fn tail_frames(&self, token: u64) -> usize {
+        self.runs
+            .back()
+            .filter(|run| run.token == token)
+            .map_or(0, |run| run.frames)
+    }
+}
+
 pub fn frames_to_time(frames: usize, rate: u32) -> Duration {
     Duration::from_nanos((frames as u128 * 1_000_000_000 / u128::from(rate.max(1))) as u64)
 }
@@ -184,5 +219,27 @@ impl fastframe_audio::Render for Renderer {
             }
         }
         self.gain = target;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blend_fades_the_tail_into_the_new_stream() {
+        let mut queue = Queue::default();
+        queue.push(7, Duration::ZERO, &[1.0; 20], 2, 48_000);
+        // The new stream's version of the last four frames, in two blocks.
+        assert!(queue.blend(7, &[0.0; 4], 2, 4, 4));
+        assert!(queue.blend(7, &[0.0; 4], 2, 2, 4));
+        let tail: Vec<f32> = queue.samples.iter().skip(12).step_by(2).copied().collect();
+        // From all old toward all new, never a jump.
+        assert_eq!(tail.len(), 4);
+        assert!(tail.windows(2).all(|w| w[1] < w[0]));
+        assert!((tail[0] - 0.8).abs() < 1e-6 && (tail[3] - 0.2).abs() < 1e-6);
+        // Another token, or more than is queued, is refused.
+        assert!(!queue.blend(8, &[0.0; 2], 2, 1, 1));
+        assert!(!queue.blend(7, &[0.0; 2], 2, 11, 11));
     }
 }

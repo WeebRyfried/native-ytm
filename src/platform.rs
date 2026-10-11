@@ -132,6 +132,40 @@ pub fn style_title_bar(hwnd: isize, caption: egui::Color32) {
 #[cfg(not(windows))]
 pub fn style_title_bar(_hwnd: isize, _caption: egui::Color32) {}
 
+/// Opens a web address in the default browser. Only http and https: a
+/// link from YouTube's data never gets to start anything else.
+#[cfg(windows)]
+pub fn open_url(url: &str) {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let lower = url.trim().to_ascii_lowercase();
+    if !(lower.starts_with("https://") || lower.starts_with("http://")) {
+        log::warn!("not opening a non-web link");
+        return;
+    }
+    let wide = |s: &str| s.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>();
+    let (verb, target) = (wide("open"), wide(url.trim()));
+    // SAFETY: both strings are NUL-terminated and outlive the call; the
+    // shell copies what it needs.
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // Values above 32 mean success.
+    if result as isize <= 32 {
+        log::warn!("the browser did not open ({})", result as isize);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn open_url(_url: &str) {}
+
 /// The app's identity to Windows. The media overlay names an app after the
 /// Start menu shortcut carrying its id; without one it says "Unknown app".
 pub const APP_ID: &str = "NativeYTM.Desktop";

@@ -18,10 +18,23 @@ const HAND_SCROLL: f64 = 3.0;
 /// before it is sung.
 const LEAD: f64 = 0.2;
 
+/// How long the view glides to a new line, and a line takes to light.
+const GLIDE: f32 = 0.45;
+const LIGHT: f32 = 0.35;
+
 #[derive(Clone, Copy, Default)]
 struct View {
+    /// Where the view is, and the glide it is on: from, to, since when.
     offset: f32,
+    from: f32,
+    to: f32,
+    glide_start: f64,
+    /// The line lit now, the one lit before it, and when that changed.
+    line: Option<usize>,
+    previous: Option<usize>,
+    changed_at: f64,
     hand_until: f64,
+    by_hand: bool,
     placed: bool,
 }
 
@@ -91,12 +104,22 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, big: bool
     let dots_h = size * 0.9;
 
     // Where each line sits, from the top of the lyrics.
-    let galleys: Vec<_> = lines
-        .iter()
-        .map(|line| {
-            (!line.text.is_empty()).then(|| painter.layout(line.text.clone(), font.clone(), Color32::WHITE, width))
-        })
-        .collect();
+    // Laid out once per song, size and width, not every frame.
+    type Laid = std::sync::Arc<Vec<Option<std::sync::Arc<egui::Galley>>>>;
+    let scale = (ui.ctx().pixels_per_point() * 100.0).round() as i32;
+    let layout_id = ui.id().with(("lyrics-layout", video_id, width.round() as i32, big, scale));
+    let galleys: Laid = ui.data(|d| d.get_temp(layout_id)).unwrap_or_else(|| {
+        let laid: Laid = std::sync::Arc::new(
+            lines
+                .iter()
+                .map(|line| {
+                    (!line.text.is_empty()).then(|| painter.layout(line.text.clone(), font.clone(), Color32::WHITE, width))
+                })
+                .collect(),
+        );
+        ui.data_mut(|d| d.insert_temp(layout_id, laid.clone()));
+        laid
+    });
     let mut tops = Vec::with_capacity(lines.len());
     let mut y = 0.0f32;
     for (i, galley) in galleys.iter().enumerate() {
@@ -125,25 +148,52 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, big: bool
     let anchor = rect.height() * if big { 0.36 } else { 0.3 };
     let focus = current.unwrap_or(0);
     let target = tops.get(focus).copied().unwrap_or(0.0) + height_of(focus) / 2.0 - anchor;
+    if !view.placed {
+        view = View {
+            offset: target,
+            from: target,
+            to: target,
+            line: current,
+            changed_at: now - f64::from(LIGHT),
+            placed: true,
+            ..View::default()
+        };
+    }
+    if current != view.line {
+        view.previous = view.line;
+        view.line = current;
+        view.changed_at = now;
+    }
     if response.contains_pointer() {
         let scroll = ui.input(|i| i.smooth_scroll_delta.y);
         if scroll != 0.0 {
             view.offset = (view.offset - scroll).clamp(-anchor, (total - anchor).max(-anchor));
             view.hand_until = now + HAND_SCROLL;
+            view.by_hand = true;
         }
     }
-    if !view.placed {
-        view.offset = target;
-        view.placed = true;
-    } else if now > view.hand_until {
-        let dt = ui.input(|i| i.stable_dt).min(0.1);
-        let step = 1.0 - (-dt * 7.0).exp();
-        view.offset += (target - view.offset) * step;
-        if (target - view.offset).abs() > 0.5 {
-            ui.ctx().request_repaint();
-        } else {
-            view.offset = target;
+    if view.by_hand && now > view.hand_until {
+        // Back from where the hand left it.
+        view.by_hand = false;
+        view.to = f32::NAN;
+    }
+    if !view.by_hand {
+        // A new place to be (a new line, or a resize): glide there, timed
+        // and eased, at no more than 60 frames a second.
+        if (target - view.to).abs() > 0.5 || view.to.is_nan() {
+            view.from = view.offset;
+            view.to = target;
+            view.glide_start = now;
         }
+        let g = ((now - view.glide_start) as f32 / GLIDE).clamp(0.0, 1.0);
+        view.offset = view.from + (view.to - view.from) * theme::ease_out(g);
+        if g < 1.0 {
+            theme::next_frame(ui.ctx());
+        }
+    }
+    let lit = theme::ease_out((now - view.changed_at) as f32 / LIGHT);
+    if lit < 1.0 {
+        theme::next_frame(ui.ctx());
     }
     ui.data_mut(|d| d.insert_temp(id, view));
 
@@ -161,8 +211,14 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, big: bool
         }
         let line_rect = Rect::from_min_size(pos2(rect.left() + pad, top), vec2(width, h));
         let is_current = current == Some(i);
-        let wanted = if is_current { 1.0 } else { 0.32 };
-        let alpha = ui.ctx().animate_value_with_time(id.with(("line", i)), wanted, 0.35);
+        // The line coming in brightens as the one before it dims.
+        let alpha = if is_current {
+            0.32 + 0.68 * lit
+        } else if view.previous == Some(i) {
+            1.0 - 0.68 * lit
+        } else {
+            0.32
+        };
         // Lines fade out toward the edges of the view.
         let edge = ((top - rect.top()) / fade).min((rect.bottom() - top - h) / fade).clamp(0.0, 1.0);
         let alpha = alpha * (0.25 + 0.75 * edge);
@@ -201,6 +257,8 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, big: bool
         app.actions.push(Action::Seek(time.max(0.0)));
         // Back to following, from the line clicked.
         view.hand_until = 0.0;
+        view.by_hand = false;
+        view.to = f32::NAN;
         ui.data_mut(|d| d.insert_temp(id, view));
     }
     // Wake for the next line rather than every frame.
@@ -208,7 +266,7 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, big: bool
         && let Some(next) = lines.iter().find(|l| l.time > position)
     {
         let wait = (next.time - position).max(0.016);
-        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(wait));
+        theme::repaint_in(ui.ctx(), std::time::Duration::from_secs_f64(wait));
     }
 }
 
@@ -228,7 +286,8 @@ fn dots(ui: &Ui, painter: &egui::Painter, rect: Rect, size: f32, progress: f64, 
             Color32::from_white_alpha((alpha * 255.0) as u8),
         );
     }
+    // The breathing is slow: twenty frames a second draw it as smoothly.
     if playing {
-        ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+        theme::repaint_in(ui.ctx(), std::time::Duration::from_millis(50));
     }
 }

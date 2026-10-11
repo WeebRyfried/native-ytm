@@ -1466,7 +1466,6 @@ dependencies = [
 [[package]]
 name = "fastframe-fonts"
 version = "0.4.1"
-source = "git+https://github.com/crmne/fastframe?rev=bb79dbddef01e660f9cfc37ccd9dff1c299a8d47#bb79dbddef01e660f9cfc37ccd9dff1c299a8d47"
 dependencies = [
  "directories",
  "egui",

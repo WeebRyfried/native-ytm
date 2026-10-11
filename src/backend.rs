@@ -21,6 +21,19 @@ pub enum Purpose {
     Preload,
     /// Only find it, for later: resolving is slow.
     Prefetch,
+    /// A better stream of the song already starting, to switch to.
+    Upgrade,
+}
+
+/// Which way to resolve a stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum How {
+    /// The best the settings allow, falling back as needed.
+    Full,
+    /// The signed-out clients only: quick, for a fast start.
+    Native,
+    /// yt-dlp with the account: Premium quality, taking seconds.
+    Account,
 }
 
 pub enum Request {
@@ -78,6 +91,7 @@ pub enum Request {
         video_id: String,
         purpose: Purpose,
         start: f64,
+        how: How,
     },
     Rate {
         video_id: String,
@@ -381,12 +395,18 @@ async fn run(
             video_id,
             purpose,
             start,
+            how,
         } => {
             // The resolver is cheap to copy; the lock is not held across the
             // network.
             let snapshot = resolver.read().clone();
             let started = std::time::Instant::now();
-            let result = snapshot.resolve(api, &video_id).await.map_err(err);
+            let result = match how {
+                How::Full => snapshot.resolve(api, &video_id).await,
+                How::Native => snapshot.resolve_native(api, &video_id).await,
+                How::Account => snapshot.resolve_account(api, &video_id).await,
+            }
+            .map_err(err);
             if let Ok((_, via)) = &result {
                 log::info!("resolved {video_id} via {via:?} in {:?}", started.elapsed());
             }

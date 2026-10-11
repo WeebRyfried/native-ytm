@@ -37,6 +37,15 @@ use source::{RemoteSource, SourceError};
 /// Decoded audio kept ahead of the device.
 const AHEAD: Duration = Duration::from_secs(3);
 
+/// Decoding starts again once less than this is queued, and fills the queue
+/// back to AHEAD in one go: a burst every three quarters of a second rather
+/// than a packet at a time.
+const LOW_WATER: Duration = Duration::from_millis(2250);
+
+/// How long the old and the new stream overlap when a better one replaces
+/// a stream mid-song.
+const BLEND: Duration = Duration::from_millis(60);
+
 /// A stream the resolver found: where the bytes are and how to ask for them.
 #[derive(Clone, Debug)]
 pub struct StreamInfo {
@@ -79,6 +88,12 @@ enum Command {
         stream: StreamInfo,
     },
     ClearPreload,
+    /// A better stream of the token playing, to carry on from without a
+    /// break.
+    Upgrade {
+        token: u64,
+        stream: StreamInfo,
+    },
     Play,
     Pause,
     Seek(Duration),
@@ -94,6 +109,10 @@ pub enum Event {
     Audible(u64),
     /// The token played to its end and nothing was preloaded.
     Ended(u64),
+    /// The better stream took over decoding; it is heard from `at` on.
+    Upgraded { token: u64, at: Duration },
+    /// The better stream could not take over; the first one plays on.
+    UpgradeFailed(u64),
     /// The token cannot play. When `expired`, the stream's address stopped
     /// working and resolving it again may help; `position` is where it was.
     Failed {
@@ -175,6 +194,7 @@ impl Player {
             current: None,
             next: None,
             playing: false,
+            refilling: true,
             last_audible: 0,
             ended_sent: false,
             normalize,
@@ -223,6 +243,12 @@ impl Player {
 
     pub fn clear_preload(&self) {
         let _ = self.tx.send(Command::ClearPreload);
+    }
+
+    /// Switches the token playing to a better stream of the same song, at
+    /// the end of what is already decoded, crossfaded.
+    pub fn upgrade(&self, token: u64, stream: StreamInfo) {
+        let _ = self.tx.send(Command::Upgrade { token, stream });
     }
 
     pub fn play(&self) {
@@ -309,6 +335,10 @@ struct Decoding {
     next_time: Duration,
     /// Input frames still to drop after an accurate seek.
     skip_frames: u64,
+    /// Output frames still to mix into the queue's tail rather than append:
+    /// the overlap with the stream this one replaced.
+    blend_left: usize,
+    blend_total: usize,
     finished: bool,
     scratch: Vec<f32>,
 }
@@ -373,6 +403,8 @@ struct Engine {
     current: Option<Decoding>,
     next: Option<Next>,
     playing: bool,
+    /// Filling the queue back up to AHEAD, having fallen below LOW_WATER.
+    refilling: bool,
     last_audible: u64,
     ended_sent: bool,
     normalize: bool,
@@ -386,10 +418,19 @@ impl Engine {
             let first = if let Some(command) = self.pending.pop_front() {
                 Some(command)
             } else {
+                // Sleep until there is decoding to do, waking often enough
+                // while playing to notice what the device reports (a song
+                // ending, the next one heard). A command wakes it at once.
                 let wait = if busy {
                     Duration::ZERO
+                } else if self.playing {
+                    self.queued()
+                        .saturating_sub(LOW_WATER)
+                        .clamp(Duration::from_millis(10), Duration::from_millis(100))
+                } else if self.current.is_some() {
+                    Duration::from_millis(250)
                 } else {
-                    Duration::from_millis(25)
+                    Duration::from_secs(1)
                 };
                 match self.rx.recv_timeout(wait) {
                     Ok(command) => Some(command),
@@ -572,6 +613,7 @@ impl Engine {
                     self.set_state(State::Paused);
                 }
             }
+            Command::Upgrade { token, stream } => self.upgrade(token, stream),
             Command::Seek(to) => self.seek(to),
             Command::Stop => {
                 self.current = None;
@@ -634,6 +676,7 @@ impl Engine {
                 decoding.skip_frames = ts_to_frames(skip.max(0), decoding.time_base, rate)
                     + duration_to_frames(to - from, rate);
                 decoding.next_time = to;
+                decoding.blend_left = 0;
                 decoding.finished = false;
                 let mut queue = self.queue.lock();
                 queue.clear();
@@ -663,6 +706,49 @@ impl Engine {
             }
         }
         *self.shared.seek_to.lock() = None;
+    }
+
+    /// Takes over decoding from a better stream of the same song, at the end
+    /// of what is queued. The queue's last moment is decoded again from the
+    /// new stream and crossfaded, so the join cannot click.
+    fn upgrade(&mut self, token: u64, mut stream: StreamInfo) {
+        let (out_rate, _) = self.out_format();
+        let Some(old) = self.current.as_ref().filter(|d| d.token == token && !d.finished) else {
+            self.send(Event::UpgradeFailed(token));
+            return;
+        };
+        // The same loudness, or the level would jump at the join.
+        if stream.loudness_db.is_none() {
+            stream.loudness_db = old.stream.loudness_db;
+        }
+        let at = old.next_time;
+        let queued = self.queue.lock().tail_frames(token);
+        let blend = frames_to_time(queued, out_rate).min(BLEND);
+        let from = at.saturating_sub(blend);
+        match self.open(token, stream, from, None) {
+            Ok(mut decoding) => {
+                let total = (blend.as_secs_f64() * f64::from(out_rate)).round() as usize;
+                decoding.blend_left = total;
+                decoding.blend_total = total;
+                decoding.next_time = from;
+                log::info!("switching to {} at {:.1} s", decoding.stream.quality, at.as_secs_f64());
+                self.current = Some(decoding);
+                self.send(Event::Upgraded { token, at });
+            }
+            Err(error) => {
+                // The first stream's source was replaced as the one to
+                // interrupt; put it back.
+                if let Some(old) = &self.current {
+                    *self.shared.source.lock() = Some(old.source.clone());
+                }
+                let message = match error {
+                    OpenError::Interrupted => "interrupted".to_owned(),
+                    OpenError::Failed { message, .. } => message,
+                };
+                log::warn!("the better stream could not take over: {message}");
+                self.send(Event::UpgradeFailed(token));
+            }
+        }
     }
 
     fn open(
@@ -749,6 +835,8 @@ impl Engine {
             converter: None,
             next_time: Duration::ZERO,
             skip_frames: lead_in,
+            blend_left: 0,
+            blend_total: 0,
             finished: false,
             scratch: Vec::new(),
         };
@@ -780,7 +868,7 @@ impl Engine {
         frames_to_time(self.queue.lock().frames(channels), rate)
     }
 
-    fn wants_decoding(&self) -> bool {
+    fn wants_decoding(&mut self) -> bool {
         if self.output.is_none() {
             return false;
         }
@@ -788,7 +876,13 @@ impl Engine {
             Some(decoding) => !decoding.finished || self.next.is_some(),
             None => false,
         };
-        work && self.queued() < AHEAD
+        let queued = self.queued();
+        if queued < LOW_WATER {
+            self.refilling = true;
+        } else if queued >= AHEAD {
+            self.refilling = false;
+        }
+        work && self.refilling
     }
 
     /// Decodes until the queue is full or `budget` has passed, so commands
@@ -1052,14 +1146,26 @@ impl Decoding {
         self.scratch = frames;
         let token = self.token;
         let mut next_time = self.next_time;
+        let (mut blend_left, blend_total) = (self.blend_left, self.blend_total);
         let converter = self.converter(in_rate, out_rate, out_channels);
         converter.process(&mapped, &mut |block| {
-            queue
-                .lock()
-                .push(token, next_time, block, out_channels, out_rate);
+            let mut queue = queue.lock();
+            let mut block = block;
+            if blend_left > 0 {
+                // The overlap: into the queue's tail, or dropped if that
+                // has already been heard; either way not appended twice.
+                let n = (block.len() / out_channels).min(blend_left);
+                let (overlap, rest) = block.split_at(n * out_channels);
+                queue.blend(token, overlap, out_channels, blend_left, blend_total);
+                blend_left -= n;
+                next_time += frames_to_time(n, out_rate);
+                block = rest;
+            }
+            queue.push(token, next_time, block, out_channels, out_rate);
             next_time += frames_to_time(block.len() / out_channels, out_rate);
         });
         self.next_time = next_time;
+        self.blend_left = blend_left;
     }
 
     fn finish(&mut self, queue: &Mutex<Queue>, out_rate: u32, out_channels: usize) {
@@ -1107,4 +1213,74 @@ fn ts_to_frames(ts: i64, time_base: Option<TimeBase>, rate: u32) -> u64 {
         .calc_time(Timestamp::new(ts))
         .map_or(0.0, |time| time.as_secs_f64());
     (secs * f64::from(rate)).round().max(0.0) as u64
+}
+
+#[cfg(test)]
+mod bench {
+    use super::*;
+
+    /// Run with `cargo test --release --lib bench -- --ignored --nocapture`:
+    /// what decoding and resampling cost per second of audio.
+    #[test]
+    #[ignore = "a timing, not a test"]
+    fn decode_and_resample_cost() {
+        const SECONDS: usize = 30;
+        // Something music-like to encode: chords with some noise.
+        let mut signal = Vec::with_capacity(48_000 * SECONDS * 2);
+        for i in 0..48_000 * SECONDS {
+            let t = i as f32 / 48_000.0;
+            let s = 0.2 * (t * 220.0 * std::f32::consts::TAU).sin()
+                + 0.15 * (t * 277.2 * std::f32::consts::TAU).sin()
+                + 0.1 * (t * 329.6 * std::f32::consts::TAU).sin()
+                + 0.05 * (fastrand::f32() - 0.5);
+            signal.push(s);
+            signal.push(s * 0.9);
+        }
+        let mut error = 0;
+        let packets: Vec<Vec<u8>> = unsafe {
+            let encoder = unsafe_libopus::opus_encoder_create(48_000, 2, unsafe_libopus::OPUS_APPLICATION_AUDIO, &mut error);
+            let out: Vec<Vec<u8>> = signal
+                .chunks_exact(960 * 2)
+                .map(|frame| {
+                    let mut packet = vec![0u8; 1500];
+                    let n = unsafe_libopus::opus_encode_float(encoder, frame.as_ptr(), 960, packet.as_mut_ptr(), 1500);
+                    packet.truncate(n.max(0) as usize);
+                    packet
+                })
+                .collect();
+            unsafe_libopus::opus_encoder_destroy(encoder);
+            out
+        };
+        let mut params = symphonia::core::codecs::audio::AudioCodecParameters::new();
+        params.with_channels(symphonia::core::audio::Channels::Discrete(2));
+        let mut decoder = opus::Opus::new(&params).expect("decoder");
+        let mut pcm = Vec::new();
+        let mut decoded = Vec::with_capacity(signal.len());
+        let started = Instant::now();
+        for packet in &packets {
+            decoder.decode(packet, &mut pcm).expect("decodes");
+            decoded.extend_from_slice(&pcm);
+        }
+        let decode = started.elapsed();
+        let mut converter = Converter::new(48_000, 96_000, 2);
+        let started = Instant::now();
+        let mut frames = 0usize;
+        for chunk in decoded.chunks(960 * 2) {
+            converter.process(chunk, &mut |block| frames += block.len() / 2);
+        }
+        let resample = started.elapsed();
+        let started = Instant::now();
+        let mut total = 0usize;
+        for chunk in decoded.chunks(960 * 2) {
+            total += remix(chunk, 2, 2, 0.8).len();
+        }
+        let remixing = started.elapsed();
+        let per = |d: Duration| d.as_secs_f64() / SECONDS as f64 * 100.0;
+        println!(
+            "per second of audio, as % of a core: opus decode {:.3}%, resample 48k->96k {:.3}%, remix {:.3}% ({frames} frames, {total})",
+            per(decode),
+            per(resample),
+            per(remixing)
+        );
+    }
 }

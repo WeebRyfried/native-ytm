@@ -11,9 +11,12 @@ use egui::{ColorImage, TextureHandle, TextureOptions};
 
 use crate::api::model::sized_thumbnail;
 
-/// Textures left undrawn this long are dropped, once there are many.
-const IDLE: Duration = Duration::from_secs(90);
-const KEEP: usize = 240;
+/// Textures left undrawn this long may go once the textures held pass
+/// BUDGET (they come back from the disk cache when drawn again)...
+const IDLE: Duration = Duration::from_secs(30);
+const BUDGET: usize = 48 * 1024 * 1024;
+/// ...and any left undrawn this long go regardless.
+const STALE: Duration = Duration::from_secs(300);
 
 enum Entry {
     Loading,
@@ -21,8 +24,12 @@ enum Entry {
         texture: TextureHandle,
         file: PathBuf,
         used: Instant,
+        /// Its size in memory (and on the GPU).
+        bytes: usize,
     },
     Failed(Instant),
+    /// On disk only, for the media overlay, which reads the file itself.
+    File(PathBuf),
 }
 
 struct Loaded {
@@ -70,7 +77,7 @@ impl Images {
     pub fn get(&mut self, url: &str, px: u32) -> Option<TextureHandle> {
         let px = px.clamp(32, 1200).next_power_of_two().min(1200);
         let key = sized_thumbnail(url, px);
-        self.entry(key.clone(), key, px, false)
+        self.entry(key.clone(), key, px, Make::Texture)
     }
 
     /// The artwork at `px`, or while that loads, a smaller size already
@@ -91,16 +98,16 @@ impl Images {
     /// The artwork blurred to a wash of its colours, for a backdrop.
     pub fn backdrop(&mut self, url: &str) -> Option<TextureHandle> {
         let source = sized_thumbnail(url, 128);
-        self.entry(format!("backdrop:{source}"), source, 128, true)
+        self.entry(format!("backdrop:{source}"), source, 128, Make::Blurred)
     }
 
-    fn entry(&mut self, key: String, source: String, px: u32, blur: bool) -> Option<TextureHandle> {
+    fn entry(&mut self, key: String, source: String, px: u32, make: Make) -> Option<TextureHandle> {
         match self.entries.get_mut(&key) {
             Some(Entry::Ready { texture, used, .. }) => {
                 *used = Instant::now();
                 Some(texture.clone())
             }
-            Some(Entry::Loading) => None,
+            Some(Entry::Loading | Entry::File(_)) => None,
             Some(Entry::Failed(at)) => {
                 if at.elapsed() > Duration::from_secs(30) {
                     self.entries.remove(&key);
@@ -109,30 +116,52 @@ impl Images {
             }
             None => {
                 self.entries.insert(key.clone(), Entry::Loading);
-                self.fetch(key, source, px, blur);
+                self.fetch(key, source, px, make);
                 None
             }
         }
     }
 
     /// The artwork's file on disk, for the Windows media overlay.
+    /// No texture is made for it: the overlay reads the file.
     pub fn file(&mut self, url: &str, px: u32) -> Option<PathBuf> {
         let px = px.clamp(32, 1200).next_power_of_two().min(1200);
-        let key = sized_thumbnail(url, px);
+        let source = sized_thumbnail(url, px);
+        if let Some(Entry::Ready { file, .. }) = self.entries.get(&source) {
+            return Some(file.clone());
+        }
+        let key = format!("file:{source}");
         match self.entries.get(&key) {
-            Some(Entry::Ready { file, .. }) => Some(file.clone()),
+            Some(Entry::File(path)) => Some(path.clone()),
+            Some(Entry::Loading) => None,
+            Some(Entry::Failed(at)) => {
+                if at.elapsed() > Duration::from_secs(30) {
+                    self.entries.remove(&key);
+                }
+                None
+            }
             _ => {
-                let _ = self.get(url, px);
+                let path = self.path_of(&source);
+                if path.is_file() {
+                    self.entries.insert(key, Entry::File(path.clone()));
+                    return Some(path);
+                }
+                self.entries.insert(key.clone(), Entry::Loading);
+                self.fetch(key, source, px, Make::FileOnly);
                 None
             }
         }
     }
 
-    fn fetch(&self, key: String, source: String, px: u32, blur: bool) {
+    fn path_of(&self, source: &str) -> PathBuf {
+        // The file is the source image's, whatever is made of it.
+        self.dir.join(format!("{:016x}.img", fnv(source)))
+    }
+
+    fn fetch(&self, key: String, source: String, px: u32, make: Make) {
         let tx = self.tx.clone();
         let http = self.http.clone();
-        // The file is the source image's, whatever is made of it.
-        let path = self.dir.join(format!("{:016x}.img", fnv(&source)));
+        let path = self.path_of(&source);
         let permits = self.permits.clone();
         let ctx = self.ctx.clone();
         self.runtime.spawn(async move {
@@ -146,11 +175,15 @@ impl Images {
                 }
             };
             let texture = match bytes {
+                Some(_) if make == Make::FileOnly => {
+                    let _ = tx.send(Loaded { key, texture: None, file: Some(path) });
+                    return;
+                }
                 Some(bytes) => {
                     let name = key.clone();
                     let ctx = ctx.clone();
                     tokio::task::spawn_blocking(move || {
-                        if blur { decode_blurred(&ctx, &name, &bytes) } else { decode(&ctx, &name, &bytes, px) }
+                        if make == Make::Blurred { decode_blurred(&ctx, &name, &bytes) } else { decode(&ctx, &name, &bytes, px) }
                     })
                         .await
                         .ok()
@@ -168,7 +201,9 @@ impl Images {
     pub fn poll(&mut self) {
         while let Ok(loaded) = self.rx.try_recv() {
             let entry = match (loaded.texture, loaded.file) {
+                (None, Some(file)) => Entry::File(file),
                 (Some(texture), Some(file)) => Entry::Ready {
+                    bytes: texture.size()[0] * texture.size()[1] * 4,
                     texture,
                     file,
                     used: Instant::now(),
@@ -183,20 +218,49 @@ impl Images {
         }
     }
 
+    /// Drops textures nothing has drawn lately: the stale ones always, and
+    /// the idle ones, oldest first, while the rest are over budget.
     fn evict(&mut self) {
-        let ready = self
-            .entries
-            .values()
-            .filter(|e| matches!(e, Entry::Ready { .. }))
-            .count();
-        if ready <= KEEP {
-            return;
-        }
         self.entries.retain(|_, entry| match entry {
-            Entry::Ready { used, .. } => used.elapsed() < IDLE,
+            Entry::Ready { used, .. } => used.elapsed() < STALE,
             _ => true,
         });
+        let mut total: usize = self
+            .entries
+            .values()
+            .map(|e| match e {
+                Entry::Ready { bytes, .. } => *bytes,
+                _ => 0,
+            })
+            .sum();
+        if total <= BUDGET {
+            return;
+        }
+        let mut idle: Vec<(Instant, String, usize)> = self
+            .entries
+            .iter()
+            .filter_map(|(key, e)| match e {
+                Entry::Ready { used, bytes, .. } if used.elapsed() >= IDLE => Some((*used, key.clone(), *bytes)),
+                _ => None,
+            })
+            .collect();
+        idle.sort_by_key(|(used, _, _)| *used);
+        for (_, key, bytes) in idle {
+            if total <= BUDGET {
+                break;
+            }
+            self.entries.remove(&key);
+            total -= bytes;
+        }
     }
+}
+
+/// What a fetch makes of the image.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Make {
+    Texture,
+    Blurred,
+    FileOnly,
 }
 
 async fn download(http: &reqwest::Client, url: &str) -> Option<Vec<u8>> {

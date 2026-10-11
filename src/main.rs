@@ -188,6 +188,22 @@ impl eframe::App for Window {
         for action in actions {
             self.app.apply(action);
         }
+        // egui's own links (none of ours go this way any more): eframe is
+        // built without its browser support, so open them here.
+        let urls: Vec<String> = ui.ctx().output_mut(|o| {
+            let mut urls = Vec::new();
+            o.commands.retain(|command| match command {
+                egui::OutputCommand::OpenUrl(open) => {
+                    urls.push(open.url.clone());
+                    false
+                }
+                _ => true,
+            });
+            urls
+        });
+        for url in urls {
+            platform::open_url(&url);
+        }
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {

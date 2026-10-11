@@ -20,6 +20,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     if ready && let Some(y) = app.scroll_to.take() {
         area = area.vertical_scroll_offset(y);
     }
+    // A new page fades in.
+    let fade = theme::appear(ui.ctx(), egui::Id::new("page-appear"), egui::Id::new(&key).value(), 0.18);
+    ui.multiply_opacity(fade);
     let scroll = area.show(ui, |ui| {
             egui::Frame::new()
                 .inner_margin(egui::Margin {

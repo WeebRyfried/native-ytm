@@ -35,8 +35,10 @@ fn seek_bar(app: &mut App, ui: &mut Ui, rect: Rect) {
     let duration = app.duration();
     let response = ui.interact(rect, ui.id().with("seek"), Sense::click_and_drag());
     let active = response.hovered() || response.dragged();
+    // The line thickens and the knob grows in as the pointer comes.
+    let grow = ui.ctx().animate_bool_with_time(ui.id().with("seek-grow"), active, 0.12);
     let line_y = rect.top() + 1.0;
-    let thickness = if active { 4.0 } else { 2.0 };
+    let thickness = 2.0 + 2.0 * grow;
     // Above the page, unclipped: the knob rises over the page's bottom
     // edge, and the bar's own clip would cut it in half.
     let painter = ui
@@ -56,7 +58,7 @@ fn seek_bar(app: &mut App, ui: &mut Ui, rect: Rect) {
                 CornerRadius::ZERO,
                 theme::ACCENT.gamma_multiply(0.7),
             );
-            ui.ctx().request_repaint();
+            theme::next_frame(ui.ctx());
         }
         return;
     };
@@ -91,8 +93,10 @@ fn seek_bar(app: &mut App, ui: &mut Ui, rect: Rect) {
         CornerRadius::ZERO,
         theme::ACCENT,
     );
+    if grow > 0.0 {
+        painter.circle_filled(pos2(x, line_y), 7.0 * grow, theme::ACCENT);
+    }
     if active {
-        painter.circle_filled(pos2(x, line_y), 7.0, theme::ACCENT);
         if let Some(hover) = response.hover_pos() {
             let f = ((hover.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
             let at = (f64::from(f) * duration) as u32;
@@ -129,12 +133,19 @@ fn transport(app: &mut App, ui: &mut Ui) {
             })
             .collect();
         ui.painter().add(egui::Shape::line(points, Stroke::new(2.5, Color32::BLACK)));
-        ui.ctx().request_repaint();
+        theme::next_frame(ui.ctx());
     } else {
-        let icon = if playing { Icon::Pause } else { Icon::Play };
-        let offset = if playing { 0.0 } else { 1.5 };
-        icon.image(Color32::BLACK, 22.0)
-            .paint_at(ui, Rect::from_center_size(rect.center() + vec2(offset, 0.0), Vec2::splat(22.0)));
+        // Play turns into pause, and back, with a quick scale and fade.
+        let p = ui.ctx().animate_bool_with_time(response.id.with("morph"), playing, 0.16);
+        let press = if response.is_pointer_button_down_on() { 0.9 } else { 1.0 };
+        for (icon, amount, offset) in [(Icon::Pause, p, 0.0), (Icon::Play, 1.0 - p, 1.5)] {
+            if amount <= 0.01 {
+                continue;
+            }
+            let size = 22.0 * (0.6 + 0.4 * amount) * press;
+            icon.image(Color32::BLACK.gamma_multiply(amount), size)
+                .paint_at(ui, Rect::from_center_size(rect.center() + vec2(offset, 0.0), Vec2::splat(size)));
+        }
     }
     if response.on_hover_text(if playing { "Pause (Space)" } else { "Play (Space)" }).clicked() {
         app.actions.push(Action::TogglePlay);
@@ -155,7 +166,7 @@ fn transport(app: &mut App, ui: &mut Ui) {
             .color(theme::TEXT_DIM),
         );
         if app.playing() {
-            ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
+            theme::repaint_in(ui.ctx(), std::time::Duration::from_millis(250));
         }
     }
 }
@@ -199,6 +210,17 @@ fn now(app: &mut App, ui: &mut Ui) {
         Some(Like::Disliked) => (Icon::Disliked, Icon::Like),
         _ => (Icon::Dislike, Icon::Like),
     };
+    // Liking pops the thumb: up a third, and back.
+    let pop_id = ui.id().with("like-pop");
+    let now = ui.input(|i| i.time);
+    let popped_at: f64 = ui.data(|d| d.get_temp(pop_id)).unwrap_or(-10.0);
+    let since = (now - popped_at) as f32;
+    let pop = if since < 0.35 {
+        theme::next_frame(ui.ctx());
+        1.0 + 0.32 * (since / 0.35 * std::f32::consts::PI).sin()
+    } else {
+        1.0
+    };
     let mut cx = app.cx();
     if widgets::icon_button(ui, dislike_icon, 20.0, theme::TEXT, "Dislike").clicked() {
         cx.push(Action::Rate(
@@ -206,7 +228,10 @@ fn now(app: &mut App, ui: &mut Ui) {
             if like == Some(Like::Disliked) { Rating::None } else { Rating::Dislike },
         ));
     }
-    if widgets::icon_button(ui, like_icon, 20.0, theme::TEXT, "Like").clicked() {
+    if widgets::icon_button_scaled(ui, like_icon, 20.0, theme::TEXT, "Like", pop).clicked() {
+        if like != Some(Like::Liked) {
+            ui.data_mut(|d| d.insert_temp(pop_id, now));
+        }
         cx.push(Action::Rate(
             track.video_id.clone(),
             if like == Some(Like::Liked) { Rating::None } else { Rating::Like },

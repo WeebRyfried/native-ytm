@@ -55,7 +55,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 
 [target.'cfg(windows)'.dependencies]
 # DPAPI for the signed-in cookie, the title bar's colours, and message boxes.
-windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_Graphics_Dwm", "Win32_UI_WindowsAndMessaging", "Win32_System_Memory"] }
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_Graphics_Dwm", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_Memory"] }
 
 # The Start menu shortcut that names the app in the media overlay (COM).
 # The same version and features eframe and the audio output already build.
@@ -63,6 +63,11 @@ windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com"
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
+
+# fastframe-fonts with its system fallback fonts memory-mapped instead of
+# read into memory (vendor/fastframe-fonts/Cargo.toml says more).
+[patch."https://github.com/crmne/fastframe"]
+fastframe-fonts = { path = "vendor/fastframe-fonts" }
 
 [profile.release]
 lto = "thin"

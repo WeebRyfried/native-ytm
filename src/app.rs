@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use crate::api::client::{Auth, parse_cookies};
 use crate::api::model::*;
 use crate::api::music::{Filter, Rating};
-use crate::backend::{Backend, Purpose, Request, Response};
+use crate::backend::{Backend, How, Purpose, Request, Response};
 use crate::images::Images;
 use crate::model::*;
 use crate::player::{self, Player, State as PlayState, StreamInfo};
@@ -55,6 +55,32 @@ pub struct NowInfo {
     /// The song's info arrived (or failed): whether YouTube has lyrics for
     /// it is known.
     pub info_ready: bool,
+}
+
+/// Where a quick start's switch to the better stream is, for the full
+/// view to show.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum UpgradePhase {
+    /// Playing the quick stream; yt-dlp is finding the better one.
+    Finding,
+    /// The better stream is decoding; it is heard from this point on.
+    Switching(f64),
+    /// Heard now, since this moment.
+    Done(Instant),
+    /// There is none better (or it could not be had); the quick one plays on.
+    Unavailable,
+}
+
+#[derive(Clone, Debug)]
+pub struct Upgrade {
+    pub token: u64,
+    pub phase: UpgradePhase,
+    /// The stream heard before the switch, and the one after.
+    pub from: Option<String>,
+    pub to: Option<String>,
+    /// The quick stream failed (a Premium members' song): the better one
+    /// is all there is.
+    quick_failed: bool,
 }
 
 pub struct SearchState {
@@ -111,6 +137,11 @@ pub struct App {
     /// Songs being resolved ahead of time, so a slow resolve (yt-dlp) is
     /// done before they are wanted.
     prefetching: HashSet<String>,
+    /// A quick start, switching to the better stream when it comes.
+    pub upgrade: Option<Upgrade>,
+    /// The stream the player has for the current token: its quality and
+    /// container.
+    loaded: Option<(u64, StreamInfo)>,
     /// A queue answer is on its way; the bar shows it loading.
     pub pending_queue: Option<u64>,
     extending: bool,
@@ -245,6 +276,8 @@ impl App {
             retried: None,
             streams: HashMap::new(),
             prefetching: HashSet::new(),
+            upgrade: None,
+            loaded: None,
             pending_queue: None,
             extending: false,
             radio_dry: false,
@@ -354,6 +387,7 @@ impl App {
         self.toasts.push(Toast {
             text,
             kind,
+            born: Instant::now(),
             until: Instant::now() + Duration::from_secs(if kind == ToastKind::Error { 5 } else { 3 }),
         });
         if self.toasts.len() > 3 {
@@ -380,6 +414,7 @@ impl App {
         self.tray_events();
         self.maybe_preload();
         self.maybe_extend();
+        self.upgrade_tick();
         self.presence_tick();
         self.scrobble_tick();
         self.ticking
@@ -779,17 +814,40 @@ impl App {
         self.ended_waiting = false;
         self.player.stop();
         let video_id = entry.track.video_id.clone();
+        self.upgrade = None;
+        self.loaded = None;
         if let Some((stream, at)) = self.streams.get(&video_id)
             && at.elapsed() < STREAM_FRESH
         {
-            self.player
-                .load(token, stream.clone(), Duration::from_secs_f64(start), true);
+            let stream = stream.clone();
+            self.loaded = Some((token, stream.clone()));
+            self.player.load(token, stream, Duration::from_secs_f64(start), true);
+        } else if self.account_streams() {
+            // The account's stream takes seconds through yt-dlp: start on
+            // the quick one and switch when the better one arrives.
+            self.upgrade = Some(Upgrade {
+                token,
+                phase: UpgradePhase::Finding,
+                from: None,
+                to: None,
+                quick_failed: false,
+            });
+            for (purpose, how) in [(Purpose::Load, How::Native), (Purpose::Upgrade, How::Account)] {
+                self.backend.send(Request::Resolve {
+                    token,
+                    video_id: video_id.clone(),
+                    purpose,
+                    start,
+                    how,
+                });
+            }
         } else {
             self.backend.send(Request::Resolve {
                 token,
                 video_id: video_id.clone(),
                 purpose: Purpose::Load,
                 start,
+                how: How::Full,
             });
         }
         self.track_info(&video_id);
@@ -871,16 +929,47 @@ impl App {
 
     /// The current stream's codec and rate, such as "Opus 257 kb/s".
     pub fn stream_quality(&self) -> Option<&str> {
+        if let Some((token, stream)) = &self.loaded
+            && *token == self.current_token
+        {
+            return Some(stream.quality.as_str());
+        }
         let track = self.current()?;
         self.streams
             .get(&track.video_id)
             .map(|(stream, _)| stream.quality.as_str())
     }
 
+    pub fn current_token(&self) -> u64 {
+        self.current_token
+    }
+
+    /// A switch to the better stream is heard once playback reaches it.
+    fn upgrade_tick(&mut self) {
+        let position = self.position();
+        if let Some(upgrade) = &mut self.upgrade
+            && let UpgradePhase::Switching(at) = upgrade.phase
+            && upgrade.token == self.current_token
+            && position >= at
+        {
+            upgrade.phase = UpgradePhase::Done(Instant::now());
+        }
+    }
+
+    /// Streams come from the account (through yt-dlp, in seconds).
+    fn account_streams(&self) -> bool {
+        self.settings.premium_quality && self.signed_in && self.backend.ytdlp_found().is_some()
+    }
+
     /// Resolves the song after this one ahead of time, when resolving is
     /// slow (the account's streams come through yt-dlp, in seconds).
     fn prefetch_next(&mut self) {
         if !(self.settings.premium_quality && self.signed_in) {
+            return;
+        }
+        // One yt-dlp at a time: the song playing gets its better stream
+        // first, then the next is fetched (two at once slow both).
+        if self.upgrade.as_ref().is_some_and(|u| u.phase == UpgradePhase::Finding) {
             return;
         }
         let Some(entry) = self
@@ -904,6 +993,7 @@ impl App {
             video_id,
             purpose: Purpose::Prefetch,
             start: 0.0,
+            how: How::Full,
         });
     }
 
@@ -924,15 +1014,69 @@ impl App {
             }
             (Purpose::Prefetch, Err(error)) => log::info!("prefetch of {video_id} failed: {error}"),
             (Purpose::Load, Ok((stream, _))) => {
-                self.streams
-                    .insert(video_id, (stream.clone(), Instant::now()));
-                if token == self.current_token {
+                let quick = self.upgrade.as_ref().is_some_and(|u| u.token == token);
+                // A quick start's stream is not kept: played again, the song
+                // should get the better one.
+                if !quick {
+                    self.streams.insert(video_id, (stream.clone(), Instant::now()));
+                }
+                if token == self.current_token && self.loaded.as_ref().is_none_or(|(t, _)| *t != token) {
+                    if let Some(upgrade) = &mut self.upgrade
+                        && upgrade.token == token
+                    {
+                        upgrade.from = Some(stream.quality.clone());
+                    }
+                    self.loaded = Some((token, stream.clone()));
                     self.player.load(
                         token,
                         stream,
                         Duration::from_secs_f64(start),
                         self.want_play,
                     );
+                }
+            }
+            (Purpose::Upgrade, Ok((stream, _))) => {
+                self.streams.insert(video_id, (stream.clone(), Instant::now()));
+                if token != self.current_token {
+                    return;
+                }
+                let Some(upgrade) = self.upgrade.as_mut().filter(|u| u.token == token) else {
+                    return;
+                };
+                upgrade.to = Some(stream.quality.clone());
+                // No longer finding: the next song may be fetched now.
+                upgrade.phase = UpgradePhase::Switching(f64::INFINITY);
+                match &self.loaded {
+                    // Playing the quick stream: switch, if the two are
+                    // alike enough to join without a jump.
+                    Some((t, quick)) if *t == token => {
+                        if quick.mime == stream.mime && quick.quality != stream.quality {
+                            self.player.upgrade(token, stream);
+                        } else {
+                            upgrade.phase = UpgradePhase::Unavailable;
+                        }
+                    }
+                    // Nothing playing yet: this one starts it.
+                    _ => {
+                        upgrade.phase = UpgradePhase::Done(Instant::now());
+                        upgrade.from = None;
+                        let at = Duration::from_secs_f64(self.start_at);
+                        self.loaded = Some((token, stream.clone()));
+                        self.player.load(token, stream, at, self.want_play);
+                    }
+                }
+                self.prefetch_next();
+            }
+            (Purpose::Upgrade, Err(error)) => {
+                log::info!("no better stream for {video_id}: {error}");
+                let Some(upgrade) = self.upgrade.as_mut().filter(|u| u.token == token) else {
+                    return;
+                };
+                upgrade.phase = UpgradePhase::Unavailable;
+                if upgrade.quick_failed && token == self.current_token {
+                    self.cannot_play(&video_id, &error);
+                } else {
+                    self.prefetch_next();
                 }
             }
             (Purpose::Preload, Ok((stream, _))) => {
@@ -946,26 +1090,14 @@ impl App {
                 if token != self.current_token {
                     return;
                 }
-                let title = self.current().map(|t| t.title.clone()).unwrap_or_default();
-                log::warn!("cannot play {video_id}: {error}");
-                self.failures += 1;
-                let why = if error.contains("Premium members") {
-                    if self.signed_in {
-                        " (a Music Premium song; it needs yt-dlp, set in Settings)"
-                    } else {
-                        ": only Music Premium members can play it. Sign in with a Premium account."
-                    }
-                } else {
-                    ""
-                };
-                self.toast(format!("Cannot play \u{201c}{title}\u{201d}{why}"), ToastKind::Error);
-                if self.failures < 3 && self.queue.next_index(self.settings.repeat, true).is_some() {
-                    self.advance(true);
-                } else {
-                    self.failures = 0;
-                    self.player.stop();
-                    self.want_play = false;
+                // The quick stream failed; the account's may still come.
+                if let Some(upgrade) = self.upgrade.as_mut().filter(|u| u.token == token)
+                    && upgrade.phase == UpgradePhase::Finding
+                {
+                    upgrade.quick_failed = true;
+                    return;
                 }
+                self.cannot_play(&video_id, &error);
             }
             (Purpose::Preload, Err(error)) => {
                 log::info!("preload of {video_id} failed: {error}");
@@ -973,6 +1105,31 @@ impl App {
                     self.preload = None;
                 }
             }
+        }
+    }
+
+    /// The current song cannot play: say why, and go on to the next one
+    /// (a few times at most).
+    fn cannot_play(&mut self, video_id: &str, error: &str) {
+        let title = self.current().map(|t| t.title.clone()).unwrap_or_default();
+        log::warn!("cannot play {video_id}: {error}");
+        self.failures += 1;
+        let why = if error.contains("Premium members") {
+            if self.signed_in {
+                " (a Music Premium song; it needs yt-dlp, set in Settings)"
+            } else {
+                ": only Music Premium members can play it. Sign in with a Premium account."
+            }
+        } else {
+            ""
+        };
+        self.toast(format!("Cannot play \u{201c}{title}\u{201d}{why}"), ToastKind::Error);
+        if self.failures < 3 && self.queue.next_index(self.settings.repeat, true).is_some() {
+            self.advance(true);
+        } else {
+            self.failures = 0;
+            self.player.stop();
+            self.want_play = false;
         }
     }
 
@@ -1008,6 +1165,26 @@ impl App {
                     self.advance(false);
                 }
             }
+            player::Event::Upgraded { token, at } => {
+                if let Some(upgrade) = self.upgrade.as_mut().filter(|u| u.token == token) {
+                    upgrade.phase = UpgradePhase::Switching(at.as_secs_f64());
+                }
+                // The better stream is the one cached for the song now.
+                let better = self
+                    .current()
+                    .and_then(|track| self.streams.get(&track.video_id))
+                    .map(|(stream, _)| stream.clone());
+                if let (Some((t, loaded)), Some(stream)) = (self.loaded.as_mut(), better)
+                    && *t == token
+                {
+                    *loaded = stream;
+                }
+            }
+            player::Event::UpgradeFailed(token) => {
+                if let Some(upgrade) = self.upgrade.as_mut().filter(|u| u.token == token) {
+                    upgrade.phase = UpgradePhase::Unavailable;
+                }
+            }
             player::Event::Failed {
                 token,
                 message,
@@ -1026,11 +1203,14 @@ impl App {
                     // The address ran out; find it again and carry on from
                     // the same place.
                     self.retried = Some(token);
+                    self.loaded = None;
+                    self.upgrade = None;
                     self.backend.send(Request::Resolve {
                         token,
                         video_id,
                         purpose: Purpose::Load,
                         start: position.as_secs_f64(),
+                        how: How::Full,
                     });
                     return;
                 }
@@ -1100,6 +1280,7 @@ impl App {
                 video_id: entry.track.video_id,
                 purpose: Purpose::Preload,
                 start: 0.0,
+                how: How::Full,
             });
         }
     }
@@ -1907,7 +2088,7 @@ impl App {
                 self.toast("Link copied", ToastKind::Info);
             }
             Action::OpenUrl(url) => {
-                self.ctx.open_url(egui::OpenUrl::new_tab(url));
+                crate::platform::open_url(&url);
             }
             Action::ClearImageCache => {
                 let freed = crate::images::clear_cache(&self.paths.images());
@@ -2085,7 +2266,7 @@ impl App {
         });
         for notice in self.lastfm.tick(current, self.settings.scrobble) {
             match notice {
-                lastfm::Notice::OpenUrl(url) => self.ctx.open_url(egui::OpenUrl::new_tab(url)),
+                lastfm::Notice::OpenUrl(url) => crate::platform::open_url(&url),
                 lastfm::Notice::Toast { text, error } => {
                     self.toast(text, if error { ToastKind::Error } else { ToastKind::Info })
                 }

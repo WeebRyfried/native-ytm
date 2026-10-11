@@ -27,6 +27,45 @@ pub const ROW_HEIGHT: f32 = 56.0;
 pub const PAGE_MARGIN: f32 = 32.0;
 pub const CARD: f32 = 176.0;
 
+/// A repaint after `delay`, really: egui takes a predicted frame off every
+/// delay asked for, which would make a "33 ms" animation run at 60 frames
+/// a second and a "16 ms" one at the screen's full rate.
+pub fn repaint_in(ctx: &egui::Context, delay: std::time::Duration) {
+    let frame = ctx.input(|i| i.predicted_dt);
+    ctx.request_repaint_after(delay + std::time::Duration::from_secs_f32(frame.max(0.0)));
+}
+
+/// The next frame of an animation the app drives itself, at 60 frames a
+/// second at most: smooth, and on a 144 Hz screen less than half the
+/// frames of an immediate repaint. Input still repaints at once.
+pub fn next_frame(ctx: &egui::Context) {
+    repaint_in(ctx, std::time::Duration::from_micros(16_667));
+}
+
+/// Eases out (fast, then settling): for things arriving.
+pub fn ease_out(t: f32) -> f32 {
+    1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
+}
+
+/// How far, from 0 to 1 and eased, something has come in since `key` last
+/// changed in `slot` (a new page, a new song), over `secs`. Frames keep
+/// coming only until it is done.
+pub fn appear(ctx: &egui::Context, slot: egui::Id, key: u64, secs: f32) -> f32 {
+    let now = ctx.input(|i| i.time);
+    let start = ctx.data_mut(|d| {
+        let entry = d.get_temp_mut_or_insert_with(slot, || (key, now));
+        if entry.0 != key {
+            *entry = (key, now);
+        }
+        entry.1
+    });
+    let t = ((now - start) as f32 / secs).clamp(0.0, 1.0);
+    if t < 1.0 {
+        next_frame(ctx);
+    }
+    ease_out(t)
+}
+
 pub fn regular(size: f32) -> FontId {
     FontId::new(size, FontFamily::Proportional)
 }

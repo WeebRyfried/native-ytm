@@ -145,6 +145,7 @@ pub enum ToastKind {
 pub struct Toast {
     pub text: String,
     pub kind: ToastKind,
+    pub born: std::time::Instant,
     pub until: std::time::Instant,
 }
 

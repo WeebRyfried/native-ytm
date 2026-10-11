@@ -193,6 +193,19 @@ impl Innertube {
     /// Reads the current client version and a visitor id from the web app's
     /// page. Best effort: the defaults work when this fails.
     pub async fn bootstrap(&self) {
+        // The signed-out player's visitor id too, at the same time: the
+        // first song then starts without fetching it.
+        let warm = async {
+            if self.player_visitor.read().is_none()
+                && let Ok(visitor) = self.fetch_visitor_data().await
+            {
+                *self.player_visitor.write() = Some(visitor);
+            }
+        };
+        let (_, ()) = tokio::join!(warm, self.bootstrap_page());
+    }
+
+    async fn bootstrap_page(&self) {
         let mut request = self
             .http
             .get(ORIGIN)
