@@ -24,9 +24,11 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         account(app, ui);
         playback(ui, &mut draft);
         quality(app, ui, &mut draft);
+        your_music(app, ui, &mut draft);
         storage(app, ui, &mut draft);
         connections(app, ui, &mut draft);
         appearance(ui, &mut draft);
+        updates(app, ui, &mut draft);
         keyboard(ui);
         advanced(app, ui, &mut draft);
         about(ui);
@@ -203,6 +205,130 @@ fn equalizer(ui: &mut Ui, draft: &mut Settings) {
     ui.add_space(10.0);
 }
 
+/// The folders of the person's own music.
+fn your_music(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
+    let songs = app.local.songs().len();
+    let albums = app.local.albums();
+    let scanning = app.local.scanning();
+    let picking = app.picking_folder;
+    card(ui, "Music on this PC", |ui| {
+        let detail = if draft.local_folders.is_empty() {
+            "Play your own MP3, FLAC, M4A, Ogg and WAV files beside YouTube Music. Their songs show in Library, On this PC, and come first in search. Add a folder here, or drop one on the window. Nothing leaves this PC.".to_owned()
+        } else {
+            match scanning {
+                Some(seen) => format!("Looking through your folders\u{2026} {seen} files so far."),
+                None => format!(
+                    "{} in {}, in Library, On this PC, and first in search.",
+                    widgets::songs(songs),
+                    if albums == 1 { "1 album".to_owned() } else { format!("{albums} albums") }
+                ),
+            }
+        };
+        let (mut add, mut rescan) = (false, false);
+        row(ui, "Your folders", &detail, 230.0, |ui| {
+            add = widgets::pill(ui, Some(Icon::FolderPlus), if picking { "Choosing\u{2026}" } else { "Add a folder" }, draft.local_folders.is_empty()).clicked();
+            if !draft.local_folders.is_empty() {
+                rescan = widgets::icon_button(ui, Icon::Refresh, 18.0, theme::TEXT_DIM, "Look through the folders again").clicked();
+            }
+        });
+        if add {
+            app.actions.push(Action::AddLocalFolder);
+        }
+        if rescan {
+            app.actions.push(Action::RescanLocal);
+        }
+        let mut gone = None;
+        for folder in &draft.local_folders {
+            divider(ui);
+            let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), Sense::hover());
+            Icon::Folder
+                .image(theme::TEXT_DIM, 18.0)
+                .paint_at(ui, Rect::from_center_size(pos2(rect.left() + 9.0, rect.center().y), Vec2::splat(18.0)));
+            let text_w = rect.width() - 34.0 - 90.0;
+            let mut label = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(Rect::from_min_max(pos2(rect.left() + 32.0, rect.top()), pos2(rect.left() + 32.0 + text_w, rect.bottom())))
+                    .layout(Layout::left_to_right(Align::Center)),
+            );
+            widgets::clipped_label(&mut label, folder, theme::regular(14.0), theme::TEXT, text_w, Sense::hover());
+            let mut buttons = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(Rect::from_min_max(pos2(rect.right() - 90.0, rect.top()), rect.max))
+                    .layout(Layout::right_to_left(Align::Center)),
+            );
+            buttons.spacing_mut().item_spacing.x = 2.0;
+            if widgets::icon_button(&mut buttons, Icon::Close, 16.0, theme::TEXT_DIM, "Stop playing music from this folder").clicked() {
+                gone = Some(folder.clone());
+            }
+            if widgets::icon_button(&mut buttons, Icon::External, 16.0, theme::TEXT_DIM, "Open in Explorer").clicked() {
+                crate::platform::open_folder(std::path::Path::new(folder));
+            }
+            let _ = response;
+        }
+        if let Some(folder) = gone {
+            draft.local_folders.retain(|f| *f != folder);
+        }
+        if !draft.local_folders.is_empty() {
+            ui.add_space(6.0);
+        }
+    });
+}
+
+/// Whether a newer version is out, and moving to it in one click.
+fn updates(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
+    use crate::update::State;
+    let state = app.updater.state();
+    card(ui, "Updates", |ui| {
+        let version = env!("CARGO_PKG_VERSION");
+        let (title, detail) = match &state {
+            State::Idle => (format!("Native YTM {version}"), "Look for a newer version on GitHub.".to_owned()),
+            State::Checking => (format!("Native YTM {version}"), "Looking for a newer version\u{2026}".to_owned()),
+            State::UpToDate => (format!("Native YTM {version}"), "You have the latest version.".to_owned()),
+            State::Available(release) => (
+                format!("Version {} is out", release.version),
+                format!(
+                    "{}{}Updating takes a few seconds: the app restarts and the music carries on where it was.",
+                    release.summary,
+                    if release.summary.is_empty() { "" } else { " " }
+                ),
+            ),
+            State::Downloading(release, done) => (format!("Updating to {}", release.version), format!("Downloading\u{2026} {:.0}%", done * 100.0)),
+            State::Ready(_) => ("Restarting\u{2026}".to_owned(), "The new version is starting.".to_owned()),
+            State::Failed(error) => (format!("Native YTM {version}"), error.clone()),
+        };
+        let mut clicked = None;
+        row(ui, &title, &detail, 250.0, |ui| match &state {
+            State::Available(release) => {
+                if widgets::pill(ui, Some(Icon::Update), "Update now", true).clicked() {
+                    clicked = Some(Action::InstallUpdate);
+                }
+                if widgets::icon_button(ui, Icon::External, 16.0, theme::TEXT_DIM, "What's new, on GitHub").clicked() {
+                    clicked = Some(Action::OpenUrl(release.page.clone()));
+                }
+            }
+            State::Checking | State::Downloading(..) | State::Ready(_) => widgets::spinner_of(ui, 18.0, theme::TEXT_DIM),
+            _ => {
+                if widgets::pill(ui, Some(Icon::Refresh), "Check for updates", false).clicked() {
+                    clicked = Some(Action::CheckForUpdates);
+                }
+            }
+        });
+        if let State::Downloading(_, done) = state {
+            let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 4.0), Sense::hover());
+            ui.painter().rect_filled(rect, CornerRadius::same(2), theme::SURFACE_ACTIVE);
+            let filled = Rect::from_min_size(rect.min, vec2(rect.width() * done.clamp(0.0, 1.0), rect.height()));
+            ui.painter().rect_filled(filled, CornerRadius::same(2), theme::ACCENT);
+            ui.add_space(14.0);
+            theme::repaint_in(ui.ctx(), std::time::Duration::from_millis(120));
+        }
+        if let Some(action) = clicked {
+            app.actions.push(action);
+        }
+        divider(ui);
+        toggle_row(ui, "Look for updates on its own", "Now and then, and a few seconds after the app starts. Nothing downloads until you choose Update.", &mut draft.check_updates);
+    });
+}
+
 fn storage(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
     let usage = app.audio_cache.usage();
     let artwork = app.artwork_bytes();
@@ -351,6 +477,7 @@ fn keyboard(ui: &mut Ui) {
             ("Ctrl + Up / Down", "Volume"),
             ("M", "Mute"),
             ("F, Esc", "Open, close the full-window player"),
+            ("F11", "Full screen"),
             ("Q", "Show the queue"),
             ("L", "Like the song"),
             ("Ctrl + F or /", "Search"),

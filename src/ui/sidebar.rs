@@ -1,5 +1,5 @@
-//! The left column: the app's name, the three destinations, and the
-//! account's playlists.
+//! The left column: the app's name and version, the three destinations,
+//! and the account's playlists.
 
 use egui::{Align, Color32, CornerRadius, CursorIcon, Layout, Rect, RichText, Sense, Ui, Vec2, pos2, vec2};
 
@@ -28,8 +28,19 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
             Color32::WHITE,
         );
-        ui.add_space(4.0);
-        ui.label(RichText::new("Music").font(theme::bold(19.0)).color(theme::TEXT));
+        ui.add_space(2.0);
+        // The name, and the version small and grey on its baseline.
+        let name = ui.painter().layout_no_wrap("YTMusic".to_owned(), theme::bold(19.0), theme::TEXT);
+        let version = ui.painter().layout_no_wrap(concat!("v", env!("CARGO_PKG_VERSION")).to_owned(), theme::medium(10.5), theme::TEXT_FAINT);
+        let size = vec2(name.size().x + 5.0 + version.size().x, name.size().y);
+        let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
+        let top = rect.center().y - name.size().y / 2.0;
+        // Inter's baseline sits about four fifths down its line.
+        let baseline = top + name.size().y * 0.8;
+        let name_w = name.size().x;
+        ui.painter().galley(pos2(rect.left(), top), name, theme::TEXT);
+        ui.painter().galley(pos2(rect.left() + name_w + 5.0, baseline - version.size().y * 0.8), version, theme::TEXT_FAINT);
+        response.on_hover_text(concat!("Native YTM ", env!("CARGO_PKG_VERSION")));
     });
     ui.add_space(16.0);
     let route = app.route.clone();

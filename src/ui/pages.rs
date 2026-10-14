@@ -469,8 +469,9 @@ fn library(app: &mut App, ui: &mut Ui, tab: LibraryTab, key: &str) {
     ui.add_space(8.0);
     ui.label(RichText::new("Library").font(theme::bold(30.0)));
     ui.add_space(12.0);
-    // Downloads are the person's whether signed in or not.
-    let tabs: &[LibraryTab] = if app.signed_in { &LibraryTab::ALL } else { &[LibraryTab::Cached] };
+    // Downloads and the songs on this PC are the person's whether signed
+    // in or not.
+    let tabs: &[LibraryTab] = if app.signed_in { &LibraryTab::ALL } else { &[LibraryTab::Cached, LibraryTab::Device] };
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
         for &t in tabs {
@@ -482,6 +483,10 @@ fn library(app: &mut App, ui: &mut Ui, tab: LibraryTab, key: &str) {
     ui.add_space(20.0);
     if tab == LibraryTab::Cached {
         cached(app, ui);
+        return;
+    }
+    if tab == LibraryTab::Device {
+        device(app, ui);
         return;
     }
     if !app.signed_in {
@@ -606,6 +611,173 @@ fn cached(app: &mut App, ui: &mut Ui) {
     }
 }
 
+/// The songs in the person's own folders: all of them, to play, shuffle
+/// or filter; or, before any folder is added, how to add one.
+fn device(app: &mut App, ui: &mut Ui) {
+    let songs = app.local.songs();
+    let scanning = app.local.scanning();
+    let scanned = app.local.scanned;
+    let albums = app.local.albums();
+    let folders = app.settings.local_folders.len();
+    let picking = app.picking_folder;
+    let filter_id = egui::Id::new("device-filter");
+    let mut filter: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
+    let shown = if filter.trim().is_empty() { songs.clone() } else { app.local_hits(filter.trim()) };
+    let current = app.queue.current_track().map(|t| t.video_id.clone());
+    let playing = app.playing();
+    let signed_in = app.signed_in;
+    let online = app.online();
+    let mut cx = Cx {
+        images: &mut app.images,
+        actions: &mut app.actions,
+        current: current.as_deref(),
+        playing,
+        signed_in,
+        offline: &app.offline,
+        online,
+        romanized: app.settings.romanized_titles,
+    };
+    if folders == 0 {
+        device_welcome(ui, &mut cx, picking);
+        return;
+    }
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        ui.label(RichText::new("Your music").font(theme::bold(22.0)));
+        let albums = if albums == 1 { "1 album".to_owned() } else { format!("{albums} albums") };
+        let line = match scanning {
+            Some(seen) if songs.is_empty() => format!("Looking through your folders\u{2026} {seen} files so far"),
+            Some(_) => format!("{} \u{00b7} {albums} \u{00b7} looking for changes", widgets::songs(songs.len())),
+            None => format!("{} \u{00b7} {albums}", widgets::songs(songs.len())),
+        };
+        ui.label(RichText::new(line).color(theme::TEXT_DIM));
+        if scanning.is_some() {
+            widgets::spinner_of(ui, 14.0, theme::TEXT_DIM);
+        }
+    });
+    ui.add_space(12.0);
+    let source = Source {
+        title: Some("On this PC".into()),
+        ..Source::default()
+    };
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        if !songs.is_empty() {
+            if widgets::pill(ui, Some(Icon::Play), "Play", true).clicked() && !shown.is_empty() {
+                cx.push(Action::SetShuffle(false));
+                cx.push(Action::PlayTracks { tracks: shown.to_vec(), start: 0, source: source.clone() });
+            }
+            if widgets::pill(ui, Some(Icon::Shuffle), "Shuffle", false).clicked() && !shown.is_empty() {
+                cx.push(Action::SetShuffle(true));
+                cx.push(Action::PlayTracks { tracks: shown.to_vec(), start: fastrand::usize(..shown.len()), source: source.clone() });
+            }
+        }
+        if widgets::pill(ui, Some(Icon::FolderPlus), if picking { "Choosing\u{2026}" } else { "Add a folder" }, false)
+            .on_hover_text("Add another folder of music")
+            .clicked()
+        {
+            cx.push(Action::AddLocalFolder);
+        }
+        if widgets::icon_button(ui, Icon::Refresh, 18.0, theme::TEXT_DIM, "Look through the folders again").clicked() {
+            cx.push(Action::RescanLocal);
+        }
+        if !songs.is_empty() {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut filter)
+                        .hint_text(RichText::new("Filter by title, artist or album").color(theme::TEXT_FAINT))
+                        .desired_width(240.0)
+                        .margin(egui::Margin::symmetric(10, 6)),
+                );
+                if field.changed() {
+                    ui.data_mut(|d| d.insert_temp(filter_id, filter.clone()));
+                }
+            });
+        }
+    });
+    ui.add_space(12.0);
+    if songs.is_empty() {
+        if scanned && scanning.is_none() {
+            ui.add_space(20.0);
+            ui.label(
+                RichText::new("No music found in these folders yet. MP3, FLAC, M4A, Ogg, Opus, WAV and AIFF files play; add the folder that holds them.")
+                    .color(theme::TEXT_DIM),
+            );
+        } else {
+            widgets::spinner(ui);
+        }
+        return;
+    }
+    if shown.is_empty() {
+        ui.add_space(12.0);
+        ui.label(RichText::new(format!("Nothing matches \u{201c}{}\u{201d}", filter.trim())).color(theme::TEXT_DIM));
+        return;
+    }
+    widgets::track_list(ui, &mut cx, &shown, RowPlace::List, &source, true);
+}
+
+/// Before any folder: what the page is for, and the way to begin.
+fn device_welcome(ui: &mut Ui, cx: &mut Cx<'_>, picking: bool) {
+    ui.add_space(40.0);
+    ui.vertical_centered(|ui| {
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(72.0), Sense::hover());
+        ui.painter().circle_filled(rect.center(), 36.0, Color32::from_white_alpha(14));
+        Icon::Folder.image(theme::TEXT, 32.0).paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(32.0)));
+        ui.add_space(18.0);
+        ui.label(RichText::new("Play the music on this PC").font(theme::semibold(20.0)));
+        ui.add_space(8.0);
+        ui.set_max_width(460.0);
+        ui.label(
+            RichText::new("Add the folders where you keep MP3, FLAC, M4A, Ogg or WAV files. Their songs show here and come first when you search, beside YouTube Music. Nothing leaves this PC.")
+                .color(theme::TEXT_DIM),
+        );
+        ui.add_space(18.0);
+        if widgets::pill(ui, Some(Icon::FolderPlus), if picking { "Choosing\u{2026}" } else { "Add a folder" }, true).clicked() {
+            cx.push(Action::AddLocalFolder);
+        }
+    });
+}
+
+/// The songs on this PC matching a search, before YouTube Music's: a few,
+/// and the rest a click away. Any of them plays them all, from there.
+fn from_device(ui: &mut Ui, cx: &mut Cx<'_>, hits: &[Track], query: &str) {
+    const FEW: usize = 4;
+    let open_id = egui::Id::new(("from-device-open", query));
+    let open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
+        Icon::Computer.image(theme::TEXT, 20.0).paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(20.0)));
+        ui.label(RichText::new("From your device").font(theme::bold(22.0)));
+        ui.label(RichText::new(widgets::songs(hits.len())).color(theme::TEXT_DIM));
+        if hits.len() > FEW {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let label = if open { "Show fewer".to_owned() } else { format!("Show all {}", hits.len()) };
+                if widgets::pill(ui, None, &label, false).clicked() {
+                    ui.data_mut(|d| d.insert_temp(open_id, !open));
+                }
+            });
+        }
+    });
+    ui.add_space(10.0);
+    let source = Source {
+        title: Some(format!("\u{201c}{query}\u{201d} on this PC")),
+        ..Source::default()
+    };
+    let count = if open { hits.len() } else { hits.len().min(FEW) };
+    let clip = ui.clip_rect();
+    for (i, track) in hits[..count].iter().enumerate() {
+        let top = ui.cursor().top();
+        if top > clip.bottom() + 200.0 || top + theme::ROW_HEIGHT < clip.top() - 200.0 {
+            ui.allocate_space(vec2(ui.available_width(), theme::ROW_HEIGHT));
+            continue;
+        }
+        if widgets::track_row(ui, cx, track, Some(i + 1), RowPlace::List, true).play {
+            cx.push(Action::PlayTracks { tracks: hits.to_vec(), start: i, source: source.clone() });
+        }
+    }
+}
+
 fn search(app: &mut App, ui: &mut Ui) {
     ui.add_space(4.0);
     let filter = app.search.filter;
@@ -618,6 +790,13 @@ fn search(app: &mut App, ui: &mut Ui) {
         }
     });
     ui.add_space(20.0);
+    // Songs on this PC come first, for a search of everything or of songs.
+    let query = app.search.query.clone();
+    let local = if matches!(filter, Filter::All | Filter::Songs) && !query.trim().is_empty() {
+        app.local_hits(query.trim())
+    } else {
+        Default::default()
+    };
     let current = app.queue.current_track().map(|t| t.video_id.clone());
     let playing = app.playing();
     let signed_in = app.signed_in;
@@ -634,12 +813,17 @@ fn search(app: &mut App, ui: &mut Ui) {
         online,
         romanized: app.settings.romanized_titles,
     };
+    if !local.is_empty() {
+        from_device(ui, &mut cx, &local, query.trim());
+        ui.add_space(28.0);
+    }
     match &search.results {
         Loadable::Loading => widgets::spinner(ui),
+        Loadable::Failed(_) if !online && !local.is_empty() => {}
         Loadable::Failed(_) if !online => offline_note(ui, &mut cx),
         Loadable::Failed(error) => widgets::failed(ui, &friendly(error), Some(Action::Search(search.query.clone())), &mut cx),
         Loadable::Ready(sections) => {
-            if sections.is_empty() {
+            if sections.is_empty() && local.is_empty() {
                 ui.add_space(32.0);
                 ui.vertical_centered(|ui| {
                     ui.label(RichText::new(format!("No results for \u{201c}{}\u{201d}", search.query)).color(theme::TEXT_DIM));

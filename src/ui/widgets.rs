@@ -585,6 +585,28 @@ pub fn track_menu(ui: &mut Ui, cx: &mut Cx<'_>, track: &Track, place: RowPlace<'
         ui.add(egui::Button::image_and_text(icon.image(theme::TEXT, 18.0), text).frame_when_inactive(false))
             .clicked()
     };
+    // A song on this PC: the queue, and its file. YouTube Music's radio,
+    // likes, playlists and links are not for it.
+    if let Some(file) = &track.file {
+        if !matches!(place, RowPlace::Queue(_)) {
+            if item(ui, Icon::PlayNext, "Play next") {
+                cx.push(Action::PlayNext(vec![track.clone()]));
+            }
+            if item(ui, Icon::AddToQueue, "Add to queue") {
+                cx.push(Action::AddToQueue(vec![track.clone()]));
+            }
+        }
+        if let RowPlace::Queue(uid) = place
+            && item(ui, Icon::Close, "Remove from queue")
+        {
+            cx.push(Action::RemoveFromQueue(uid));
+        }
+        ui.separator();
+        if item(ui, Icon::Folder, "Show in folder") {
+            cx.push(Action::ShowInFolder(file.clone()));
+        }
+        return;
+    }
     if item(ui, Icon::Radio, "Start radio") {
         cx.push(Action::StartRadio(track.clone()));
     }

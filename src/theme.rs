@@ -228,12 +228,18 @@ fastframe_icons::icons! {
         CircleCheck => lucide "circle-check",
         ChevronUp => lucide "chevron-up",
         Info => lucide "info",
+        Fullscreen => "maximize",
+        ExitFullscreen => "minimize",
+        Folder => "folder",
+        FolderPlus => "folder-plus",
+        Computer => lucide "monitor",
+        Update => "circle-arrow-down",
     }
 }
 
-/// The app's icon: a player window with a red disc, a play mark and a
-/// note on it. One picture for the window, the tray, the sidebar, the
-/// executable (assets/app.ico) and the README.
+/// The app's icon: a white play mark on red, in a rounded square. One
+/// picture for the window, the tray, the sidebar, the executable
+/// (assets/app.ico) and the README.
 pub const ICON_PNG: &[u8] = include_bytes!("../assets/icon.png");
 
 /// The icon as straight RGBA, `size` pixels square.

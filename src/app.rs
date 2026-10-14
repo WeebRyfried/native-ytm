@@ -21,7 +21,7 @@ use crate::model::*;
 use crate::player::{self, Player, State as PlayState, StreamInfo};
 use crate::queue::{Queue, Source};
 use crate::settings::{self, Paths, Repeat, Session, Settings};
-use crate::{discord, lastfm, net};
+use crate::{discord, lastfm, local, net, update};
 
 /// Set by another launch of the app, which asks for the window.
 pub static SHOW_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -92,6 +92,8 @@ pub struct NowInfo {
     pub video_id: String,
     pub lyrics_id: Option<String>,
     pub like: Option<Like>,
+    /// The year it came out, from YouTube Music's queue for it.
+    pub year: Option<u16>,
     /// The song's info arrived (or failed): whether YouTube has lyrics for
     /// it is known.
     pub info_ready: bool,
@@ -225,6 +227,26 @@ pub struct App {
     /// The full-window player: the artwork, with the queue or the lyrics.
     pub full_view: bool,
     pub full_tab: SideTab,
+    /// The window fills the screen with the full view, the player bar
+    /// hiding while the mouse rests; and whether the full view was open
+    /// before, to go back to.
+    pub fullscreen: bool,
+    full_view_before: bool,
+    /// When the mouse last moved (or a key went down), in egui's time.
+    pub active_at: f64,
+    /// Songs in the person's own folders.
+    pub local: local::LocalLibrary,
+    /// A search's songs from those folders, for its query, as of a
+    /// generation of the library.
+    local_hits: Option<(String, u64, Arc<Vec<Track>>)>,
+    /// The folder picker is open; what it picks comes here.
+    pub picking_folder: bool,
+    folder_picked: (std::sync::mpsc::Sender<Option<std::path::PathBuf>>, Receiver<Option<std::path::PathBuf>>),
+    pub updater: update::Updater,
+    /// When to look for an update next on its own.
+    update_due: Option<Instant>,
+    /// Write the session whatever the settings say (an update's restart).
+    keep_session: bool,
     pub ready: bool,
     /// Settings as edited on the Settings page, until applied.
     pub settings_draft: Option<Settings>,
@@ -306,6 +328,15 @@ impl App {
             let waker = waker.clone();
             Arc::new(move || waker.wake())
         });
+        let wake_with = |waker: &fastframe_shell::Waker| -> Arc<dyn Fn() + Send + Sync> {
+            let waker = waker.clone();
+            Arc::new(move || waker.wake())
+        };
+        let local = local::LocalLibrary::new(paths.cache.join("local"), wake_with(&waker));
+        let updater = update::Updater::new(backend.runtime.handle().clone(), backend.http.clone(), wake_with(&waker));
+        // A first look for an update a little after starting, when the
+        // window is up and the music has started.
+        let update_due = settings.check_updates.then(|| Instant::now() + Duration::from_secs(8));
         let ticking = Arc::new(AtomicBool::new(false));
         {
             let (ticking, waker) = (ticking.clone(), waker.clone());
@@ -385,6 +416,16 @@ impl App {
             side_tab: SideTab::UpNext,
             full_view: false,
             full_tab: SideTab::UpNext,
+            fullscreen: false,
+            full_view_before: false,
+            active_at: 0.0,
+            local,
+            local_hits: None,
+            picking_folder: false,
+            folder_picked: std::sync::mpsc::channel(),
+            updater,
+            update_due,
+            keep_session: false,
             ready: false,
             settings_draft: None,
             now_playing: None,
@@ -420,21 +461,10 @@ impl App {
         }
         app.backend.send(Request::Bootstrap);
         app.request_page(&Route::Home, false);
+        let folders = app.settings.local_folders.clone();
+        app.local.scan(&folders);
         if app.settings.restore_session {
-            let session: Session = settings::load(&app.paths.session());
-            if !session.tracks.is_empty() {
-                let current = session.current.unwrap_or(0);
-                app.queue.replace(
-                    session.tracks,
-                    current,
-                    Source {
-                        playlist_id: session.playlist_id,
-                        ..Source::default()
-                    },
-                );
-                app.start_at = session.position_secs;
-                app.current_uid = app.queue.current().map(|e| e.uid);
-            }
+            app.restore_session();
         }
         app.now_playing = Some(fastframe_now_playing::NowPlaying::start(
             fastframe_now_playing::App::new("native-ytm", "Native YTM"),
@@ -502,6 +532,16 @@ impl App {
             self.on_player(event);
         }
         self.images.poll();
+        if self.local.poll() {
+            self.local_hits = None;
+        }
+        while let Ok(picked) = self.folder_picked.1.try_recv() {
+            self.picking_folder = false;
+            if let Some(folder) = picked {
+                self.add_local_folder(folder);
+            }
+        }
+        self.update_tick();
         self.media_controls();
         self.tray_events();
         self.connectivity();
@@ -947,6 +987,7 @@ impl App {
                 }
                 self.now.info_ready = true;
                 if let Ok(watch) = result {
+                    self.now.year = watch.tracks.iter().find(|t| t.video_id == video_id).and_then(|t| t.year);
                     self.now.lyrics_id = watch.lyrics_id;
                     self.now.like = watch.like;
                 }
@@ -983,6 +1024,18 @@ impl App {
         self.upgrade = None;
         self.loaded = None;
         self.stalled = false;
+        // A song on this PC plays from its file, online or not.
+        if entry.track.is_local() {
+            match self.local.stream_for(&entry.track) {
+                Some(stream) => {
+                    self.loaded = Some((token, stream.clone()));
+                    self.player.load(token, stream, Duration::from_secs_f64(start), true);
+                    self.track_info(&video_id);
+                }
+                None => self.cannot_play(&video_id, "its file is no longer there"),
+            }
+            return;
+        }
         // Its names go with the file, should it be kept.
         self.audio_cache.note(&entry.track);
         if !self.online() && !self.audio_cache.has_at_least(&video_id, 1) && !self.network.check_now() {
@@ -1057,6 +1110,15 @@ impl App {
         };
         if self.lyrics.len() > 200 {
             self.lyrics.clear();
+        }
+        // YouTube knows nothing of a song on this PC; its lyrics come from
+        // LRCLIB alone.
+        if local::is_local_id(video_id) {
+            self.now.info_ready = true;
+            if self.lyrics_shown() {
+                self.request_lyrics();
+            }
+            return;
         }
         let seq = self.next_seq();
         self.watch_purposes.insert(
@@ -1182,6 +1244,7 @@ impl App {
             .queue
             .next_index(self.settings.repeat, false)
             .and_then(|i| self.queue.entries.get(i))
+            .filter(|e| !e.track.is_local())
         else {
             return;
         };
@@ -1356,7 +1419,7 @@ impl App {
             return;
         }
         self.history_sent = self.current_token;
-        if let Some(video_id) = self.current().map(|t| t.video_id.clone()) {
+        if let Some(video_id) = self.current().filter(|t| !t.is_local()).map(|t| t.video_id.clone()) {
             self.backend.send(Request::History { video_id });
         }
     }
@@ -1404,7 +1467,8 @@ impl App {
     fn save_offline(&mut self, tracks: Vec<Track>) {
         let wanted = self.wanted_kbps();
         let (mut queued, mut at_once) = (0, 0);
-        for track in tracks {
+        // Songs on this PC are here already.
+        for track in tracks.into_iter().filter(|t| !t.is_local()) {
             let id = track.video_id.clone();
             if self.offline.get(&id) == Some(&Mark::Saved) || self.downloads.has(&id) {
                 continue;
@@ -1546,8 +1610,10 @@ impl App {
     /// queue that is, or else wait for the connection.
     fn offline_skip(&mut self, title: &str) {
         let next = self.queue.current.and_then(|current| {
-            (current + 1..self.queue.entries.len())
-                .find(|&i| self.audio_cache.has_at_least(&self.queue.entries[i].track.video_id, 1))
+            (current + 1..self.queue.entries.len()).find(|&i| {
+                let track = &self.queue.entries[i].track;
+                track.is_local() || self.audio_cache.has_at_least(&track.video_id, 1)
+            })
         });
         match next {
             Some(index) => {
@@ -1758,12 +1824,18 @@ impl App {
         self.preload_wanted_for = Some(entry.uid);
         let token = self.next_seq();
         self.preload = Some((token, entry.uid));
-        if let Some(stream) = self
-            .best_stream(&entry.track.video_id)
-            .or_else(|| self.audio_cache.lookup(&entry.track.video_id))
-        {
+        let stream = if entry.track.is_local() {
+            self.local.stream_for(&entry.track)
+        } else {
+            self.best_stream(&entry.track.video_id)
+                .or_else(|| self.audio_cache.lookup(&entry.track.video_id))
+        };
+        if let Some(stream) = stream {
             let crossfade = self.crossfade_into(&entry.track);
             self.player.preload(token, stream, crossfade);
+        } else if entry.track.is_local() {
+            // Gone from disk: it fails in its turn, and is skipped then.
+            self.preload = None;
         } else {
             self.backend.send(Request::Resolve {
                 token,
@@ -1778,7 +1850,12 @@ impl App {
     /// Whether `next` may fade in over the song playing: not when they are
     /// one album's, which plays as one piece.
     fn crossfade_into(&self, next: &Track) -> bool {
-        let album = |t: &Track| t.album.as_ref().and_then(|a| a.id.clone());
+        // A song on this PC has no album id: its album's name and folder
+        // stand in for one.
+        let album = |t: &Track| match &t.file {
+            Some(file) => t.album.as_ref().map(|a| format!("{}|{}", a.name, std::path::Path::new(file).parent().map(|p| p.display().to_string()).unwrap_or_default())),
+            None => t.album.as_ref().and_then(|a| a.id.clone()),
+        };
         match (self.current().and_then(album), album(next)) {
             (Some(a), Some(b)) => a != b,
             _ => true,
@@ -1820,8 +1897,16 @@ impl App {
                 });
             }
             (None, _) => {
-                // The list ran out: carry on with the radio of its last song.
-                let Some(last) = self.queue.entries.last().map(|e| e.track.video_id.clone()) else {
+                // The list ran out: carry on with the radio of its last song
+                // from YouTube Music (songs on this PC have none).
+                let Some(last) = self.queue.entries.iter().rev().find(|e| !e.track.is_local()).map(|e| e.track.video_id.clone()) else {
+                    self.radio_dry = true;
+                    if self.ended_waiting {
+                        self.ended_waiting = false;
+                        self.player.stop();
+                        self.want_play = false;
+                        self.start_at = 0.0;
+                    }
                     return;
                 };
                 self.extending = true;
@@ -1903,9 +1988,41 @@ impl App {
         self.current_token != 0 && self.player.status().token != self.current_token
     }
 
+    /// The queue as the last session left it, at the same moment.
+    fn restore_session(&mut self) {
+        let session: Session = settings::load(&self.paths.session());
+        if !session.tracks.is_empty() {
+            let current = session.current.unwrap_or(0);
+            self.queue.replace(
+                session.tracks,
+                current,
+                Source {
+                    playlist_id: session.playlist_id,
+                    ..Source::default()
+                },
+            );
+            self.start_at = session.position_secs;
+            self.current_uid = self.queue.current().map(|e| e.uid);
+        }
+    }
+
+    /// Started by an update of the app: the queue carries on where the
+    /// old program left it, playing if it was.
+    pub fn resume_after_update(&mut self, playing: bool) {
+        if !self.settings.restore_session {
+            self.restore_session();
+            // Written for this start alone.
+            let _ = std::fs::remove_file(self.paths.session());
+        }
+        if playing && self.current().is_some() {
+            self.actions.push(Action::TogglePlay);
+        }
+        self.toast(format!("Updated to {}", env!("CARGO_PKG_VERSION")), ToastKind::Info);
+    }
+
     pub fn save_session(&mut self) {
         self.last_saved = Instant::now();
-        if !self.settings.restore_session {
+        if !self.settings.restore_session && !self.keep_session {
             return;
         }
         let session = Session {
@@ -1919,6 +2036,117 @@ impl App {
 
     pub fn save_settings(&self) {
         settings::save(&self.paths.settings(), &self.settings);
+    }
+
+    /// Back from full screen to the window as it was.
+    fn leave_fullscreen(&mut self) {
+        if !self.fullscreen {
+            return;
+        }
+        self.fullscreen = false;
+        self.full_view = self.full_view_before;
+        self.ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+    }
+}
+
+// ---- Music on this PC, and updates -------------------------------------------
+
+impl App {
+    /// A search's songs from the person's folders, found once per query.
+    pub fn local_hits(&mut self, query: &str) -> Arc<Vec<Track>> {
+        let generation = self.local.generation();
+        match &self.local_hits {
+            Some((q, g, hits)) if q == query && *g == generation => hits.clone(),
+            _ => {
+                let hits = Arc::new(self.local.search(query));
+                self.local_hits = Some((query.to_owned(), generation, hits.clone()));
+                hits
+            }
+        }
+    }
+
+    /// Opens Windows' folder picker on a thread of its own; the folder
+    /// chosen arrives in `background`.
+    fn pick_local_folder(&mut self) {
+        if self.picking_folder {
+            return;
+        }
+        self.picking_folder = true;
+        let tx = self.folder_picked.0.clone();
+        let waker = self.waker.clone();
+        let spawned = std::thread::Builder::new().name("folder-picker".into()).spawn(move || {
+            let _ = tx.send(crate::platform::pick_folder("Add a folder of music"));
+            waker.wake();
+        });
+        if spawned.is_err() {
+            self.picking_folder = false;
+        }
+    }
+
+    fn add_local_folder(&mut self, folder: std::path::PathBuf) {
+        let name = folder.display().to_string();
+        if self.settings.local_folders.iter().any(|f| folder.starts_with(f)) {
+            self.toast(format!("{name} is in your music already"), ToastKind::Info);
+            return;
+        }
+        // A folder holding ones added before takes their place.
+        self.settings.local_folders.retain(|f| !std::path::Path::new(f).starts_with(&folder));
+        self.settings.local_folders.push(name.clone());
+        self.save_settings();
+        let folders = self.settings.local_folders.clone();
+        self.local.scan(&folders);
+        self.toast(format!("Looking for music in {name}"), ToastKind::Info);
+    }
+
+    /// Looks for an update when it is time, and restarts into one that is
+    /// ready.
+    fn update_tick(&mut self) {
+        if let Some(due) = self.update_due {
+            let now = Instant::now();
+            if now >= due {
+                self.update_due = Some(now + Duration::from_secs(12 * 3600));
+                if self.settings.check_updates && self.online() {
+                    self.updater.check(true);
+                }
+            } else if due - now < Duration::from_secs(60) {
+                crate::theme::repaint_in(&self.ctx, due - now);
+            }
+        }
+        if let update::State::Ready(exe) = self.updater.state()
+            && !self.keep_session
+        {
+            self.restart_into(&exe);
+        }
+    }
+
+    /// Starts the new program and quits, the queue saved where it is for
+    /// it to carry on from.
+    fn restart_into(&mut self, exe: &std::path::Path) {
+        let playing = self.playing();
+        self.start_at = self.position();
+        self.keep_session = true;
+        self.save_session();
+        let mut command = std::process::Command::new(exe);
+        command
+            .arg("--updated-from")
+            .arg(std::process::id().to_string())
+            .arg(if playing { "--resume-playing" } else { "--resume" });
+        if let Some(dir) = exe.parent() {
+            command.current_dir(dir);
+        }
+        match command.spawn() {
+            Ok(_) => {
+                log::info!("restarting into the update");
+                // Its position stays as saved, whatever the stopped player says.
+                self.current_token = 0;
+                self.player.stop();
+                self.actions.push(Action::Quit);
+            }
+            Err(error) => {
+                log::warn!("cannot start the update: {error}");
+                self.toast("The update is in place: it runs the next time the app starts", ToastKind::Info);
+            }
+        }
     }
 }
 
@@ -2047,6 +2275,7 @@ impl App {
         match action {
             Action::Navigate(route) => self.navigate(route),
             Action::Back => {
+                self.leave_fullscreen();
                 self.full_view = false;
                 if let Some(route) = self.history.pop() {
                     let current = std::mem::replace(&mut self.route, route.clone());
@@ -2055,6 +2284,7 @@ impl App {
                 }
             }
             Action::Forward => {
+                self.leave_fullscreen();
                 self.full_view = false;
                 if let Some(route) = self.forward.pop() {
                     let current = std::mem::replace(&mut self.route, route.clone());
@@ -2083,6 +2313,12 @@ impl App {
                 self.queue.replace(tracks, start, source);
                 self.start_current(0.0);
             }
+            Action::PlayTrack(track) if track.is_local() => {
+                // No radio follows a song on this PC.
+                self.pending_queue = None;
+                self.queue.replace(vec![track], 0, Source::default());
+                self.start_current(0.0);
+            }
             Action::PlayTrack(track) => {
                 self.pending_queue = None;
                 self.radio_dry = false;
@@ -2107,6 +2343,9 @@ impl App {
                         params: None,
                     });
                 }
+            }
+            Action::StartRadio(track) if track.is_local() => {
+                self.toast("Radio starts from a song on YouTube Music", ToastKind::Info);
             }
             Action::StartRadio(track) => {
                 self.actions.push(Action::PlayWatch {
@@ -2277,6 +2516,7 @@ impl App {
                 self.queue_changed();
                 self.save_settings();
             }
+            Action::Rate(video_id, _) if local::is_local_id(&video_id) => {}
             Action::Rate(video_id, rating) => {
                 if !self.require_sign_in() {
                     return;
@@ -2476,11 +2716,49 @@ impl App {
                 }
             }
             Action::ToggleFullView => {
+                if self.fullscreen {
+                    // Closing the player leaves full screen with it.
+                    self.leave_fullscreen();
+                    self.full_view = false;
+                    return;
+                }
                 self.full_view = !self.full_view;
                 if self.full_view && self.full_tab == SideTab::Lyrics {
                     self.request_lyrics();
                 }
             }
+            Action::ToggleFullscreen => {
+                if self.fullscreen {
+                    self.leave_fullscreen();
+                } else {
+                    self.fullscreen = true;
+                    self.full_view_before = self.full_view;
+                    self.full_view = true;
+                    self.active_at = self.ctx.input(|i| i.time);
+                    self.ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
+                    if self.full_tab == SideTab::Lyrics {
+                        self.request_lyrics();
+                    }
+                }
+            }
+            Action::AddLocalFolder => self.pick_local_folder(),
+            Action::AddLocalFolderPath(folder) => self.add_local_folder(folder.into()),
+            Action::RemoveLocalFolder(folder) => {
+                self.settings.local_folders.retain(|f| *f != folder);
+                self.save_settings();
+                let folders = self.settings.local_folders.clone();
+                self.local.scan(&folders);
+            }
+            Action::RescanLocal => {
+                let folders = self.settings.local_folders.clone();
+                self.local.scan(&folders);
+            }
+            Action::ShowInFolder(path) => crate::platform::show_in_folder(std::path::Path::new(&path)),
+            Action::CheckForUpdates => {
+                self.updater.dismiss_failure();
+                self.updater.check(false);
+            }
+            Action::InstallUpdate => self.updater.install(),
             Action::LastFmConnect => {
                 let (key, secret) = self.lastfm_form.clone();
                 if key.trim().is_empty() || secret.trim().is_empty() {
@@ -2598,6 +2876,12 @@ impl App {
                 if new.transitions() != self.settings.transitions() {
                     let (crossfade, gap) = new.transitions();
                     self.player.set_transitions(crossfade, gap);
+                }
+                if new.local_folders != self.settings.local_folders {
+                    self.local.scan(&new.local_folders);
+                }
+                if new.check_updates && !self.settings.check_updates {
+                    self.update_due = Some(Instant::now());
                 }
                 self.settings = new;
                 self.settings_dirty = Some(Instant::now());

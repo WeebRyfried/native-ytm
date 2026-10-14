@@ -201,6 +201,8 @@ struct Byline {
     artists: Vec<Link>,
     album: Option<Link>,
     duration: Option<u32>,
+    /// The year it came out, when the line says.
+    year: Option<u16>,
     /// What else was said (plays, a year).
     extra: Vec<String>,
 }
@@ -211,6 +213,7 @@ fn byline(runs: &[Value], plain_artists: bool) -> Byline {
         artists: Vec::new(),
         album: None,
         duration: None,
+        year: None,
         extra: Vec::new(),
     };
     let mut plain = Vec::new();
@@ -235,7 +238,12 @@ fn byline(runs: &[Value], plain_artists: bool) -> Byline {
         if index == 0 && is_type_label(text) {
             continue;
         }
-        if is_count(text) || (text.len() == 4 && text.bytes().all(|b| b.is_ascii_digit())) {
+        if text.len() == 4 && text.bytes().all(|b| b.is_ascii_digit()) {
+            out.year = text.parse().ok().filter(|y| (1900..2100).contains(y));
+            out.extra.push(text.to_owned());
+            continue;
+        }
+        if is_count(text) {
             out.extra.push(text.to_owned());
             continue;
         }
@@ -360,6 +368,8 @@ pub fn responsive_item(r: &Value) -> Option<Item> {
                 .and_then(Value::as_str)
                 .map(str::to_owned),
             extra: line.extra.first().cloned(),
+            year: line.year,
+            file: None,
         })
     } else {
         None
@@ -421,6 +431,8 @@ pub fn two_row_item(r: &Value) -> Option<Item> {
                 video: kind == Kind::Video,
                 set_video_id: None,
                 extra: line.extra.first().cloned(),
+                year: line.year,
+                file: None,
             })
         }
         _ => None,
@@ -495,6 +507,8 @@ pub fn panel_video(r: &Value) -> Option<Track> {
             .and_then(Value::as_str)
             .map(str::to_owned),
         extra: line.extra.first().cloned(),
+        year: line.year,
+        file: None,
     })
 }
 
@@ -980,7 +994,16 @@ pub fn page(v: &Value) -> Page {
         && !h.banner
     {
         let album = h.playlist_id.as_deref().is_some_and(|id| id.starts_with("OLAK5uy_"));
+        // "Album • 2016": the year the album's songs came out.
+        let year = [&h.subtitle, &h.second_subtitle]
+            .into_iter()
+            .flatten()
+            .flat_map(|line| line.split(" \u{2022} "))
+            .find_map(|part| part.trim().parse::<u16>().ok().filter(|y| (1900..2100).contains(y)));
         for track in &mut page.tracks {
+            if album && track.year.is_none() {
+                track.year = year;
+            }
             if track.thumbnail.is_none() {
                 track.thumbnail = h.thumbnail.clone();
             }

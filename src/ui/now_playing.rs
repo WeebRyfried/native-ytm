@@ -9,15 +9,32 @@ use crate::model::{Action, SideTab};
 use crate::theme::{self, Icon};
 use crate::ui::{lyrics, side_panel, widgets};
 
-/// `rise`: how far below its place the content still is, opening.
-pub fn show(app: &mut App, ui: &mut Ui, rect: Rect, rise: f32) {
+/// `rise`: how far below its place the content still is, opening; `foot`:
+/// room kept free at the bottom (the floating bar's, in full screen);
+/// `chrome`: how much the buttons along the top show (in full screen they
+/// go with the bar while the mouse rests).
+pub fn show(app: &mut App, ui: &mut Ui, rect: Rect, rise: f32, foot: f32, chrome: f32) {
     let track = app.current().cloned();
     backdrop(app, ui, rect, track.as_ref().and_then(|t| t.thumbnail.as_deref()));
 
-    let close = Rect::from_min_size(rect.min + vec2(20.0, 16.0 + rise), vec2(40.0, 40.0));
-    let mut bar = ui.new_child(UiBuilder::new().max_rect(close).layout(Layout::left_to_right(Align::Center)));
-    if widgets::icon_button(&mut bar, Icon::ChevronDown, 26.0, theme::TEXT, "Close the player (Esc)").clicked() {
-        app.actions.push(Action::ToggleFullView);
+    if chrome > 0.0 {
+        let close = Rect::from_min_size(rect.min + vec2(20.0, 16.0 + rise), vec2(40.0, 40.0));
+        let mut bar = ui.new_child(UiBuilder::new().max_rect(close).layout(Layout::left_to_right(Align::Center)));
+        bar.multiply_opacity(chrome);
+        if widgets::icon_button(&mut bar, Icon::ChevronDown, 26.0, theme::TEXT, "Close the player (Esc)").clicked() {
+            app.actions.push(Action::ToggleFullView);
+        }
+        let corner = Rect::from_min_size(pos2(rect.right() - 60.0, rect.top() + 16.0 + rise), vec2(40.0, 40.0));
+        let mut bar = ui.new_child(UiBuilder::new().max_rect(corner).layout(Layout::left_to_right(Align::Center)));
+        bar.multiply_opacity(chrome);
+        let (icon, tip) = if app.fullscreen {
+            (Icon::ExitFullscreen, "Exit full screen (Esc)")
+        } else {
+            (Icon::Fullscreen, "Full screen (F11)")
+        };
+        if widgets::icon_button(&mut bar, icon, 22.0, theme::TEXT, tip).clicked() {
+            app.actions.push(Action::ToggleFullscreen);
+        }
     }
 
     let Some(track) = track else {
@@ -29,7 +46,7 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect, rise: f32) {
         return;
     };
 
-    let content = Rect::from_min_max(rect.min + vec2(56.0, 72.0), rect.max - vec2(48.0, 28.0)).translate(vec2(0.0, rise));
+    let content = Rect::from_min_max(rect.min + vec2(56.0, 72.0), rect.max - vec2(48.0, 28.0 + foot)).translate(vec2(0.0, rise));
     let narrow = content.width() < 820.0;
     let right_w = if narrow { content.width() * 0.48 } else { (content.width() * 0.4).clamp(360.0, 560.0) };
     let gap = if narrow { 32.0 } else { (content.width() * 0.07).clamp(56.0, 112.0) };
@@ -78,9 +95,20 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect, rise: f32) {
     let fade = theme::appear(ui.ctx(), ui.id().with("np-titles"), egui::Id::new(&track.video_id).value(), 0.3);
     text.multiply_opacity(fade);
     let width = titles.width();
-    let title_font = theme::bold(if art_size > 420.0 { 28.0 } else { 22.0 });
+    let big = art_size > 420.0;
+    let title_font = theme::bold(if big { 28.0 } else { 22.0 });
     let shown = app.shown_title(&track).to_owned();
-    let response = widgets::clipped_label(&mut text, &shown, title_font, theme::TEXT, width, Sense::hover());
+    // The year it came out, small and grey, just after the title.
+    let year = track.year.or_else(|| (app.now.video_id == track.video_id).then_some(app.now.year).flatten());
+    let year = year.map(|y| text.painter().layout_no_wrap(y.to_string(), theme::medium(if big { 16.0 } else { 14.0 }), theme::TEXT_DIM));
+    let year_w = year.as_ref().map_or(0.0, |g| g.size().x + 12.0);
+    let response = widgets::clipped_label(&mut text, &shown, title_font, theme::TEXT, width - year_w, Sense::hover());
+    if let Some(year) = year {
+        // On the title's baseline, four fifths down each line.
+        let title = response.rect;
+        let at = pos2(title.right() + 12.0, title.top() + title.height() * 0.8 - year.size().y * 0.8);
+        text.painter().galley(at, year, theme::TEXT_DIM.gamma_multiply(0.9));
+    }
     if shown != track.title {
         response.on_hover_text(&track.title);
     }

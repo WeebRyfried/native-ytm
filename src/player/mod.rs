@@ -845,15 +845,12 @@ impl Engine {
         *self.shared.seek_to.lock() = None;
     }
 
-    /// The bytes of a stream: read from the cache's file, or downloaded,
-    /// and then kept in the cache once whole.
+    /// The bytes of a stream: read from a file on disk (the cache's, or
+    /// the person's own), or downloaded, and then kept in the cache once
+    /// whole.
     fn source_for(&self, stream: &StreamInfo) -> (RemoteSource, Arc<source::Shared>) {
         if let Some(path) = crate::cache::file_of(&stream.url) {
-            let bytes = std::fs::read(path).unwrap_or_else(|error| {
-                log::warn!("cannot read the cached song {}: {error}", path.display());
-                Vec::new()
-            });
-            return RemoteSource::from_bytes(bytes);
+            return RemoteSource::from_file(path);
         }
         let complete = stream.cache_key.clone().filter(|_| self.cache.enabled()).map(|video_id| {
             let (cache, stream) = (self.cache.clone(), stream.clone());
@@ -935,15 +932,22 @@ impl Engine {
         };
         let mss = MediaSourceStream::new(Box::new(reader), Default::default());
         let mut hint = Hint::new();
-        hint.with_extension(if stream.mime.contains("webm") { "webm" } else { "m4a" });
+        let extension = match stream.mime.as_str() {
+            mime if mime.contains("webm") => "webm",
+            mime if mime.contains("mp4") => "m4a",
+            // A file of the person's own: whatever it is called.
+            _ => crate::cache::file_of(&stream.url)
+                .and_then(|path| path.extension())
+                .and_then(|e| e.to_str())
+                .unwrap_or_default(),
+        };
+        hint.with_extension(extension);
         hint.mime_type(&stream.mime);
+        // Playing needs none of the pictures a file may carry, some of
+        // them megabytes.
+        let metadata = MetadataOptions::default().limit_visual_bytes(symphonia::core::common::Limit::Maximum(0));
         let format = symphonia::default::get_probe()
-            .probe(
-                &hint,
-                mss,
-                FormatOptions::default(),
-                MetadataOptions::default(),
-            )
+            .probe(&hint, mss, FormatOptions::default(), metadata)
             .map_err(|e| failed(e, &handle))?;
         let track = format
             .default_track(TrackType::Audio)
@@ -953,6 +957,12 @@ impl Engine {
             })?;
         let track_id = track.id;
         let time_base = track.time_base;
+        // A file of the person's own may not say how long it is; its
+        // container does.
+        let mut stream = stream;
+        if stream.duration.is_none() {
+            stream.duration = crate::local::length(track);
+        }
         let Some(CodecParameters::Audio(params)) = track.codec_params.clone() else {
             return Err(OpenError::Failed {
                 message: "not an audio track".into(),

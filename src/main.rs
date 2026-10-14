@@ -10,6 +10,24 @@ use native_ytm::app::{App, SHOW_REQUESTED};
 use native_ytm::{platform, settings::Paths, theme, ui};
 
 fn main() {
+    // Started by an update: the old program is still closing, and holds
+    // the one-copy slot until it has.
+    let args: Vec<String> = std::env::args().collect();
+    let updated_from = args
+        .iter()
+        .position(|a| a == "--updated-from")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|pid| pid.parse::<u32>().ok());
+    if let Some(pid) = updated_from {
+        platform::wait_for_exit(pid, std::time::Duration::from_secs(15));
+    }
+    let resume = if args.iter().any(|a| a == "--resume-playing") {
+        Some(true)
+    } else if args.iter().any(|a| a == "--resume") {
+        Some(false)
+    } else {
+        None
+    };
     let paths = Paths::new();
     let waker = fastframe_shell::Waker::default();
     // A test profile is an instance of its own, beside the real one.
@@ -47,7 +65,14 @@ fn main() {
     if native_ytm::settings::profile().is_none() {
         platform::register_app_identity(&paths.config);
     }
-    let app = App::new(waker.clone());
+    let left_behind = std::env::current_exe().is_ok_and(|exe| exe.with_extension("exe.old").exists());
+    if updated_from.is_some() || left_behind {
+        native_ytm::update::clean_up_after(None);
+    }
+    let mut app = App::new(waker.clone());
+    if let Some(playing) = resume {
+        app.resume_after_update(playing);
+    }
     let config = paths.config.clone();
     let result = fastframe_shell::Shell::new(app, &waker).run(|lease| {
         let viewport = egui::ViewportBuilder::default()
@@ -75,6 +100,7 @@ fn main() {
                         && let RawWindowHandle::Win32(window) = handle.as_raw()
                     {
                         platform::style_title_bar(window.hwnd.get(), theme::SIDEBAR);
+                        platform::set_main_window(window.hwnd.get());
                     }
                 }
                 dev_route(&mut app);
@@ -87,6 +113,7 @@ fn main() {
                     size: None,
                     resized_at: None,
                     released_once: false,
+                    close_when_windowed: false,
                 }))
             }),
         )
@@ -108,6 +135,9 @@ struct Window {
     size: Option<egui::Vec2>,
     resized_at: Option<std::time::Instant>,
     released_once: bool,
+    /// Closing waits for full screen to end, so the window's size and
+    /// place are saved as a window's.
+    close_when_windowed: bool,
 }
 
 /// A screenshot taken on its own and saved, for checking the interface
@@ -165,6 +195,14 @@ impl Simulate {
 /// `download` in NATIVE_YTM_ROUTE: download the song playing, once one is.
 static DOWNLOAD_PLAYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// `update` in NATIVE_YTM_ROUTE: install an update as soon as one is
+/// found (with NATIVE_YTM_VERSION, an older version to be).
+static UPDATE_WHEN_FOUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `local:N` in NATIVE_YTM_ROUTE: play the songs on this PC from the Nth,
+/// once the scan has found them (N + 1, so 0 is none).
+static PLAY_LOCAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn dev_route(app: &mut App) {
     use native_ytm::model::{Action, LibraryTab, Route, SideTab};
     let Ok(route) = std::env::var("NATIVE_YTM_ROUTE") else {
@@ -186,7 +224,17 @@ fn dev_route(app: &mut App) {
                 DOWNLOAD_PLAYING.store(true, std::sync::atomic::Ordering::Relaxed);
                 continue;
             }
+            "update" => {
+                UPDATE_WHEN_FOUND.store(true, std::sync::atomic::Ordering::Relaxed);
+                continue;
+            }
+            "local" => {
+                PLAY_LOCAL.store(arg.parse::<usize>().unwrap_or(0) + 1, std::sync::atomic::Ordering::Relaxed);
+                continue;
+            }
             "settings" => Action::Navigate(Route::Settings),
+            "device" => Action::Navigate(Route::Library(LibraryTab::Device)),
+            "fullscreen" => Action::ToggleFullscreen,
             "queue" => Action::ShowSidePanel(SideTab::UpNext),
             "lyrics" => Action::ShowSidePanel(SideTab::Lyrics),
             "signin" => Action::OpenSignIn,
@@ -234,8 +282,37 @@ impl eframe::App for Window {
         }
         if ctx.input(|i| i.viewport().close_requested()) {
             self.app.on_close_requested();
+            if self.app.quit && self.app.fullscreen {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.app.actions.push(native_ytm::model::Action::ToggleFullscreen);
+                self.close_when_windowed = true;
+            }
+        }
+        if self.close_when_windowed {
+            if !self.app.fullscreen && ctx.input(|i| i.viewport().fullscreen) != Some(true) {
+                self.close_when_windowed = false;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            } else {
+                theme::repaint_in(ctx, std::time::Duration::from_millis(30));
+            }
+        }
+        if UPDATE_WHEN_FOUND.load(Ordering::Relaxed)
+            && matches!(self.app.updater.state(), native_ytm::update::State::Available(_))
+        {
+            UPDATE_WHEN_FOUND.store(false, Ordering::Relaxed);
+            self.app.actions.push(native_ytm::model::Action::InstallUpdate);
         }
         fastframe_shell::window::recover_offscreen(ctx, frame);
+        // A folder dropped on the window joins the music on this PC.
+        let dropped: Vec<std::path::PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
+        for folder in dropped.into_iter().filter(|p| p.is_dir()) {
+            self.app.actions.push(native_ytm::model::Action::AddLocalFolderPath(folder.display().to_string()));
+        }
+        // A window saved in full screen opens as a window; full screen is
+        // the player's, entered on purpose.
+        if !self.app.fullscreen && ctx.input(|i| i.viewport().fullscreen) == Some(true) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        }
         let size = ctx.content_rect().size();
         if self.size.is_some_and(|last| last != size) {
             self.resized_at = Some(std::time::Instant::now());
@@ -257,6 +334,13 @@ impl eframe::App for Window {
             } else {
                 theme::repaint_in(ctx, if since < first { first - since } else { again - since });
             }
+        }
+        let local = PLAY_LOCAL.load(Ordering::Relaxed);
+        if local > 0 && !self.app.local.songs().is_empty() {
+            PLAY_LOCAL.store(0, Ordering::Relaxed);
+            let tracks = self.app.local.songs().to_vec();
+            let start = (local - 1).min(tracks.len() - 1);
+            self.app.actions.push(native_ytm::model::Action::PlayTracks { tracks, start, source: Default::default() });
         }
         if DOWNLOAD_PLAYING.load(Ordering::Relaxed)
             && self.app.playing()

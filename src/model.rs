@@ -39,7 +39,7 @@ impl Route {
         match self {
             Route::Home => Some(("FEmusic_home".into(), None)),
             Route::Explore => Some(("FEmusic_explore".into(), None)),
-            Route::Library(LibraryTab::Cached) => None,
+            Route::Library(LibraryTab::Cached | LibraryTab::Device) => None,
             Route::Library(tab) => Some((tab.browse_id().into(), None)),
             Route::Browse { browse_id, params } => Some((browse_id.clone(), params.clone())),
             _ => None,
@@ -57,10 +57,12 @@ pub enum LibraryTab {
     History,
     /// Songs on this PC, for listening offline.
     Cached,
+    /// The songs in the person's own folders.
+    Device,
 }
 
 impl LibraryTab {
-    pub const ALL: [LibraryTab; 7] = [
+    pub const ALL: [LibraryTab; 8] = [
         LibraryTab::Playlists,
         LibraryTab::Songs,
         LibraryTab::Albums,
@@ -68,6 +70,7 @@ impl LibraryTab {
         LibraryTab::Subscriptions,
         LibraryTab::History,
         LibraryTab::Cached,
+        LibraryTab::Device,
     ];
 
     pub fn label(self) -> &'static str {
@@ -79,6 +82,7 @@ impl LibraryTab {
             LibraryTab::Subscriptions => "Subscriptions",
             LibraryTab::History => "History",
             LibraryTab::Cached => "Cached",
+            LibraryTab::Device => "On this PC",
         }
     }
 
@@ -91,6 +95,7 @@ impl LibraryTab {
             LibraryTab::Subscriptions => "FEmusic_library_corpus_artists",
             LibraryTab::History => "FEmusic_history",
             LibraryTab::Cached => "",
+            LibraryTab::Device => "local",
         }
     }
 }
@@ -231,6 +236,20 @@ pub enum Action {
     ToggleSidePanel,
     /// The full-window player, or back.
     ToggleFullView,
+    /// The full-window player filling the screen, or back.
+    ToggleFullscreen,
+    /// Opens the folder picker to add a folder of music.
+    AddLocalFolder,
+    /// Adds a folder of music (one dropped on the window).
+    AddLocalFolderPath(String),
+    RemoveLocalFolder(String),
+    /// Looks through the folders of music again.
+    RescanLocal,
+    /// Opens Explorer at a file.
+    ShowInFolder(String),
+    CheckForUpdates,
+    /// Downloads the update found and restarts into it.
+    InstallUpdate,
     /// Starts Last.fm's authorisation with the API account typed in.
     LastFmConnect,
     LastFmDisconnect,

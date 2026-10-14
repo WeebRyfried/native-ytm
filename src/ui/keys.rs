@@ -42,6 +42,9 @@ pub fn handle(app: &mut App, ctx: &Context) {
         if input.consume_key(ctrl, Key::R) || input.consume_key(Modifiers::NONE, Key::F5) {
             actions.push(Action::Refresh);
         }
+        if input.consume_key(Modifiers::NONE, Key::F11) {
+            actions.push(Action::ToggleFullscreen);
+        }
         if typing {
             return;
         }
@@ -63,7 +66,9 @@ pub fn handle(app: &mut App, ctx: &Context) {
         if input.consume_key(Modifiers::NONE, Key::F) {
             actions.push(Action::ToggleFullView);
         }
-        if app.full_view && input.consume_key(Modifiers::NONE, Key::Escape) {
+        if app.fullscreen && input.consume_key(Modifiers::NONE, Key::Escape) {
+            actions.push(Action::ToggleFullscreen);
+        } else if app.full_view && input.consume_key(Modifiers::NONE, Key::Escape) {
             actions.push(Action::ToggleFullView);
         }
         if input.consume_key(Modifiers::NONE, Key::Q) {

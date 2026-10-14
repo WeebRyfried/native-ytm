@@ -76,8 +76,9 @@ impl Images {
     /// fetching it.
     pub fn get(&mut self, url: &str, px: u32) -> Option<TextureHandle> {
         let px = px.clamp(32, 1200).next_power_of_two().min(1200);
-        let key = sized_thumbnail(url, px);
-        self.entry(key.clone(), key, px, Make::Texture)
+        let key = sized_key(url, px);
+        let source = if url.starts_with("file:") { url.to_owned() } else { key.clone() };
+        self.entry(key, source, px, Make::Texture)
     }
 
     /// The artwork at `px`, or while that loads, a smaller size already
@@ -86,7 +87,7 @@ impl Images {
         if let Some(texture) = self.get(url, px) {
             return Some(texture);
         }
-        [512, 256, 128, 64, 32].into_iter().find_map(|size| match self.entries.get_mut(&sized_thumbnail(url, size)) {
+        [512, 256, 128, 64, 32].into_iter().find_map(|size| match self.entries.get_mut(&sized_key(url, size)) {
             Some(Entry::Ready { texture, used, .. }) => {
                 *used = Instant::now();
                 Some(texture.clone())
@@ -125,6 +126,10 @@ impl Images {
     /// The artwork's file on disk, for the Windows media overlay.
     /// No texture is made for it: the overlay reads the file.
     pub fn file(&mut self, url: &str, px: u32) -> Option<PathBuf> {
+        // A picture on this PC is its own file.
+        if let Some(path) = url.strip_prefix("file:") {
+            return Some(PathBuf::from(path));
+        }
         let px = px.clamp(32, 1200).next_power_of_two().min(1200);
         let source = sized_thumbnail(url, px);
         if let Some(Entry::Ready { file, .. }) = self.entries.get(&source) {
@@ -165,14 +170,20 @@ impl Images {
         let permits = self.permits.clone();
         let ctx = self.ctx.clone();
         self.runtime.spawn(async move {
-            let bytes = match tokio::fs::read(&path).await {
-                Ok(bytes) => Some(bytes),
-                Err(_) => {
-                    let _permit = permits.acquire().await.ok();
-                    download(&http, &source).await.inspect(|bytes| {
-                        crate::settings::write_atomic(&path, bytes);
-                    })
-                }
+            let local = source.strip_prefix("file:").map(PathBuf::from);
+            let bytes = match local {
+                // A picture on this PC (a song's own artwork) is read where
+                // it is, never copied into the cache.
+                Some(local) => tokio::fs::read(&local).await.ok(),
+                None => match tokio::fs::read(&path).await {
+                    Ok(bytes) => Some(bytes),
+                    Err(_) => {
+                        let _permit = permits.acquire().await.ok();
+                        download(&http, &source).await.inspect(|bytes| {
+                            crate::settings::write_atomic(&path, bytes);
+                        })
+                    }
+                },
             };
             let texture = match bytes {
                 Some(_) if make == Make::FileOnly => {
@@ -261,6 +272,12 @@ enum Make {
     Texture,
     Blurred,
     FileOnly,
+}
+
+/// The key of artwork at a size. A picture on this PC has one file for
+/// every size, so the size goes in its key.
+fn sized_key(url: &str, px: u32) -> String {
+    if url.starts_with("file:") { format!("{url}#{px}") } else { sized_thumbnail(url, px) }
 }
 
 async fn download(http: &reqwest::Client, url: &str) -> Option<Vec<u8>> {

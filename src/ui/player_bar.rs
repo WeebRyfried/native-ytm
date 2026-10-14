@@ -22,7 +22,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     // the artwork.
     let inner = Rect::from_min_max(rect.min + vec2(16.0, 3.0), rect.max - vec2(16.0, 0.0));
     let left_w = 260.0f32.min(inner.width() * 0.3);
-    let right_w = 350.0f32.min(inner.width() * 0.34);
+    let right_w = 388.0f32.min(inner.width() * 0.36);
     let left = Rect::from_min_size(inner.min, vec2(left_w, inner.height()));
     let right = Rect::from_min_max(pos2(inner.right() - right_w, inner.top()), inner.max);
     let middle = Rect::from_min_max(pos2(left.right() + 16.0, inner.top()), pos2(right.left() - 16.0, inner.bottom()));
@@ -40,10 +40,14 @@ fn seek_bar(app: &mut App, ui: &mut Ui, rect: Rect) {
     let line_y = rect.top() + 1.0;
     let thickness = 2.0 + 2.0 * grow;
     // Above the page, unclipped: the knob rises over the page's bottom
-    // edge, and the bar's own clip would cut it in half.
-    let painter = ui
-        .ctx()
-        .layer_painter(egui::LayerId::new(egui::Order::Middle, ui.id().with("seek-layer")));
+    // edge, and the bar's own clip would cut it in half. Floating over the
+    // full screen, the bar is a layer of its own already, on top.
+    let painter = if ui.layer_id().order == egui::Order::Foreground {
+        ui.painter().with_clip_rect(ui.ctx().content_rect())
+    } else {
+        ui.ctx()
+            .layer_painter(egui::LayerId::new(egui::Order::Middle, ui.id().with("seek-layer")))
+    };
     let painter = &painter;
     let track = Rect::from_min_max(pos2(rect.left(), line_y - thickness / 2.0), pos2(rect.right(), line_y + thickness / 2.0));
     painter.rect_filled(track, CornerRadius::ZERO, Color32::from_white_alpha(28));
@@ -203,8 +207,10 @@ fn now(app: &mut App, ui: &mut Ui) {
     if art_response.clicked() {
         cx.push(Action::ToggleFullView);
     }
-    // Dislike, like and more: three icon buttons and their gaps.
-    let buttons_w = 3.0 * 38.0 + 2.0 * 12.0 + 12.0 + lastfm_w;
+    // Dislike, like and more: three icon buttons and their gaps (a song on
+    // this PC has only More).
+    let local = track.is_local();
+    let buttons_w = if local { 38.0 + 12.0 } else { 3.0 * 38.0 + 2.0 * 12.0 + 12.0 } + lastfm_w;
     let text_w = (width - 48.0 - 12.0 - buttons_w).max(60.0);
     ui.allocate_ui_with_layout(vec2(text_w, 44.0), Layout::top_down(Align::Min), |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
@@ -271,13 +277,13 @@ fn now(app: &mut App, ui: &mut Ui) {
         }
     }
     let mut cx = app.cx();
-    if widgets::icon_button(ui, dislike_icon, 20.0, theme::TEXT, "Dislike").clicked() {
+    if !local && widgets::icon_button(ui, dislike_icon, 20.0, theme::TEXT, "Dislike").clicked() {
         cx.push(Action::Rate(
             track.video_id.clone(),
             if like == Some(Like::Disliked) { Rating::None } else { Rating::Dislike },
         ));
     }
-    if widgets::icon_button_scaled(ui, like_icon, 20.0, theme::TEXT, "Like", pop).clicked() {
+    if !local && widgets::icon_button_scaled(ui, like_icon, 20.0, theme::TEXT, "Like", pop).clicked() {
         if like != Some(Like::Liked) {
             ui.data_mut(|d| d.insert_temp(pop_id, now));
         }
@@ -301,6 +307,14 @@ fn extras(app: &mut App, ui: &mut Ui) {
     } else {
         (Icon::Expand, "Open the player (F)")
     };
+    let (screen_icon, screen_tip) = if app.fullscreen {
+        (Icon::ExitFullscreen, "Exit full screen (Esc)")
+    } else {
+        (Icon::Fullscreen, "Full screen (F11)")
+    };
+    if widgets::icon_button(ui, screen_icon, 18.0, theme::TEXT_DIM, screen_tip).clicked() {
+        app.actions.push(Action::ToggleFullscreen);
+    }
     if widgets::icon_button(ui, icon, 19.0, theme::TEXT_DIM, tip).clicked() {
         app.actions.push(Action::ToggleFullView);
     }

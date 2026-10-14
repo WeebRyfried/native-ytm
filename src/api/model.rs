@@ -43,9 +43,20 @@ pub struct Track {
     /// Shown instead of artists when there are none (plays, views, a date).
     #[serde(default)]
     pub extra: Option<String>,
+    /// The year it came out, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub year: Option<u16>,
+    /// A song on this PC rather than YouTube Music's: its file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
 }
 
 impl Track {
+    /// A song from a folder on this PC.
+    pub fn is_local(&self) -> bool {
+        self.file.is_some()
+    }
+
     /// The title as YouTube Music's player shows it, and as Last.fm knows
     /// the song: "Tsubasa" for "ツバサ - Tsubasa".
     pub fn romanized_title(&self) -> &str {

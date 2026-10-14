@@ -195,6 +195,87 @@ pub fn open_folder(path: &Path) {
 #[cfg(not(windows))]
 pub fn open_folder(_path: &Path) {}
 
+/// Opens Explorer on a file's folder with the file selected.
+pub fn show_in_folder(path: &Path) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // explorer.exe takes `/select,` and the path as one argument, quoted.
+        let mut command = std::process::Command::new("explorer.exe");
+        command.raw_arg(format!("/select,\"{}\"", path.display()));
+        let _ = command.spawn();
+    }
+    #[cfg(not(windows))]
+    let _ = path;
+}
+
+/// The main window, for dialogs to belong to.
+static MAIN_WINDOW: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+pub fn set_main_window(hwnd: isize) {
+    MAIN_WINDOW.store(hwnd, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Windows' folder picker, over the main window. Blocks until it closes,
+/// so call it from a thread of its own.
+#[cfg(windows)]
+pub fn pick_folder(title: &str) -> Option<std::path::PathBuf> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance, CoInitializeEx,
+        CoTaskMemFree, CoUninitialize,
+    };
+    use windows::Win32::UI::Shell::{FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, SIGDN_FILESYSPATH};
+    use windows::core::HSTRING;
+
+    let owner = HWND(MAIN_WINDOW.load(std::sync::atomic::Ordering::Relaxed) as *mut std::ffi::c_void);
+    // SAFETY: COM is initialised for this thread (a dialog wants a single-
+    // threaded apartment) and torn down at the end; the dialog and the item
+    // come from COM, and the path it allocates is freed with CoTaskMemFree.
+    unsafe {
+        if CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE).is_err() {
+            return None;
+        }
+        let picked = (|| -> windows::core::Result<std::path::PathBuf> {
+            let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)?;
+            dialog.SetOptions(dialog.GetOptions()? | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM)?;
+            dialog.SetTitle(&HSTRING::from(title))?;
+            dialog.Show(Some(owner))?;
+            let item = dialog.GetResult()?;
+            let name = item.GetDisplayName(SIGDN_FILESYSPATH)?;
+            let path = name.to_string().map_err(|_| windows::core::Error::empty());
+            CoTaskMemFree(Some(name.0.cast()));
+            Ok(std::path::PathBuf::from(path?))
+        })();
+        CoUninitialize();
+        picked.ok()
+    }
+}
+
+#[cfg(not(windows))]
+pub fn pick_folder(_title: &str) -> Option<std::path::PathBuf> {
+    None
+}
+
+/// Waits up to `limit` for another process to end.
+#[cfg(windows)]
+pub fn wait_for_exit(pid: u32, limit: std::time::Duration) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject};
+    // SAFETY: a handle opened for waiting only, closed after the wait.
+    unsafe {
+        let handle = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+        if handle.is_null() {
+            return;
+        }
+        WaitForSingleObject(handle, limit.as_millis().min(u128::from(u32::MAX - 1)) as u32);
+        CloseHandle(handle);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn wait_for_exit(_pid: u32, _limit: std::time::Duration) {}
+
 /// Hands the memory the process is not using back to Windows. After the
 /// window is resized, the OpenGL driver is left holding buffers for every
 /// size the window passed through (Intel's, seen at several hundred MB),

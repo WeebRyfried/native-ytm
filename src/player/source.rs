@@ -1,4 +1,4 @@
-//! A seekable byte source over an HTTP stream.
+//! A seekable byte source over an HTTP stream, or over a file on disk.
 //!
 //! A task on the backend runtime downloads the file in ranges into memory,
 //! starting wherever the reader is, and reads block until their bytes arrive.
@@ -93,6 +93,9 @@ pub type Complete = Box<dyn FnOnce(Vec<u8>) + Send>;
 pub struct RemoteSource {
     shared: Arc<Shared>,
     pos: u64,
+    /// A file on disk, read as the decoder wants it rather than held in
+    /// memory, and where its cursor is.
+    file: Option<(std::fs::File, u64)>,
 }
 
 impl RemoteSource {
@@ -125,6 +128,43 @@ impl RemoteSource {
             Self {
                 shared: shared.clone(),
                 pos: 0,
+                file: None,
+            },
+            shared,
+        )
+    }
+
+    /// A file on disk (a song kept in the cache, or one from the person's
+    /// own folders), read a little at a time as it plays. One that cannot be
+    /// opened fails as if refused, so the song is looked up again.
+    pub fn from_file(path: &std::path::Path) -> (Self, Arc<Shared>) {
+        let opened = std::fs::File::open(path).and_then(|file| Ok((file.metadata()?.len(), file)));
+        let (len, file) = match opened {
+            Ok(opened) => opened,
+            Err(error) => {
+                log::warn!("cannot read {}: {error}", path.display());
+                return Self::from_bytes(Vec::new());
+            }
+        };
+        let shared = Arc::new(Shared {
+            state: Mutex::new(State {
+                data: Vec::new(),
+                have: vec![0..len],
+                want: None,
+                cursor: None,
+                error: None,
+            }),
+            ready: Condvar::new(),
+            jumped: tokio::sync::Notify::new(),
+            len,
+            cancelled: AtomicBool::new(false),
+            interrupt: AtomicBool::new(false),
+        });
+        (
+            Self {
+                shared: shared.clone(),
+                pos: 0,
+                file: Some((file, 0)),
             },
             shared,
         )
@@ -153,9 +193,27 @@ impl RemoteSource {
             Self {
                 shared: shared.clone(),
                 pos: 0,
+                file: None,
             },
             shared,
         )
+    }
+
+    fn read_file(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.shared.cancelled.load(Ordering::SeqCst) {
+            return Err(io::Error::other("cancelled"));
+        }
+        let Some((file, at)) = &mut self.file else {
+            return Ok(0);
+        };
+        if *at != self.pos {
+            file.seek(SeekFrom::Start(self.pos))?;
+            *at = self.pos;
+        }
+        let n = file.read(buf)?;
+        *at += n as u64;
+        self.pos += n as u64;
+        Ok(n)
     }
 }
 
@@ -170,6 +228,9 @@ impl Read for RemoteSource {
         let len = self.shared.len;
         if self.pos >= len || buf.is_empty() {
             return Ok(0);
+        }
+        if self.file.is_some() {
+            return self.read_file(buf);
         }
         let mut state = self.shared.state.lock();
         loop {

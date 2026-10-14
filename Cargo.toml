@@ -1,6 +1,6 @@
 [package]
 name = "native-ytm"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
@@ -45,8 +45,10 @@ raw-window-handle = "0.6"
 # needs no OpenSSL.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "gzip", "http2", "stream"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "process"] }
-# Demuxing and AAC: YouTube's MP4 (itag 140) and WebM (Opus) audio.
-symphonia = { version = "0.6", default-features = false, features = ["aac", "isomp4", "mkv"] }
+# Demuxing and AAC: YouTube's MP4 (itag 140) and WebM (Opus) audio; and
+# for the songs in the person's own folders, MP3, FLAC, Ogg Vorbis, WAV,
+# AIFF and ALAC, with their ID3 tags.
+symphonia = { version = "0.6", default-features = false, features = ["aac", "isomp4", "mkv", "mp3", "flac", "ogg", "vorbis", "pcm", "wav", "aiff", "alac", "id3v1", "id3v2"] }
 # Opus (itags 251 and 774): libopus translated to Rust, so no C toolchain.
 unsafe-libopus = "0.2"
 # Sample-rate conversion to whatever rate the output device runs at.
@@ -55,15 +57,17 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 # The readings table for Japanese lyrics is DEFLATE-compressed; the PNG
 # decoder already builds this inflater.
 miniz_oxide = "0.8"
+# Checking an update's download against the digest GitHub gives for it.
+sha2 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 # DPAPI for the signed-in cookie, the title bar's colours, and message boxes.
 windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Cryptography", "Win32_Graphics_Dwm", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_System_Memory", "Win32_System_Threading"] }
 
-# The Start menu shortcut that names the app in the media overlay, and
-# whether there is internet (the Network List Manager): COM.
+# The Start menu shortcut that names the app in the media overlay, whether
+# there is internet (the Network List Manager), and the folder picker: COM.
 # The same version and features eframe and the audio output already build.
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Shell", "Win32_UI_Shell_PropertiesSystem", "Win32_Networking_NetworkListManager"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_UI_Shell_PropertiesSystem", "Win32_Networking_NetworkListManager"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

@@ -1,5 +1,7 @@
 //! The window: the sidebar, the top bar, the page, the side panel and the
-//! player bar, with dialogs and toasts over them.
+//! player bar, with dialogs and toasts over them. In full screen, the
+//! full-window player alone, the bar floating over its foot while the
+//! mouse moves.
 
 mod dialogs;
 mod keys;
@@ -13,7 +15,7 @@ mod sidebar;
 mod topbar;
 pub mod widgets;
 
-use egui::{Align2, Color32, CornerRadius, Frame, Margin, Rect, vec2};
+use egui::{Align2, Color32, CornerRadius, CursorIcon, Frame, Margin, Rect, pos2, vec2};
 
 use crate::app::App;
 use crate::model::ToastKind;
@@ -46,16 +48,20 @@ impl App {
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     keys::handle(app, &ctx);
-    egui::Panel::bottom("player")
-        .exact_size(theme::PLAYER_HEIGHT)
-        .resizable(false)
-        .show_separator_line(false)
-        .frame(Frame::new().fill(theme::PLAYER))
-        .show(ui, |ui| player_bar::show(app, ui));
+    let fullscreen = app.fullscreen;
+    if !fullscreen {
+        egui::Panel::bottom("player")
+            .exact_size(theme::PLAYER_HEIGHT)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(Frame::new().fill(theme::PLAYER))
+            .show(ui, |ui| player_bar::show(app, ui));
+    }
     // The full view fades in over the window and rises into place, and
     // fades out the same way. Fully open, the window beneath is not drawn.
     let rest = ui.available_rect_before_wrap();
     let open = ctx.animate_bool_with_time(egui::Id::new("full-view-open"), app.full_view, 0.22);
+    let bar = if fullscreen { floating_presence(app, &ctx, rest) } else { 1.0 };
     if open < 1.0 {
         windowed(app, ui);
     }
@@ -72,11 +78,77 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 let mut ui = area.new_child(egui::UiBuilder::new().max_rect(rest));
                 ui.set_clip_rect(rest);
                 ui.multiply_opacity(eased);
-                now_playing::show(app, &mut ui, rest, (1.0 - eased) * 28.0);
+                // In full screen the content keeps clear of the bar's
+                // place, so nothing moves as it comes and goes.
+                let foot = if fullscreen { theme::PLAYER_HEIGHT } else { 0.0 };
+                now_playing::show(app, &mut ui, rest, (1.0 - eased) * 28.0, foot, bar);
             });
+    }
+    if fullscreen && bar > 0.0 {
+        floating_bar(app, &ctx, rest, bar);
     }
     dialogs::show(app, &ctx);
     toasts(app, &ctx);
+    if fullscreen && bar == 0.0 {
+        // The mouse rests: the pointer goes with the bar.
+        ctx.set_cursor_icon(CursorIcon::None);
+    }
+}
+
+/// How much of the floating bar shows in full screen, from 0 to 1: all of
+/// it while the mouse moves or rests on it (or a menu is open), none a
+/// moment after it stops.
+fn floating_presence(app: &mut App, ctx: &egui::Context, screen: Rect) -> f32 {
+    const REST: f64 = 2.5;
+    let (now, moved, pointer) = ctx.input(|i| {
+        let moved = i.pointer.delta() != egui::Vec2::ZERO
+            || i.pointer.any_down()
+            || i.events.iter().any(|e| matches!(e, egui::Event::Key { pressed: true, .. } | egui::Event::MouseWheel { .. }));
+        (i.time, moved, i.pointer.latest_pos())
+    });
+    if moved {
+        app.active_at = now;
+    }
+    let over = pointer.is_some_and(|p| p.y >= screen.bottom() - theme::PLAYER_HEIGHT - 12.0);
+    let held = over || egui::Popup::is_any_open(ctx) || ctx.dragged_id().is_some();
+    let idle = now - app.active_at;
+    let wanted = held || idle < REST;
+    if wanted && !held {
+        theme::repaint_in(ctx, std::time::Duration::from_secs_f64((REST - idle).max(0.0) + 0.02));
+    }
+    ctx.animate_bool_with_time(egui::Id::new("floating-bar-shown"), wanted, if wanted { 0.18 } else { 0.45 })
+}
+
+/// The player bar over the foot of the full screen, sliding up into view
+/// and back down out of it.
+fn floating_bar(app: &mut App, ctx: &egui::Context, screen: Rect, shown: f32) {
+    let eased = theme::ease_out(shown);
+    let rect = Rect::from_min_size(
+        pos2(screen.left(), screen.bottom() - theme::PLAYER_HEIGHT * eased),
+        vec2(screen.width(), theme::PLAYER_HEIGHT),
+    );
+    egui::Area::new(egui::Id::new("floating-bar"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(rect.min)
+        .show(ctx, |area| {
+            area.set_min_size(rect.size());
+            let mut bar = area.new_child(egui::UiBuilder::new().max_rect(rect));
+            bar.set_clip_rect(screen);
+            bar.multiply_opacity(eased);
+            // A shade rising from the bar, so it sits on the artwork's
+            // colours rather than cutting across them.
+            let mut mesh = egui::Mesh::default();
+            let fade = Rect::from_min_max(pos2(rect.left(), rect.top() - 48.0), pos2(rect.right(), rect.top()));
+            for (y, alpha) in [(fade.top(), 0u8), (fade.bottom(), 110)] {
+                mesh.colored_vertex(pos2(fade.left(), y), Color32::from_black_alpha(alpha));
+                mesh.colored_vertex(pos2(fade.right(), y), Color32::from_black_alpha(alpha));
+            }
+            mesh.add_triangle(0, 1, 2);
+            mesh.add_triangle(1, 2, 3);
+            bar.painter().add(egui::Shape::mesh(mesh));
+            bar.painter().rect_filled(rect, CornerRadius::ZERO, theme::PLAYER.gamma_multiply(0.92));
+            player_bar::show(app, &mut bar);
+        });
 }
 
 /// The window as usual: the sidebar, the side panel and the page.

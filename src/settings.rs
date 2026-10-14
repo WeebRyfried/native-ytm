@@ -81,6 +81,11 @@ pub struct Settings {
     pub restore_session: bool,
     /// The interface zoom.
     pub zoom: f32,
+    /// Folders of the person's own music, played and searched beside
+    /// YouTube Music's.
+    pub local_folders: Vec<String>,
+    /// Look for a newer version now and then.
+    pub check_updates: bool,
 }
 
 impl Default for Settings {
@@ -117,6 +122,8 @@ impl Default for Settings {
             side_panel: false,
             restore_session: true,
             zoom: 1.0,
+            local_folders: Vec::new(),
+            check_updates: true,
         }
     }
 }

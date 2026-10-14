@@ -45,7 +45,55 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             ui.add_space(6.0);
             offline_chip(app, ui);
         }
+        update_chip(app, ui);
     });
+}
+
+/// A newer version, when one is out: a click downloads it and restarts
+/// into it, the music carrying on. Then how far the download is.
+fn update_chip(app: &mut App, ui: &mut Ui) {
+    use crate::update::State;
+    let (label, tip, done) = match app.updater.state() {
+        State::Available(release) => (
+            format!("Update to {}", release.version),
+            format!(
+                "Version {} is out.{}{} Click to update: the app restarts and the music carries on where it was.",
+                release.version,
+                if release.summary.is_empty() { "" } else { " " },
+                release.summary
+            ),
+            None,
+        ),
+        State::Downloading(release, done) => (format!("Updating {:.0}%", done * 100.0), format!("Downloading {}", release.version), Some(done)),
+        State::Ready(_) => ("Restarting\u{2026}".to_owned(), "The new version is starting".to_owned(), Some(1.0)),
+        _ => return,
+    };
+    ui.add_space(6.0);
+    let galley = ui.painter().layout_no_wrap(label, theme::medium(13.0), theme::TEXT);
+    let size = vec2(galley.size().x + 44.0, 30.0);
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let response = response.on_hover_text(tip);
+    let response = if done.is_none() { response.on_hover_cursor(CursorIcon::PointingHand) } else { response };
+    let shown = theme::appear(ui.ctx(), egui::Id::new("update-chip"), 1, 0.3);
+    let radius = CornerRadius::same(15);
+    let fill = if response.hovered() && done.is_none() { theme::ACCENT.gamma_multiply(0.34) } else { theme::ACCENT.gamma_multiply(0.2) };
+    ui.painter().rect_filled(rect, radius, fill.gamma_multiply(shown));
+    if let Some(done) = done {
+        let filled = Rect::from_min_size(rect.min, vec2(rect.width() * done.clamp(0.0, 1.0), rect.height()));
+        ui.painter().with_clip_rect(filled).rect_filled(rect, radius, theme::ACCENT.gamma_multiply(0.35 * shown));
+        theme::repaint_in(ui.ctx(), std::time::Duration::from_millis(120));
+    }
+    Icon::Update
+        .image(theme::ACCENT_TEXT.gamma_multiply(shown), 16.0)
+        .paint_at(ui, Rect::from_center_size(pos2(rect.left() + 20.0, rect.center().y), Vec2::splat(16.0)));
+    ui.painter().galley_with_override_text_color(
+        pos2(rect.left() + 34.0, rect.center().y - galley.size().y / 2.0),
+        galley,
+        theme::TEXT.gamma_multiply(shown),
+    );
+    if response.clicked() && done.is_none() {
+        app.actions.push(Action::InstallUpdate);
+    }
 }
 
 /// "Offline", while there is no connection; it leads to the downloads.
