@@ -17,6 +17,8 @@ pub enum Route {
         params: Option<String>,
     },
     Settings,
+    /// An artist's page made from Last.fm's, with their songs on this PC.
+    Artist(String),
 }
 
 impl Route {
@@ -31,6 +33,7 @@ impl Route {
                 format!("browse:{browse_id}:{}", params.as_deref().unwrap_or(""))
             }
             Route::Settings => "settings".into(),
+            Route::Artist(name) => format!("artist:{}", name.to_lowercase()),
         }
     }
 
@@ -178,6 +181,12 @@ pub enum Action {
     },
     /// Play one song, followed by its radio.
     PlayTrack(Track),
+    /// Find a song on YouTube Music by its names and play it, with its
+    /// radio: only one by the artist, when given.
+    PlaySong {
+        query: String,
+        artist: Option<String>,
+    },
     /// Ask YouTube Music for the queue: a playlist, a mix, a radio.
     PlayWatch {
         video_id: Option<String>,

@@ -44,6 +44,9 @@ enum WatchPurpose {
     Radio { after_uid: u64 },
     /// More of the queue's radio or mix.
     Extend,
+    /// The radio of a song found on YouTube Music for the last song on
+    /// this PC: everything but that song itself, when it is the same song.
+    RadioAfter { skip: Option<String> },
     /// Lyrics and rating for the song now playing.
     Info { video_id: String },
     /// A whole playlist's songs, to download.
@@ -97,6 +100,14 @@ pub struct NowInfo {
     /// The song's info arrived (or failed): whether YouTube has lyrics for
     /// it is known.
     pub info_ready: bool,
+}
+
+/// An artist's page: what Last.fm says of them (without a Last.fm account,
+/// nothing), and their card on YouTube Music.
+#[derive(Clone, Debug, Default)]
+pub struct ArtistPage {
+    pub lastfm: Option<Result<lastfm::ArtistInfo, String>>,
+    pub youtube: Option<Item>,
 }
 
 /// Where a quick start's switch to the better stream is, for the full
@@ -239,6 +250,21 @@ pub struct App {
     /// A search's songs from those folders, for its query, as of a
     /// generation of the library.
     local_hits: Option<(String, u64, Arc<Vec<Track>>)>,
+    /// Artists' pages, by name in lower case.
+    pub artists: HashMap<String, Loadable<ArtistPage>>,
+    /// An artist's songs on this PC, as of a generation of the library.
+    artist_songs: Option<(String, u64, Arc<Vec<Track>>)>,
+    /// Songs on this PC still without a picture, to look for online two at
+    /// a time; how many are being looked for; and the library's generation
+    /// last looked at.
+    art_queue: VecDeque<local::ArtQuery>,
+    art_flight: usize,
+    art_generation: u64,
+    /// A song being found on YouTube Music to play.
+    song_search: Option<u64>,
+    /// The last song on this PC being found on YouTube Music, for the
+    /// radio to carry on with.
+    radio_seed: Option<u64>,
     /// The folder picker is open; what it picks comes here.
     pub picking_folder: bool,
     folder_picked: (std::sync::mpsc::Sender<Option<std::path::PathBuf>>, Receiver<Option<std::path::PathBuf>>),
@@ -421,6 +447,13 @@ impl App {
             active_at: 0.0,
             local,
             local_hits: None,
+            artists: HashMap::new(),
+            artist_songs: None,
+            art_queue: VecDeque::new(),
+            art_flight: 0,
+            art_generation: 0,
+            song_search: None,
+            radio_seed: None,
             picking_folder: false,
             folder_picked: std::sync::mpsc::channel(),
             updater,
@@ -535,6 +568,7 @@ impl App {
         if self.local.poll() {
             self.local_hits = None;
         }
+        self.art_tick();
         while let Ok(picked) = self.folder_picked.1.try_recv() {
             self.picking_folder = false;
             if let Some(folder) = picked {
@@ -665,6 +699,62 @@ impl App {
     fn on_response(&mut self, response: Response) {
         match response {
             Response::Ready => self.ready = true,
+            Response::Artist { name, lastfm, youtube } => {
+                if let Some(Err(error)) = &lastfm {
+                    log::info!("Last.fm on {name}: {error}");
+                }
+                self.artists.insert(name.to_lowercase(), Loadable::Ready(ArtistPage { lastfm, youtube }));
+            }
+            Response::ArtFound { key, url } => {
+                self.art_flight = self.art_flight.saturating_sub(1);
+                self.local.art_found(&key, url);
+                if self.art_flight == 0 && self.art_queue.is_empty() {
+                    self.local.save_found();
+                }
+            }
+            Response::SongFound { seq, track } if self.radio_seed == Some(seq) => {
+                self.radio_seed = None;
+                match track {
+                    Some(seed) => {
+                        log::info!("after the songs on this PC: the radio of {} by {} ({})", seed.title, seed.artist_line(), seed.video_id);
+                        let seq = self.next_seq();
+                        // The song just heard, again from YouTube Music, is
+                        // left out; one like it (another artist's) stays in.
+                        let heard = self.queue.entries.last().map(|e| e.track.title.clone()).unwrap_or_default();
+                        let same = crate::local::loose(&seed.title).contains(&crate::local::loose(&heard));
+                        let video_id = seed.video_id;
+                        self.watch_purposes.insert(seq, WatchPurpose::RadioAfter { skip: same.then(|| video_id.clone()) });
+                        self.queue.source.watch = true;
+                        self.queue.source.playlist_id = Some(format!("RDAMVM{video_id}"));
+                        self.backend.send(Request::Watch {
+                            seq,
+                            video_id: Some(video_id),
+                            playlist_id: None,
+                            params: None,
+                        });
+                    }
+                    None => {
+                        self.extending = false;
+                        self.radio_dry = true;
+                        if std::mem::take(&mut self.ended_waiting) {
+                            self.player.stop();
+                            self.want_play = false;
+                            self.start_at = 0.0;
+                        }
+                    }
+                }
+            }
+            Response::SongFound { seq, track } => {
+                // Unless something else was played meanwhile.
+                if self.song_search == Some(seq) && self.pending_queue == Some(seq) {
+                    self.song_search = None;
+                    self.pending_queue = None;
+                    match track {
+                        Some(track) => self.actions.push(Action::PlayTrack(track)),
+                        None => self.toast("That song isn't on YouTube Music", ToastKind::Info),
+                    }
+                }
+            }
             Response::Page { key, result } => {
                 if let Err(error) = &result
                     && net::unreachable(error)
@@ -953,10 +1043,22 @@ impl App {
                     }
                 }
             }
-            WatchPurpose::Extend => {
+            WatchPurpose::Extend | WatchPurpose::RadioAfter { .. } => {
                 self.extending = false;
+                let (after_local, skip) = match &purpose {
+                    WatchPurpose::RadioAfter { skip } => (true, skip.clone()),
+                    _ => (false, None),
+                };
+                // The song found for the one on this PC is that song again.
+                let result = result.map(|mut watch| {
+                    watch.tracks.retain(|t| Some(&t.video_id) != skip.as_ref());
+                    watch
+                });
                 match result {
                     Ok(watch) => {
+                        if after_local {
+                            log::info!("radio: {} songs after the songs on this PC", watch.tracks.len());
+                        }
                         let added = self.queue.extend_unique(watch.tracks);
                         if more || watch.continuation.is_some() {
                             self.queue.source.continuation = watch.continuation;
@@ -1898,15 +2000,25 @@ impl App {
             }
             (None, _) => {
                 // The list ran out: carry on with the radio of its last song
-                // from YouTube Music (songs on this PC have none).
+                // from YouTube Music; for a song on this PC, of the same song
+                // found there.
                 let Some(last) = self.queue.entries.iter().rev().find(|e| !e.track.is_local()).map(|e| e.track.video_id.clone()) else {
-                    self.radio_dry = true;
-                    if self.ended_waiting {
-                        self.ended_waiting = false;
-                        self.player.stop();
-                        self.want_play = false;
-                        self.start_at = 0.0;
-                    }
+                    let Some(local) = self.queue.entries.last().map(|e| e.track.clone()) else {
+                        return;
+                    };
+                    let Some(artist) = local.artists.first().map(|a| a.name.clone()) else {
+                        self.radio_dry = true;
+                        return;
+                    };
+                    self.extending = true;
+                    let seq = self.next_seq();
+                    self.radio_seed = Some(seq);
+                    self.backend.send(Request::RadioSeed {
+                        seq,
+                        artist,
+                        title: local.romanized_title().to_owned(),
+                        lastfm: self.lastfm.reader(),
+                    });
                     return;
                 };
                 self.extending = true;
@@ -2065,6 +2177,34 @@ impl App {
         }
     }
 
+    /// Looks online for pictures of the songs on this PC that have none,
+    /// two at a time, once the library has changed.
+    fn art_tick(&mut self) {
+        if self.local.generation() != self.art_generation {
+            self.art_generation = self.local.generation();
+            let wanted = self.local.art_wanted();
+            self.art_queue.extend(wanted);
+        }
+        while self.art_flight < 2 && self.online() {
+            let Some(query) = self.art_queue.pop_front() else { break };
+            self.art_flight += 1;
+            self.backend.send(Request::FindArt { query, lastfm: self.lastfm.reader() });
+        }
+    }
+
+    /// An artist's songs on this PC, found once per change of the library.
+    pub fn artist_songs(&mut self, name: &str) -> Arc<Vec<Track>> {
+        let (key, generation) = (name.to_lowercase(), self.local.generation());
+        match &self.artist_songs {
+            Some((k, g, songs)) if *k == key && *g == generation => songs.clone(),
+            _ => {
+                let songs = Arc::new(self.local.by_artist(name));
+                self.artist_songs = Some((key, generation, songs.clone()));
+                songs
+            }
+        }
+    }
+
     /// Opens Windows' folder picker on a thread of its own; the folder
     /// chosen arrives in `background`.
     fn pick_local_folder(&mut self) {
@@ -2176,6 +2316,18 @@ impl App {
                 });
             }
             Route::Settings => {}
+            Route::Artist(name) => {
+                let key = name.to_lowercase();
+                if force || !matches!(self.artists.get(&key), Some(Loadable::Ready(_) | Loadable::Loading)) {
+                    self.artists.insert(key, Loadable::Loading);
+                    let titles = self.artist_songs(name).iter().map(|s| s.title.clone()).collect();
+                    self.backend.send(Request::Artist {
+                        name: name.clone(),
+                        lastfm: self.lastfm.reader(),
+                        titles,
+                    });
+                }
+            }
             _ => {
                 if let Some((browse_id, params)) = route.browse() {
                     self.pages.insert(key.clone(), PageState::loading());
@@ -2191,7 +2343,9 @@ impl App {
 
     pub fn navigate(&mut self, route: Route) {
         // A page asked for from the full view (an artist's name, an
-        // album's) shows once the full view makes way for it.
+        // album's) shows once the full view makes way for it, out of full
+        // screen.
+        self.leave_fullscreen();
         self.full_view = false;
         if route == self.route {
             if matches!(route, Route::Search { .. }) {
@@ -2234,6 +2388,10 @@ impl App {
 
     fn open(&mut self, target: Target) {
         match target {
+            // An artist of songs on this PC: their page from Last.fm's.
+            Target::Browse { browse_id, .. } if browse_id.starts_with(local::ARTIST) => {
+                self.navigate(Route::Artist(browse_id[local::ARTIST.len()..].to_owned()));
+            }
             Target::Browse { browse_id, params } => {
                 let route = match browse_id.as_str() {
                     "FEmusic_home" if params.is_none() => Route::Home,
@@ -2312,6 +2470,13 @@ impl App {
                 self.radio_dry = false;
                 self.queue.replace(tracks, start, source);
                 self.start_current(0.0);
+            }
+            Action::PlaySong { query, artist } => {
+                let seq = self.next_seq();
+                self.song_search = Some(seq);
+                // The bar shows it loading meanwhile.
+                self.pending_queue = Some(seq);
+                self.backend.send(Request::FindSong { seq, query, artist });
             }
             Action::PlayTrack(track) if track.is_local() => {
                 // No radio follows a song on this PC.
@@ -3084,6 +3249,7 @@ impl App {
                     .artists
                     .first()
                     .and_then(|a| a.id.as_ref())
+                    .filter(|id| !id.starts_with(local::ARTIST))
                     .map(|id| format!("https://music.youtube.com/channel/{id}")),
                 start_ms,
                 end_ms,

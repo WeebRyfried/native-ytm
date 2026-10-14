@@ -303,8 +303,21 @@ pub fn format_duration(secs: u32) -> String {
 }
 
 /// A thumbnail URL at another size. Google's image hosts take the size in
-/// the address; video stills come in fixed sizes.
+/// the address, and so does Last.fm's (in a few sizes, or the original);
+/// video stills come in fixed sizes.
 pub fn sized_thumbnail(url: &str, px: u32) -> String {
+    if url.contains(".freetls.fastly.net/i/u/")
+        && let Some((base, rest)) = url.split_once("/i/u/")
+    {
+        let file = rest.rsplit('/').next().unwrap_or(rest);
+        let size = match px {
+            0..=64 => "64s/",
+            65..=174 => "174s/",
+            175..=300 => "300x300/",
+            _ => "",
+        };
+        return format!("{base}/i/u/{size}{file}");
+    }
     if (url.contains("googleusercontent.com") || url.contains("ggpht.com"))
         && let Some(eq) = url.rfind('=')
     {
@@ -407,6 +420,9 @@ mod tests {
             sized_thumbnail("https://lh3.googleusercontent.com/abc=w60-h60-l90-rj", 226),
             "https://lh3.googleusercontent.com/abc=w226-h226-l90-rj"
         );
+        let lastfm = "https://lastfm.freetls.fastly.net/i/u/300x300/6ccb.jpg";
+        assert_eq!(sized_thumbnail(lastfm, 64), "https://lastfm.freetls.fastly.net/i/u/64s/6ccb.jpg");
+        assert_eq!(sized_thumbnail(lastfm, 1024), "https://lastfm.freetls.fastly.net/i/u/6ccb.jpg");
         let still = "https://i.ytimg.com/vi/x/hqdefault.jpg";
         assert_eq!(sized_thumbnail(still, 226), still);
     }

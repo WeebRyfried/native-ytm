@@ -208,6 +208,15 @@ impl LastFm {
         None
     }
 
+    /// What reads Last.fm with the person's API account (no session
+    /// needed): artists' pages, artwork. None without an account.
+    pub fn reader(&self) -> Option<Reader> {
+        (!self.stored.key.trim().is_empty()).then(|| Reader {
+            key: self.stored.key.clone(),
+            user: self.stored.user.clone().filter(|_| self.stored.session.is_some()),
+        })
+    }
+
     /// Forgets counts Last.fm never gave (asked while offline), so they
     /// are asked again.
     pub fn forget_unanswered(&mut self) {
@@ -545,6 +554,147 @@ fn signature(params: &[(String, String)], secret: &str) -> String {
     Md5::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// What Last.fm knows of an artist, for their page.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ArtistInfo {
+    /// As Last.fm spells it.
+    pub name: String,
+    pub url: String,
+    pub listeners: Option<u64>,
+    pub scrobbles: Option<u64>,
+    /// The person's own plays, when connected.
+    pub plays: Option<u64>,
+    /// A paragraph or two, as plain text.
+    pub bio: String,
+    pub tags: Vec<String>,
+    pub similar: Vec<String>,
+    /// Their most played songs: title and listeners.
+    pub top_tracks: Vec<(String, Option<u64>)>,
+    /// Their most played albums: title and cover.
+    pub albums: Vec<(String, Option<String>)>,
+}
+
+/// Read-only access with the person's API key, for use on any thread.
+#[derive(Clone)]
+pub struct Reader {
+    key: String,
+    /// Their Last.fm name, for their own play counts.
+    user: Option<String>,
+}
+
+impl Reader {
+    async fn get(&self, http: &reqwest::Client, method: &str, params: &[(&str, &str)]) -> Result<Value, ApiError> {
+        let stored = Stored { key: self.key.clone(), ..Stored::default() };
+        read(http, &stored, method, params).await
+    }
+
+    /// An artist's numbers, story, tags, songs, albums and likenesses.
+    pub async fn artist(&self, http: &reqwest::Client, name: &str) -> Result<ArtistInfo, String> {
+        let mut info_params = vec![("artist", name)];
+        if let Some(user) = &self.user {
+            info_params.push(("username", user.as_str()));
+        }
+        let limit = [("artist", name), ("limit", "10")];
+        let albums_limit = [("artist", name), ("limit", "12")];
+        let (info, tracks, albums) = tokio::join!(
+            self.get(http, "artist.getInfo", &info_params),
+            self.get(http, "artist.getTopTracks", &limit),
+            self.get(http, "artist.getTopAlbums", &albums_limit),
+        );
+        let info = info.map_err(|e| describe(&e))?;
+        let artist = &info["artist"];
+        let list = |v: &Value| -> Vec<Value> {
+            match v {
+                Value::Array(items) => items.clone(),
+                Value::Object(_) => vec![v.clone()],
+                _ => Vec::new(),
+            }
+        };
+        let text = |v: &Value| v.as_str().unwrap_or_default().trim().to_owned();
+        Ok(ArtistInfo {
+            name: text(&artist["name"]),
+            url: text(&artist["url"]),
+            listeners: count(&artist["stats"]["listeners"]),
+            scrobbles: count(&artist["stats"]["playcount"]),
+            plays: count(&artist["stats"]["userplaycount"]),
+            bio: plain_bio(artist["bio"]["summary"].as_str().unwrap_or_default()),
+            tags: list(&artist["tags"]["tag"]).iter().map(|t| text(&t["name"])).filter(|t| !t.is_empty()).take(6).collect(),
+            similar: list(&artist["similar"]["artist"]).iter().map(|a| text(&a["name"])).filter(|a| !a.is_empty()).collect(),
+            top_tracks: tracks
+                .map(|v| list(&v["toptracks"]["track"]))
+                .unwrap_or_default()
+                .iter()
+                .map(|t| (text(&t["name"]), count(&t["listeners"])))
+                .filter(|(t, _)| !t.is_empty())
+                .collect(),
+            albums: albums
+                .map(|v| list(&v["topalbums"]["album"]))
+                .unwrap_or_default()
+                .iter()
+                .map(|a| (text(&a["name"]), image(&a["image"])))
+                .filter(|(a, _)| !a.is_empty() && a != "(null)")
+                .collect(),
+        })
+    }
+
+    /// Artists like this one, the likest first.
+    pub async fn similar(&self, http: &reqwest::Client, name: &str) -> Vec<String> {
+        let Ok(value) = self.get(http, "artist.getSimilar", &[("artist", name), ("limit", "6")]).await else {
+            return Vec::new();
+        };
+        value["similarartists"]["artist"]
+            .as_array()
+            .map(|artists| artists.iter().filter_map(|a| a["name"].as_str()).map(str::to_owned).collect())
+            .unwrap_or_default()
+    }
+
+    /// An album's cover, as Last.fm has it.
+    pub async fn album_art(&self, http: &reqwest::Client, artist: &str, album: &str) -> Option<String> {
+        let value = self.get(http, "album.getInfo", &[("artist", artist), ("album", album)]).await.ok()?;
+        image(&value["album"]["image"])
+    }
+
+    /// A song's cover (its album's), as Last.fm has it.
+    pub async fn track_art(&self, http: &reqwest::Client, artist: &str, title: &str) -> Option<String> {
+        let value = self.get(http, "track.getInfo", &[("artist", artist), ("track", title)]).await.ok()?;
+        image(&value["track"]["album"]["image"])
+    }
+}
+
+/// The largest of Last.fm's sizes of a picture, unless it is the grey star
+/// Last.fm shows for a picture it has not got.
+fn image(sizes: &Value) -> Option<String> {
+    sizes
+        .as_array()?
+        .iter()
+        .filter_map(|i| i["#text"].as_str())
+        .filter(|url| !url.is_empty() && !url.contains("2a96cbd8b46e442fc41c2b86b821562f"))
+        .last()
+        .map(str::to_owned)
+}
+
+/// Last.fm's summary without its markup and its "Read more" link.
+fn plain_bio(html: &str) -> String {
+    let cut = html.find("<a href=\"https://www.last.fm").unwrap_or(html.len());
+    let mut out = String::new();
+    let mut tag = false;
+    for c in html[..cut].chars() {
+        match c {
+            '<' => tag = true,
+            '>' => tag = false,
+            _ if !tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .trim()
+        .to_owned()
+}
+
 /// A read-only method: asked with the API key alone, unsigned.
 async fn read(http: &reqwest::Client, stored: &Stored, method: &str, params: &[(&str, &str)]) -> Result<Value, ApiError> {
     let mut query: Vec<(&str, &str)> = vec![("method", method), ("api_key", &stored.key), ("autocorrect", "1"), ("format", "json")];
@@ -634,6 +784,22 @@ mod tests {
             "https://www.last.fm/music/Mojo/_/Andai+Ku+Bercinta+lagi"
         );
         assert_eq!(path_part("AC/DC & Me"), "AC%2FDC+%26+Me");
+    }
+
+    #[test]
+    fn pictures_and_stories() {
+        let sizes = serde_json::json!([
+            { "#text": "https://lastfm.freetls.fastly.net/i/u/34s/a.png", "size": "small" },
+            { "#text": "https://lastfm.freetls.fastly.net/i/u/300x300/a.png", "size": "extralarge" },
+            { "#text": "", "size": "mega" }
+        ]);
+        assert_eq!(image(&sizes).as_deref(), Some("https://lastfm.freetls.fastly.net/i/u/300x300/a.png"));
+        let star = serde_json::json!([{ "#text": "https://lastfm.freetls.fastly.net/i/u/300x300/2a96cbd8b46e442fc41c2b86b821562f.png" }]);
+        assert_eq!(image(&star), None);
+        assert_eq!(
+            plain_bio("XX:me is a unit &amp; more. <a href=\"https://www.last.fm/music/XX:me\">Read more on Last.fm</a>"),
+            "XX:me is a unit & more."
+        );
     }
 
     #[test]

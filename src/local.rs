@@ -4,7 +4,9 @@
 //! tags and picture. What it read is kept in an index on disk, so the next
 //! scan opens only the files that changed. The songs are plain [`Track`]s
 //! carrying their file: they play from disk as a downloaded song does, and
-//! search finds them before anything on YouTube Music.
+//! search finds them before anything on YouTube Music, by their names or,
+//! for Japanese ones, by how they read ("torikago" finds トリカゴ). A song
+//! with no picture of its own takes one found online, remembered here.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -34,14 +36,25 @@ const COVERS: [&str; 6] = ["cover", "folder", "front", "album", "albumart", "art
 
 /// The index's layout. An index of another version is read again from the
 /// files.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
+
+/// Pictures found online, by album: kept between runs.
+const FOUND: &str = "found-art.json";
+
+/// How long a picture not found online is not looked for again.
+const RETRY_SECS: u64 = 3 * 24 * 3600;
+
+/// The id an artist's link carries: their page, made from Last.fm's.
+pub const ARTIST: &str = "artist:";
 
 /// What a file's tags say, and how it is encoded.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 struct Meta {
     title: String,
+    /// The artists as one line, and one by one.
     artist: String,
+    artists: Vec<String>,
     album: String,
     album_artist: String,
     year: Option<u16>,
@@ -76,6 +89,42 @@ struct Index {
     entries: Vec<Entry>,
 }
 
+/// A picture looked for online, and when.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Found {
+    url: Option<String>,
+    at: u64,
+}
+
+/// A song (or its album) wanting a picture: what to look it up by.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ArtQuery {
+    pub key: String,
+    pub artist: String,
+    pub album: Option<String>,
+    pub title: String,
+}
+
+/// A song's words for search, lowercased.
+struct Words {
+    /// The title, and its reading in Latin letters, on lines of their own.
+    title: String,
+    artists: String,
+    /// All of it: title, artists, album, and their readings.
+    text: String,
+    /// All of it run together without spaces, marks or long vowels.
+    loose: String,
+}
+
+/// A scan made ready on its thread: the interface only swaps it in.
+struct Built {
+    songs: Vec<Track>,
+    words: Vec<Words>,
+    playback: HashMap<String, Playback>,
+    albums: usize,
+    found: HashMap<String, Found>,
+}
+
 /// How a song plays, beside its track.
 struct Playback {
     quality: String,
@@ -99,17 +148,20 @@ pub struct LocalLibrary {
     dir: PathBuf,
     /// Every song, by artist, album, disc and track.
     songs: Arc<Vec<Track>>,
-    /// Each song's words for search, lowercased: its title, its artists
-    /// and its album, on lines of their own.
-    words: Vec<String>,
+    /// Each song's words for search.
+    words: Vec<Words>,
     playback: HashMap<String, Playback>,
+    /// Pictures found online by album, and those being looked for.
+    found: HashMap<String, Found>,
+    found_dirty: bool,
+    asked: HashSet<String>,
     /// How many albums the songs make.
     albums: usize,
     /// Changes whenever the songs do.
     generation: u64,
     progress: Arc<Progress>,
     folders: Arc<parking_lot::Mutex<Vec<PathBuf>>>,
-    results: (Sender<Vec<Entry>>, Receiver<Vec<Entry>>),
+    results: (Sender<Built>, Receiver<Built>),
     wake: Arc<dyn Fn() + Send + Sync>,
     /// A scan has finished since the app started.
     pub scanned: bool,
@@ -123,6 +175,9 @@ impl LocalLibrary {
             songs: Arc::default(),
             words: Vec::new(),
             playback: HashMap::new(),
+            found: HashMap::new(),
+            found_dirty: false,
+            asked: HashSet::new(),
             albums: 0,
             generation: 0,
             progress: Arc::default(),
@@ -153,7 +208,7 @@ impl LocalLibrary {
         if folders.is_empty() {
             self.progress.again.store(false, Ordering::SeqCst);
             if !self.songs.is_empty() || !self.scanned {
-                self.take(Vec::new());
+                self.take(build(Vec::new(), HashMap::new()));
             }
             self.scanned = true;
             let _ = std::fs::remove_file(self.dir.join("index.json"));
@@ -195,94 +250,59 @@ impl LocalLibrary {
     /// changed.
     pub fn poll(&mut self) -> bool {
         let mut latest = None;
-        while let Ok(entries) = self.results.1.try_recv() {
-            latest = Some(entries);
+        while let Ok(built) = self.results.1.try_recv() {
+            latest = Some(built);
         }
         if !self.scanned && !self.progress.running.load(Ordering::SeqCst) {
             self.scanned = true;
         }
         match latest {
-            Some(entries) => {
-                self.take(entries);
+            Some(built) => {
+                self.take(built);
                 true
             }
             None => false,
         }
     }
 
-    fn take(&mut self, entries: Vec<Entry>) {
-        let mut rows: Vec<(Track, Playback, (String, String, u32, u32))> = entries
-            .into_iter()
-            .filter_map(|entry| {
-                let meta = entry.meta?;
-                let track = track_of(&entry.path, &meta);
-                // By the album's artist, or the song's (perhaps from its
-                // file's name).
-                let artist = if meta.album_artist.is_empty() { track.artists.first().map(|a| a.name.clone()).unwrap_or_default() } else { meta.album_artist.clone() };
-                let order = (
-                    sort_key(&artist),
-                    sort_key(&meta.album),
-                    meta.disc.unwrap_or(0),
-                    meta.track.unwrap_or(0),
-                );
-                let playback = Playback {
-                    quality: meta.quality,
-                    kbps: meta.kbps,
-                    mime: meta.mime,
-                    loudness_db: meta.loudness_db,
-                    duration_ms: meta.duration_ms,
-                };
-                Some((track, playback, order))
-            })
-            .collect();
-        rows.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| sort_key(&a.0.title).cmp(&sort_key(&b.0.title))));
-        self.words = rows
-            .iter()
-            .map(|(track, _, _)| {
-                format!(
-                    "{}\n{}\n{}",
-                    track.title.to_lowercase(),
-                    track.artist_line().to_lowercase(),
-                    track.album.as_ref().map(|a| a.name.to_lowercase()).unwrap_or_default()
-                )
-            })
-            .collect();
-        self.playback = HashMap::with_capacity(rows.len());
-        let mut songs = Vec::with_capacity(rows.len());
-        for (track, playback, _) in rows {
-            self.playback.insert(track.video_id.clone(), playback);
-            songs.push(track);
+    fn take(&mut self, built: Built) {
+        let Built { mut songs, words, playback, albums, found } = built;
+        // Pictures found since the scan read the file of them.
+        for (key, found) in found {
+            self.found.entry(key).or_insert(found);
         }
-        self.albums = songs
-            .iter()
-            .filter_map(|t| t.album.as_ref().map(|a| (a.name.as_str(), Path::new(t.file.as_deref().unwrap_or_default()).parent())))
-            .collect::<HashSet<_>>()
-            .len();
+        for song in songs.iter_mut().filter(|s| s.thumbnail.is_none()) {
+            song.thumbnail = self.found.get(&art_key(song)).and_then(|f| f.url.clone());
+        }
         self.songs = Arc::new(songs);
+        self.words = words;
+        self.playback = playback;
+        self.albums = albums;
         self.generation += 1;
     }
 
-    /// The songs whose title, artists or album hold every word of `query`:
-    /// those whose title has it whole first, then whose artists do.
+    /// The songs matching `query`: by every word of it in their title,
+    /// artists or album (or how those read, for Japanese ones), or by all
+    /// of it run together ("torikago", "xxme"). Those whose title has it
+    /// come first, then those whose artists do.
     pub fn search(&self, query: &str) -> Vec<Track> {
         let query = query.trim().to_lowercase();
         let words: Vec<&str> = query.split_whitespace().collect();
         if words.is_empty() {
             return Vec::new();
         }
+        let squeezed = loose(&query);
         let mut hits: Vec<(u8, usize)> = self
             .words
             .iter()
             .enumerate()
-            .filter(|(_, text)| words.iter().all(|w| text.contains(w)))
-            .map(|(i, text)| {
-                let mut lines = text.split('\n');
-                let (title, artists) = (lines.next().unwrap_or_default(), lines.next().unwrap_or_default());
-                let rank = if title.starts_with(&query) {
+            .filter(|(_, w)| words.iter().all(|q| w.text.contains(q)) || (squeezed.chars().count() >= 2 && w.loose.contains(&squeezed)))
+            .map(|(i, w)| {
+                let rank = if w.title.lines().any(|t| t.starts_with(&query)) {
                     0
-                } else if title.contains(&query) {
+                } else if w.title.contains(&query) || loose(&w.title).contains(&squeezed) {
                     1
-                } else if artists.contains(&query) {
+                } else if w.artists.contains(&query) || loose(&w.artists).contains(&squeezed) {
                     2
                 } else {
                     3
@@ -292,6 +312,58 @@ impl LocalLibrary {
             .collect();
         hits.sort_unstable();
         hits.into_iter().map(|(_, i)| self.songs[i].clone()).collect()
+    }
+
+    /// The songs (by album) still without a picture, to look for online,
+    /// each asked for once.
+    pub fn art_wanted(&mut self) -> Vec<ArtQuery> {
+        let now = unix_now();
+        let mut wanted = Vec::new();
+        for song in self.songs.iter().filter(|s| s.thumbnail.is_none()) {
+            let Some(artist) = song.artists.first() else { continue };
+            let key = art_key(song);
+            let tried = self.found.get(&key).is_some_and(|f| f.url.is_some() || now.saturating_sub(f.at) < RETRY_SECS);
+            if tried || !self.asked.insert(key.clone()) {
+                continue;
+            }
+            wanted.push(ArtQuery {
+                key,
+                artist: artist.name.clone(),
+                album: song.album.as_ref().map(|a| a.name.clone()),
+                title: song.title.clone(),
+            });
+        }
+        wanted
+    }
+
+    /// A picture found online (or not) for the songs under `key`.
+    pub fn art_found(&mut self, key: &str, url: Option<String>) {
+        self.found.insert(key.to_owned(), Found { url: url.clone(), at: unix_now() });
+        self.found_dirty = true;
+        let Some(url) = url else { return };
+        let songs = Arc::make_mut(&mut self.songs);
+        for song in songs.iter_mut().filter(|s| s.thumbnail.is_none() && art_key(s) == key) {
+            song.thumbnail = Some(url.clone());
+        }
+        self.generation += 1;
+    }
+
+    /// Writes down the pictures found, once a round of looking is over.
+    pub fn save_found(&mut self) {
+        if std::mem::take(&mut self.found_dirty) {
+            let _ = std::fs::create_dir_all(&self.dir);
+            crate::settings::save(&self.dir.join(FOUND), &self.found);
+        }
+    }
+
+    /// The songs by an artist (any of their artists, by name).
+    pub fn by_artist(&self, name: &str) -> Vec<Track> {
+        let name = name.trim().to_lowercase();
+        self.songs
+            .iter()
+            .filter(|s| s.artists.iter().any(|a| a.name.trim().to_lowercase() == name))
+            .cloned()
+            .collect()
     }
 
     /// The stream for a song on this PC, or None when its file is gone.
@@ -319,6 +391,106 @@ impl LocalLibrary {
     pub fn albums(&self) -> usize {
         self.albums
     }
+}
+
+/// Which picture a song shares: its album's, or its own when it has none.
+fn art_key(track: &Track) -> String {
+    let artist = track.artists.first().map(|a| a.name.to_lowercase()).unwrap_or_default();
+    match &track.album {
+        Some(album) => format!("{artist}\t{}", album.name.to_lowercase()),
+        None => format!("{artist}\t\t{}", track.title.to_lowercase()),
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// Text as search compares it loosely: lowercase letters and digits only
+/// (full-width ones as ordinary ones), and a vowel written twice or "ou"
+/// as one, so "daarin" meets "darin" and "toukyou" meets "tokyo".
+pub fn loose(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut last = '\0';
+    for c in text.chars() {
+        // Ｘ, ７: the full-width forms of ASCII.
+        let c = match c as u32 {
+            0xFF01..=0xFF5E => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+            _ => c,
+        };
+        for c in c.to_lowercase().filter(|c| c.is_alphanumeric()) {
+            let held = "aeiou".contains(c) && (c == last || (last == 'o' && c == 'u'));
+            if !held {
+                out.push(c);
+            }
+            last = c;
+        }
+    }
+    out
+}
+
+/// A scan's entries as songs, sorted, with their words for search: the
+/// slow part, done on the scan's thread.
+fn build(entries: Vec<Entry>, found: HashMap<String, Found>) -> Built {
+    let mut rows: Vec<(Track, Playback, (String, String, u32, u32))> = entries
+        .into_iter()
+        .filter_map(|entry| {
+            let meta = entry.meta?;
+            let track = track_of(&entry.path, &meta);
+            // By the album's artist, or the song's (perhaps from its file's
+            // name).
+            let artist = if meta.album_artist.is_empty() { track.artists.first().map(|a| a.name.clone()).unwrap_or_default() } else { meta.album_artist.clone() };
+            let order = (sort_key(&artist), sort_key(&meta.album), meta.disc.unwrap_or(0), meta.track.unwrap_or(0));
+            let playback = Playback {
+                quality: meta.quality,
+                kbps: meta.kbps,
+                mime: meta.mime,
+                loudness_db: meta.loudness_db,
+                duration_ms: meta.duration_ms,
+            };
+            Some((track, playback, order))
+        })
+        .collect();
+    rows.sort_by(|a, b| a.2.cmp(&b.2).then_with(|| sort_key(&a.0.title).cmp(&sort_key(&b.0.title))));
+    // Japanese names read in Latin letters too; the dictionary is read only
+    // when there are some.
+    let japanese = rows.iter().any(|(t, _, _)| {
+        crate::readings::has_japanese(&t.title) || crate::readings::has_japanese(&t.artist_line())
+            || t.album.as_ref().is_some_and(|a| crate::readings::has_japanese(&a.name))
+    });
+    let dictionary = if japanese { crate::readings::dictionary_now() } else { None };
+    let read = |text: &str| -> String {
+        match dictionary {
+            Some(d) if crate::readings::has_japanese(text) => crate::readings::romanize(d, text),
+            _ => String::new(),
+        }
+    };
+    let words = rows
+        .iter()
+        .map(|(track, _, _)| {
+            let title = track.title.to_lowercase();
+            let artists = track.artists.iter().map(|a| a.name.to_lowercase()).collect::<Vec<_>>().join(", ");
+            let album = track.album.as_ref().map(|a| a.name.to_lowercase()).unwrap_or_default();
+            let (title_read, artists_read, album_read) = (read(&title), read(&artists), read(&album));
+            let title = if title_read.is_empty() { title } else { format!("{title}\n{title_read}") };
+            let artists = if artists_read.is_empty() { artists } else { format!("{artists}\n{artists_read}") };
+            let text = format!("{title}\n{artists}\n{album}\n{album_read}");
+            let squeezed = text.lines().map(loose).collect::<Vec<_>>().join("\n");
+            Words { title, artists, text, loose: squeezed }
+        })
+        .collect();
+    let mut playback = HashMap::with_capacity(rows.len());
+    let mut songs = Vec::with_capacity(rows.len());
+    for (track, play, _) in rows {
+        playback.insert(track.video_id.clone(), play);
+        songs.push(track);
+    }
+    let albums = songs
+        .iter()
+        .filter_map(|t| t.album.as_ref().map(|a| (a.name.as_str(), Path::new(t.file.as_deref().unwrap_or_default()).parent())))
+        .collect::<HashSet<_>>()
+        .len();
+    Built { songs, words, playback, albums, found }
 }
 
 /// Whether an id is a song on this PC's rather than YouTube's.
@@ -349,11 +521,16 @@ fn track_of(path: &str, meta: &Meta) -> Track {
         _ => (String::new(), stem.clone()),
     };
     let title = if meta.title.is_empty() { named_title } else { meta.title.clone() };
-    let artist = [&meta.artist, &meta.album_artist, &named_artist].into_iter().find(|a| !a.is_empty()).cloned().unwrap_or_default();
+    let artists = if meta.artists.is_empty() {
+        [&meta.artist, &meta.album_artist, &named_artist].into_iter().find(|a| !a.is_empty()).cloned().into_iter().collect()
+    } else {
+        meta.artists.clone()
+    };
     Track {
         video_id: id_of(path),
         title,
-        artists: if artist.is_empty() { Vec::new() } else { vec![Link::new(artist, None)] },
+        // Each artist leads to their page.
+        artists: artists.into_iter().map(|name| Link::new(name.clone(), Some(format!("{ARTIST}{name}")))).collect(),
         album: (!meta.album.is_empty()).then(|| Link::new(meta.album.clone(), None)),
         duration: meta.duration_ms.map(|ms| ((ms + 500) / 1000) as u32),
         thumbnail: meta.art.as_ref().map(|art| format!("file:{art}")),
@@ -379,10 +556,11 @@ fn lower_priority() {}
 
 /// One scan: the index's songs first when `quick`, then every file in
 /// `folders`, those unchanged since the index taken from it.
-fn scan(folders: &[PathBuf], dir: &Path, progress: &Progress, tx: &Sender<Vec<Entry>>, wake: &(dyn Fn() + Send + Sync), quick: bool) {
+fn scan(folders: &[PathBuf], dir: &Path, progress: &Progress, tx: &Sender<Built>, wake: &(dyn Fn() + Send + Sync), quick: bool) {
     let index_path = dir.join("index.json");
     let art_dir = dir.join("art");
     let index: Index = crate::settings::load(&index_path);
+    let found: HashMap<String, Found> = crate::settings::load(&dir.join(FOUND));
     let mut known: HashMap<String, Entry> = if index.version == VERSION {
         index.entries.into_iter().map(|e| (e.path.clone(), e)).collect()
     } else {
@@ -390,7 +568,7 @@ fn scan(folders: &[PathBuf], dir: &Path, progress: &Progress, tx: &Sender<Vec<En
     };
     let inside = |path: &str| folders.iter().any(|f| Path::new(path).starts_with(f));
     if quick && !known.is_empty() {
-        let _ = tx.send(known.values().filter(|e| inside(&e.path)).cloned().collect());
+        let _ = tx.send(build(known.values().filter(|e| inside(&e.path)).cloned().collect(), found.clone()));
         wake();
     }
     let mut files = Vec::new();
@@ -422,7 +600,7 @@ fn scan(folders: &[PathBuf], dir: &Path, progress: &Progress, tx: &Sender<Vec<En
         log::info!("local music: {} songs in {} folders", entries.iter().filter(|e| e.meta.is_some()).count(), folders.len());
     }
     if changed || !quick {
-        let _ = tx.send(entries);
+        let _ = tx.send(build(entries, found));
         wake();
     }
 }
@@ -608,6 +786,7 @@ fn read_tags(tags: &[Tag], meta: &mut Meta) {
     }
     if meta.artist.is_empty() && !artists.is_empty() {
         meta.artist = artists.join(", ");
+        meta.artists = artists;
     }
 }
 
@@ -758,13 +937,49 @@ mod tests {
             modified: 1,
             meta: Some(Meta { title: title.into(), artist: artist.into(), ..Meta::default() }),
         };
-        library.take(vec![
-            entry("a.mp3", "Something Else", "Blue Sky"),
-            entry("b.mp3", "Blue Sky", "Someone"),
-            entry("c.mp3", "Unrelated", "Nobody"),
-        ]);
-        let found: Vec<String> = library.search("blue sky").into_iter().map(|t| t.title).collect();
-        assert_eq!(found, ["Blue Sky", "Something Else"]);
-        assert!(library.search("  ").is_empty());
+        library.take(build(
+            vec![
+                entry("a.mp3", "Something Else", "Blue Sky"),
+                entry("b.mp3", "Blue Sky", "Someone"),
+                entry("c.mp3", "Unrelated", "Nobody"),
+                entry("d.flac", "トリカゴ", "XX:me"),
+            ],
+            HashMap::new(),
+        ));
+        let titles = |query: &str| library.search(query).into_iter().map(|t| t.title).collect::<Vec<_>>();
+        assert_eq!(titles("blue sky"), ["Blue Sky", "Something Else"]);
+        assert!(titles("  ").is_empty());
+        // Japanese by how it reads, and names without their marks.
+        assert_eq!(titles("torikago"), ["トリカゴ"]);
+        assert_eq!(titles("Tori Kago"), ["トリカゴ"]);
+        assert_eq!(titles("xxme"), ["トリカゴ"]);
+        assert_eq!(titles("トリカゴ"), ["トリカゴ"]);
+    }
+
+    #[test]
+    fn loose_spelling() {
+        assert_eq!(loose("ＸＸ:me"), "xxme");
+        assert_eq!(loose("daarin"), loose("darin"));
+        assert_eq!(loose("toukyou"), loose("tokyo"));
+    }
+
+    #[test]
+    fn found_pictures_go_to_their_album() {
+        let mut library = LocalLibrary::new(std::env::temp_dir().join("native-ytm-found-test"), Arc::new(|| {}));
+        let meta = Meta { title: "トリカゴ".into(), artist: "XX:me".into(), album: "Vol.1".into(), ..Meta::default() };
+        let other = Meta { title: "Escape".into(), ..meta.clone() };
+        library.take(build(
+            vec![
+                Entry { path: "a.flac".into(), size: 1, modified: 1, meta: Some(meta) },
+                Entry { path: "b.flac".into(), size: 1, modified: 1, meta: Some(other) },
+            ],
+            HashMap::new(),
+        ));
+        let wanted = library.art_wanted();
+        assert_eq!(wanted.len(), 1, "one look-up per album");
+        assert!(library.art_wanted().is_empty(), "asked once");
+        library.art_found(&wanted[0].key, Some("https://example.com/a.jpg".into()));
+        assert!(library.songs().iter().all(|s| s.thumbnail.as_deref() == Some("https://example.com/a.jpg")));
+        assert_eq!(library.songs()[0].artists[0].id.as_deref(), Some("artist:XX:me"));
     }
 }

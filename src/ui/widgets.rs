@@ -489,6 +489,19 @@ pub fn track_row(
     RowResponse { play, response }
 }
 
+/// 1248 as "1,248".
+pub fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// "1 song", "12 songs".
 pub fn songs(n: usize) -> String {
     if n == 1 { "1 song".to_owned() } else { format!("{n} songs") }

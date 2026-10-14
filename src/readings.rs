@@ -83,11 +83,53 @@ pub fn dictionary(ready: impl FnOnce() + Send + 'static) -> Option<&'static Dict
     }
     if !LOADING.swap(true, std::sync::atomic::Ordering::SeqCst) {
         let _ = std::thread::Builder::new().name("readings".into()).spawn(move || {
-            let _ = DICTIONARY.set(Dictionary::load());
+            DICTIONARY.get_or_init(Dictionary::load);
             ready();
         });
     }
     None
+}
+
+/// The dictionary, read now if it is not in memory yet: for a thread that
+/// can wait (the scan of the music on this PC).
+pub fn dictionary_now() -> Option<&'static Dictionary> {
+    DICTIONARY.get_or_init(Dictionary::load).as_ref()
+}
+
+/// Whether text has any kana or kanji to read.
+pub fn has_japanese(text: &str) -> bool {
+    text.chars().any(|c| is_kana(c) || is_kanji(c))
+}
+
+/// Japanese in Latin letters, for search: "トリカゴ" as "torikago",
+/// "夜に駆ける" as "yoru ni kakeru". Latin letters stay as they are;
+/// punctuation between words becomes a space.
+pub fn romanize(dictionary: &Dictionary, text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let rubies = readings(dictionary, text, Style::Romaji);
+    let mut rubies = rubies.iter().peekable();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if let Some(ruby) = rubies.next_if(|r| r.start == i) {
+            out.push(' ');
+            out.push_str(&ruby.text);
+            out.push(' ');
+            i = ruby.end.max(i + 1);
+            continue;
+        }
+        let c = chars[i];
+        if c.is_alphanumeric() {
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(' ');
+        }
+        i += 1;
+    }
+    out.split(|c: char| c.is_whitespace() || !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Whether lyrics are Japanese: any kana in them. (Kanji alone may as
@@ -402,6 +444,15 @@ mod tests {
         assert!(words.contains(&("見送".to_owned(), "みおく".to_owned())), "{words:?}");
         assert!(words.contains(&("言葉".to_owned(), "ことば".to_owned())), "{words:?}");
         assert!(words.iter().all(|(surface, _)| surface.chars().any(is_kanji)));
+    }
+
+    #[test]
+    fn names_in_latin_letters() {
+        let d = table();
+        assert_eq!(romanize(d, "トリカゴ").replace(' ', ""), "torikago");
+        assert_eq!(romanize(d, "ダーリン・イン・ザ・フランキス").replace(' ', ""), "daarininzafurankisu");
+        assert_eq!(romanize(d, "XX:me"), "xx me");
+        assert!(romanize(d, "夜に駆ける").starts_with("yoru ni"));
     }
 
     #[test]

@@ -234,6 +234,7 @@ fn dev_route(app: &mut App) {
             }
             "settings" => Action::Navigate(Route::Settings),
             "device" => Action::Navigate(Route::Library(LibraryTab::Device)),
+            "artist" => Action::Navigate(Route::Artist(arg.to_owned())),
             "fullscreen" => Action::ToggleFullscreen,
             "queue" => Action::ShowSidePanel(SideTab::UpNext),
             "lyrics" => Action::ShowSidePanel(SideTab::Lyrics),

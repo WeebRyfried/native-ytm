@@ -33,6 +33,7 @@ fn main() -> anyhow::Result<()> {
             image.save(args.get(2).map_or("logo.png", String::as_str))?;
             return Ok(());
         }
+        Some("lastfm") if args.len() > 3 => return lastfm(&args[2..]),
         Some("pick") => {
             // Windows' folder picker, as the app opens it.
             println!("{:?}", native_ytm::platform::pick_folder("Add a folder of music"));
@@ -123,7 +124,7 @@ fn dump(args: &[String]) -> anyhow::Result<()> {
     runtime.block_on(async {
         api.bootstrap().await;
         let show_items = |items: &[Item]| for i in items.iter().take(6) {
-            println!("    - [{:?}] {} | {} | target={:?} | track={:?} | thumb={}", i.kind, i.title, i.subtitle, i.target.as_ref().map(|t| format!("{t:?}").chars().take(70).collect::<String>()), i.track.as_ref().map(|t| (t.video_id.clone(), t.artist_line(), t.album.as_ref().map(|a| a.name.clone()), t.duration)), i.thumbnail.is_some());
+            println!("    - [{:?}] {} | {} | target={:?} | track={:?} | thumb={}", i.kind, i.title, i.subtitle, i.target.as_ref().map(|t| format!("{t:?}").chars().take(70).collect::<String>()), i.track.as_ref().map(|t| (t.video_id.clone(), t.artists.iter().map(|a| format!("{}={:?}", a.name, a.id)).collect::<Vec<_>>(), t.album.as_ref().map(|a| a.name.clone()), t.duration)), i.thumbnail.is_some());
         };
         let show_page = |p: &Page| {
             println!("header: {:?}", p.header.as_ref().map(|h| (h.title.clone(), h.subtitle.clone(), h.second_subtitle.clone(), h.author.clone(), h.playlist_id.clone(), h.channel_id.clone(), h.play.is_some(), h.radio.is_some(), h.thumbnail.is_some())));
@@ -143,6 +144,27 @@ fn dump(args: &[String]) -> anyhow::Result<()> {
         }
         anyhow::Ok(())
     })
+}
+
+/// What the app reads from Last.fm, with the account saved in CONFIG_DIR:
+/// `lastfm CONFIG_DIR artist NAME`, `lastfm CONFIG_DIR art ARTIST ALBUM`,
+/// `lastfm CONFIG_DIR track-art ARTIST TITLE`.
+fn lastfm(args: &[String]) -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let http = reqwest::Client::new();
+    let account = native_ytm::lastfm::LastFm::new(std::path::Path::new(&args[0]), runtime.handle().clone(), http.clone(), std::sync::Arc::new(|| {}));
+    let Some(reader) = account.reader() else {
+        anyhow::bail!("no Last.fm API account in {}", args[0]);
+    };
+    runtime.block_on(async {
+        match (args[1].as_str(), args.get(2), args.get(3)) {
+            ("artist", Some(name), _) => println!("{:#?}", reader.artist(&http, name).await),
+            ("art", Some(artist), Some(album)) => println!("{:?}", reader.album_art(&http, artist, album).await),
+            ("track-art", Some(artist), Some(title)) => println!("{:?}", reader.track_art(&http, artist, title).await),
+            _ => println!("?"),
+        }
+    });
+    Ok(())
 }
 
 /// Writes the app's drawn icon as a Windows .ico, PNG images inside.

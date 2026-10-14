@@ -9,7 +9,7 @@ use crate::app::App;
 use crate::model::{Action, SideTab};
 use crate::settings::Repeat;
 use crate::theme::{self, Icon};
-use crate::ui::widgets::{self, RowPlace};
+use crate::ui::widgets::{self, RowPlace, thousands};
 
 /// The seek bar's line lies along the bar's top edge; this much of the bar
 /// below it takes its clicks and drags.
@@ -359,18 +359,6 @@ fn extras(app: &mut App, ui: &mut Ui) {
     volume(app, ui);
 }
 
-/// 1248 as "1,248".
-fn thousands(n: u64) -> String {
-    let digits = n.to_string();
-    let mut out = String::new();
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
-}
 
 /// The small dot under a toggle that is on.
 fn dot(ui: &Ui, rect: Rect) {

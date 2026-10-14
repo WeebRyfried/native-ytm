@@ -139,6 +139,37 @@ pub enum Request {
     },
     /// Premium's 256 kb/s streams, through yt-dlp, when signed in.
     SetPremium(bool),
+    /// An artist's page: Last.fm's story and numbers (with the person's
+    /// API account), and their page on YouTube Music.
+    Artist {
+        name: String,
+        lastfm: Option<crate::lastfm::Reader>,
+        /// Their songs on this PC, to find them on YouTube Music by.
+        titles: Vec<String>,
+    },
+    /// A picture for songs on this PC that carry none: their album's on
+    /// Last.fm, else on YouTube Music.
+    FindArt {
+        query: crate::local::ArtQuery,
+        lastfm: Option<crate::lastfm::Reader>,
+    },
+    /// A song on YouTube Music, by its names, to play: by `artist` alone,
+    /// when given.
+    FindSong {
+        seq: u64,
+        query: String,
+        artist: Option<String>,
+    },
+    /// A song on YouTube Music to start a radio after a song on this PC
+    /// from: the same song by the same artist; else, when that artist is
+    /// not on YouTube Music, a song by one like them (from Last.fm); else
+    /// the same song by anyone (a cover).
+    RadioSeed {
+        seq: u64,
+        artist: String,
+        title: String,
+        lastfm: Option<crate::lastfm::Reader>,
+    },
 }
 
 pub enum Response {
@@ -185,6 +216,21 @@ pub enum Response {
     },
     Account(Result<Account, String>),
     LibraryPlaylists(Result<Vec<Item>, String>),
+    Artist {
+        name: String,
+        /// None without a Last.fm account.
+        lastfm: Option<Result<crate::lastfm::ArtistInfo, String>>,
+        /// Their artist card on YouTube Music: page and picture.
+        youtube: Option<Item>,
+    },
+    ArtFound {
+        key: String,
+        url: Option<String>,
+    },
+    SongFound {
+        seq: u64,
+        track: Option<Track>,
+    },
     /// Something the person did went through, or did not.
     Done {
         message: String,
@@ -289,6 +335,97 @@ fn err(e: anyhow::Error) -> String {
     format!("{e:#}")
 }
 
+/// Whether two names are the same, near enough: one holds the other once
+/// case, spaces and marks are set aside.
+fn same_name(a: &str, b: &str) -> bool {
+    let (a, b) = (crate::local::loose(a), crate::local::loose(b));
+    !a.is_empty() && !b.is_empty() && (a.contains(&b) || b.contains(&a))
+}
+
+/// The first item a search finds of a kind, under the name looked for and,
+/// when given, by the artist looked for: an album of the same name by
+/// someone else is not theirs.
+async fn first_found(api: &Innertube, query: &str, filter: Filter, name: &str, by: Option<&str>, kind: &[Kind]) -> Option<Item> {
+    let (sections, _) = api.search(query, filter).await.ok()?;
+    sections.into_iter().flat_map(|s| s.items).find(|item| {
+        let artists = match &item.track {
+            Some(track) => track.artist_line(),
+            None => item.subtitle.clone(),
+        };
+        kind.contains(&item.kind)
+            && same_name(&item.title, name)
+            && by.is_none_or(|by| {
+                let by = crate::local::loose(by);
+                !by.is_empty() && crate::local::loose(&artists).contains(&by)
+            })
+    })
+}
+
+/// Whether a song is by an artist (one of its artists, near enough).
+fn by_artist(track: &Track, artist: &str) -> bool {
+    let artist = crate::local::loose(artist);
+    !artist.is_empty() && crate::local::loose(&track.artist_line()).contains(&artist)
+}
+
+/// The first song a search finds by `by` and named `title`, as far as
+/// either is asked for.
+async fn find_song(api: &Innertube, query: &str, by: Option<&str>, title: Option<&str>) -> Option<Track> {
+    let (sections, _) = api.search(query, Filter::Songs).await.ok()?;
+    sections
+        .into_iter()
+        .flat_map(|s| s.items)
+        .filter_map(|i| i.track)
+        .find(|t| by.is_none_or(|by| by_artist(t, by)) && title.is_none_or(|title| same_name(&t.title, title)))
+}
+
+/// An artist's card on YouTube Music: from a search for them, or, when
+/// that turns up others (a search for "XX:me" finds XXXTENTACION), from
+/// one of their songs, whose artist leads to their page.
+async fn youtube_artist(api: &Innertube, name: &str, titles: &[String]) -> Option<Item> {
+    if let Some(item) = first_found(api, name, Filter::Artists, name, None, &[Kind::Artist]).await {
+        return Some(item);
+    }
+    for title in titles.iter().take(2) {
+        let Ok((sections, _)) = api.search(&format!("{name} {title}"), Filter::Songs).await else {
+            continue;
+        };
+        let found = sections
+            .into_iter()
+            .flat_map(|s| s.items)
+            .filter_map(|i| i.track)
+            .flat_map(|t| t.artists)
+            .find(|a| a.id.as_deref().is_some_and(|id| id.starts_with("UC")) && same_name(&a.name, name));
+        let Some(Link { name: found_name, id: Some(id) }) = found else {
+            continue;
+        };
+        let thumbnail = api.browse(&id, None).await.ok().and_then(|p| p.header).and_then(|h| h.thumbnail);
+        return Some(Item {
+            kind: Kind::Artist,
+            title: found_name,
+            subtitle: String::new(),
+            thumbnail,
+            target: Some(Target::Browse { browse_id: id, params: None }),
+            track: None,
+            play_playlist: None,
+            color: None,
+        });
+    }
+    None
+}
+
+/// A picture on YouTube Music for songs on this PC: their album's, or the
+/// song's own.
+async fn youtube_art(api: &Innertube, query: &crate::local::ArtQuery) -> Option<String> {
+    let by = Some(query.artist.as_str());
+    if let Some(album) = &query.album
+        && let Some(item) = first_found(api, &format!("{} {album}", query.artist), Filter::Albums, album, by, &[Kind::Album]).await
+    {
+        return item.thumbnail;
+    }
+    let song = first_found(api, &format!("{} {}", query.artist, query.title), Filter::Songs, &query.title, by, &[Kind::Song, Kind::Video]).await?;
+    song.track.and_then(|t| t.thumbnail).or(song.thumbnail)
+}
+
 async fn run(
     api: &Innertube,
     resolver: &parking_lot::RwLock<Resolver>,
@@ -336,6 +473,71 @@ async fn run(
             result: api.search_more(&token).await.map_err(err),
             more: true,
         },
+        Request::Artist { name, lastfm, titles } => {
+            let story = async {
+                match &lastfm {
+                    Some(reader) => Some(reader.artist(&api.http, &name).await),
+                    None => None,
+                }
+            };
+            let card = youtube_artist(api, &name, &titles);
+            let (lastfm, mut youtube) = tokio::join!(story, card);
+            // No songs of theirs on this PC to find them by: Last.fm's most
+            // played will do.
+            if youtube.is_none()
+                && titles.is_empty()
+                && let Some(Ok(info)) = &lastfm
+            {
+                let popular: Vec<String> = info.top_tracks.iter().map(|(title, _)| title.clone()).collect();
+                youtube = youtube_artist(api, &name, &popular).await;
+            }
+            Response::Artist { name, lastfm, youtube }
+        }
+        Request::FindArt { query, lastfm } => {
+            let mut url = None;
+            let mut from = "none";
+            if let Some(reader) = &lastfm {
+                if let Some(album) = &query.album {
+                    url = reader.album_art(&api.http, &query.artist, album).await;
+                }
+                if url.is_none() {
+                    url = reader.track_art(&api.http, &query.artist, &query.title).await;
+                }
+                if url.is_some() {
+                    from = "Last.fm";
+                }
+            }
+            if url.is_none() {
+                url = youtube_art(api, &query).await;
+                if url.is_some() {
+                    from = "YouTube Music";
+                }
+            }
+            log::info!("artwork for {:?} by {}: {from}", query.album.as_deref().unwrap_or(&query.title), query.artist);
+            Response::ArtFound { key: query.key, url }
+        }
+        Request::FindSong { seq, query, artist } => Response::SongFound {
+            seq,
+            track: find_song(api, &query, artist.as_deref(), None).await,
+        },
+        Request::RadioSeed { seq, artist, title, lastfm } => {
+            let query = format!("{artist} {title}");
+            let mut track = find_song(api, &query, Some(&artist), Some(&title)).await;
+            if track.is_none()
+                && let Some(reader) = &lastfm
+            {
+                for other in reader.similar(&api.http, &artist).await.into_iter().take(4) {
+                    track = find_song(api, &other, Some(&other), None).await;
+                    if track.is_some() {
+                        break;
+                    }
+                }
+            }
+            if track.is_none() {
+                track = find_song(api, &query, None, Some(&title)).await;
+            }
+            Response::SongFound { seq, track }
+        }
         Request::Suggest { seq, input } => Response::Suggest {
             seq,
             result: api.suggestions(&input).await.unwrap_or_default(),

@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="../../releases/latest"><img src="https://img.shields.io/badge/download-v0.2.3-ff0033?style=flat-square" alt="Download v0.2.3"></a>
+  <a href="../../releases/latest"><img src="https://img.shields.io/badge/download-v0.2.4-ff0033?style=flat-square" alt="Download v0.2.4"></a>
   <img src="https://img.shields.io/badge/Windows-x64-0078D4?style=flat-square&logo=windows11&logoColor=white" alt="Windows x64">
   <img src="https://img.shields.io/badge/Rust-2024-B7410E?style=flat-square&logo=rust&logoColor=white" alt="Rust 2024">
   <img src="https://img.shields.io/badge/UI-egui%20%2B%20OpenGL-1f1f1f?style=flat-square" alt="egui and OpenGL">
@@ -70,8 +70,14 @@ sounds as good as your account allows.
   files: their songs, tags and cover art are in **Library, On this PC**,
   and come first when you search, under **From your device**.
 - They play in the same queue as YouTube Music's, gapless or crossfaded,
-  equalised and levelled (ReplayGain), with synced lyrics. Nothing leaves
-  the PC; a scan reads only the files that changed.
+  equalised and levelled (ReplayGain), with synced lyrics; when they run
+  out, YouTube Music's radio carries on in the same vein. A scan reads only
+  the files that changed.
+- Search finds Japanese titles by how they read: "torikago" finds トリカゴ.
+- Songs without artwork get their album's from Last.fm (or YouTube Music).
+- Artists lead to a page of their own, as on YouTube Music: their picture,
+  Last.fm's listeners, story, tags, popular songs, albums and similar
+  artists, your plays, and their songs on this PC.
 
 **Your music**
 - Home, Explore, moods and charts, search with suggestions, albums,
@@ -183,7 +189,7 @@ cargo build --release
 | API | `src/api/` | InnerTube (`WEB_REMIX`) requests and the parsers that turn renderers into the model; LRCLIB for synced lyrics |
 | Streams | `src/stream.rs` | finds a stream for a song (below) |
 | Audio | `src/player/` | range downloader (or a file read as it plays), symphonia (MP4, WebM, AAC, and MP3, FLAC, Vorbis, ALAC, WAV for local files), libopus for Opus, rubato resampler, crossfades, the equaliser (`eq.rs`, in the audio callback), fastframe-audio output |
-| Music on this PC | `src/local.rs` | the folder scan (a thread at background priority), tags and pictures read once into an index, search |
+| Music on this PC | `src/local.rs` | the folder scan (a thread at background priority), tags and pictures read once into an index, search (with readings of Japanese names), artwork found online |
 | Updates | `src/update.rs` | the latest GitHub release, the download checked against its SHA-256 digest, the running program renamed aside for the new one |
 | Lyric readings | `src/readings.rs` | Japanese words read longest match first from a table made from JMdict, then put in romaji or hiragana |
 | Songs on disk | `src/cache.rs` | downloads, and whole files kept from plays (the best quality heard, the least recently played going first) |
@@ -217,7 +223,7 @@ system's fallback fonts instead of reading them in.
 **For development**, the app takes a few environment variables:
 `NATIVE_YTM_ROUTE` opens pages or plays at start (`search:QUERY`,
 `browse:ID`, `play:VIDEO_ID`, `explore`, `library`, `settings`, `queue`,
-`lyrics`, `signin`, `full`, `fullscreen`, `cached`, `device`, `local:N` to
+`lyrics`, `signin`, `full`, `fullscreen`, `cached`, `device`, `artist:NAME`, `local:N` to
 play the songs on this PC from the Nth, `update` to install an update once
 found, and `download` for the song playing, joined with `|`);
 `NATIVE_YTM_VERSION` makes the app believe it is that version (to be offered
@@ -231,7 +237,8 @@ pointer input; `NATIVE_YTM_NO_FRAME_SKIP` draws identical frames anyway;
 `ytm-probe` is a console tool for when YouTube changes something: `dump`
 prints what the parsers make of live pages, `play` resolves and plays a
 stream (`--cookies FILE --premium` for the account's), `lyrics` looks lyrics
-up, `history VIDEO_ID --cookies FILE` checks the history report, `logo` and
+up, `lastfm CONFIG_DIR artist NAME` shows what an artist page reads from
+Last.fm, `history VIDEO_ID --cookies FILE` checks the history report, `logo` and
 `icon` write the icon out.
 
 </details>

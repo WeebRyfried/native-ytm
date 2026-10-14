@@ -17,7 +17,11 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let mut area = egui::ScrollArea::vertical()
         .id_salt(("page", key.clone()))
         .auto_shrink([false, false]);
-    let ready = route == Route::Settings || app.pages.get(&key).is_some_and(|p| matches!(p.data, Loadable::Ready(_)));
+    let ready = match &route {
+        Route::Settings => true,
+        Route::Artist(name) => matches!(app.artists.get(&name.to_lowercase()), Some(Loadable::Ready(_))),
+        _ => app.pages.get(&key).is_some_and(|p| matches!(p.data, Loadable::Ready(_))),
+    };
     if ready && let Some(y) = app.scroll_to.take() {
         area = area.vertical_scroll_offset(y);
     }
@@ -38,6 +42,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                         Route::Search { .. } => search(app, ui),
                         Route::Settings => crate::ui::settings::show(app, ui),
                         Route::Library(tab) => library(app, ui, *tab, &key),
+                        Route::Artist(name) => artist(app, ui, name),
                         _ => browse(app, ui, &route, &key),
                     }
                 });
@@ -51,7 +56,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                     app.actions.push(Action::SearchMore);
                 }
             }
-            Route::Settings => {}
+            Route::Settings | Route::Artist(_) => {}
             _ => {
                 if let Some(state) = app.pages.get(&key)
                     && let Loadable::Ready(page) = &state.data
@@ -736,6 +741,271 @@ fn device_welcome(ui: &mut Ui, cx: &mut Cx<'_>, picking: bool) {
             cx.push(Action::AddLocalFolder);
         }
     });
+}
+
+/// An artist of songs on this PC, as YouTube Music shows one: their picture
+/// (from YouTube Music), what Last.fm says of them, their songs here, and
+/// their popular songs and albums, which play from YouTube Music.
+fn artist(app: &mut App, ui: &mut Ui, name: &str) {
+    let key = name.to_lowercase();
+    let (page, loading) = match app.artists.get(&key) {
+        Some(Loadable::Ready(page)) => (page.clone(), false),
+        Some(_) => (crate::app::ArtistPage::default(), true),
+        None => {
+            app.actions.push(Action::Refresh);
+            (crate::app::ArtistPage::default(), true)
+        }
+    };
+    let songs = app.artist_songs(name);
+    let connected = app.lastfm.reader().is_some();
+    let info = page.lastfm.as_ref().and_then(|r| r.as_ref().ok());
+    let shown_name = info.map_or(name, |i| i.name.as_str()).to_owned();
+    // Their picture: YouTube Music's, else an album cover, else a song's.
+    let picture = page
+        .youtube
+        .as_ref()
+        .and_then(|i| i.thumbnail.clone())
+        .or_else(|| info.and_then(|i| i.albums.iter().find_map(|(_, art)| art.clone())))
+        .or_else(|| songs.iter().find_map(|s| s.thumbnail.clone()));
+    let current = app.queue.current_track().map(|t| t.video_id.clone());
+    let playing = app.playing();
+    let signed_in = app.signed_in;
+    let online = app.online();
+    let mut cx = Cx {
+        images: &mut app.images,
+        actions: &mut app.actions,
+        current: current.as_deref(),
+        playing,
+        signed_in,
+        offline: &app.offline,
+        online,
+        romanized: app.settings.romanized_titles,
+    };
+
+    // The header: their picture round over a wash of its colours.
+    let width = ui.available_width() + theme::PAGE_MARGIN * 2.0;
+    let top = ui.cursor().top() - 8.0;
+    let band = Rect::from_min_size(pos2(ui.max_rect().left() - theme::PAGE_MARGIN, top), vec2(width, 300.0));
+    if let Some(url) = &picture
+        && let Some(wash) = cx.images.backdrop(url)
+    {
+        let mut mesh = egui::Mesh::with_texture(wash.id());
+        let uv = Rect::from_min_max(pos2(0.0, 0.3), pos2(1.0, 0.7));
+        // Darkened at the top, and fading into the page at the foot.
+        let top_shade = Color32::from_rgba_premultiplied(107, 107, 107, 255);
+        for (y, v, color) in [(band.top(), uv.top(), top_shade), (band.bottom(), uv.bottom(), Color32::TRANSPARENT)] {
+            mesh.vertices.push(egui::epaint::Vertex { pos: pos2(band.left(), y), uv: pos2(0.0, v), color });
+            mesh.vertices.push(egui::epaint::Vertex { pos: pos2(band.right(), y), uv: pos2(1.0, v), color });
+        }
+        mesh.add_triangle(0, 1, 2);
+        mesh.add_triangle(1, 2, 3);
+        ui.painter_at(band).add(egui::Shape::mesh(mesh));
+    }
+    ui.add_space(36.0);
+    ui.horizontal_top(|ui| {
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(184.0), Sense::hover());
+        ui.painter().add(
+            egui::Shadow { offset: [0, 10], blur: 34, spread: 0, color: Color32::from_black_alpha(120) }
+                .as_shape(rect, CornerRadius::same(92)),
+        );
+        widgets::paint_art(ui, cx.images, picture.as_deref(), rect, 0.0, true);
+        ui.add_space(28.0);
+        ui.vertical(|ui| {
+            ui.add_space(26.0);
+            ui.label(RichText::new("ARTIST").font(theme::semibold(12.0)).color(theme::TEXT_DIM));
+            ui.add(egui::Label::new(RichText::new(&shown_name).font(theme::bold(44.0)).color(Color32::WHITE)).truncate());
+            let mut stats = Vec::new();
+            if let Some(info) = info {
+                if let Some(n) = info.listeners {
+                    stats.push(format!("{} listeners", widgets::thousands(n)));
+                }
+                if let Some(n) = info.scrobbles {
+                    stats.push(format!("{} scrobbles on Last.fm", widgets::thousands(n)));
+                }
+            }
+            if !songs.is_empty() {
+                stats.push(format!("{} on this PC", widgets::songs(songs.len())));
+            }
+            if !stats.is_empty() {
+                ui.label(RichText::new(stats.join(" \u{00b7} ")).color(theme::TEXT_DIM));
+            }
+            if let Some(plays) = info.and_then(|i| i.plays).filter(|n| *n > 0) {
+                let times = if plays == 1 { "once".to_owned() } else { format!("{} times", widgets::thousands(plays)) };
+                ui.label(RichText::new(format!("You've played them {times}")).color(theme::ACCENT_TEXT));
+            }
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                let source = Source { title: Some(shown_name.clone()), ..Source::default() };
+                if !songs.is_empty() {
+                    if widgets::pill(ui, Some(Icon::Play), "Play", true).clicked() {
+                        cx.push(Action::SetShuffle(false));
+                        cx.push(Action::PlayTracks { tracks: songs.to_vec(), start: 0, source: source.clone() });
+                    }
+                    if widgets::pill(ui, Some(Icon::Shuffle), "Shuffle", false).clicked() {
+                        cx.push(Action::SetShuffle(true));
+                        cx.push(Action::PlayTracks { tracks: songs.to_vec(), start: fastrand::usize(..songs.len()), source });
+                    }
+                }
+                if let Some(Target::Browse { browse_id, params }) = page.youtube.as_ref().and_then(|i| i.target.clone())
+                    && widgets::pill(ui, Some(Icon::Music), "On YouTube Music", songs.is_empty())
+                        .on_hover_text("Their page on YouTube Music: songs, albums, videos and radio")
+                        .clicked()
+                {
+                    cx.push(Action::Navigate(Route::Browse { browse_id, params }));
+                }
+                if let Some(info) = info.filter(|i| !i.url.is_empty())
+                    && widgets::pill(ui, Some(Icon::LastFm), "Last.fm", false).clicked()
+                {
+                    cx.push(Action::OpenUrl(info.url.clone()));
+                }
+            });
+        });
+    });
+    ui.add_space(36.0);
+
+    if !songs.is_empty() {
+        ui.label(RichText::new("On this PC").font(theme::bold(22.0)));
+        ui.add_space(10.0);
+        let source = Source { title: Some(shown_name.clone()), ..Source::default() };
+        widgets::track_list(ui, &mut cx, &songs, RowPlace::List, &source, true);
+        ui.add_space(28.0);
+    }
+
+    if loading {
+        widgets::spinner(ui);
+        return;
+    }
+    let Some(info) = info else {
+        // No Last.fm account, or Last.fm does not know them.
+        let text = if connected {
+            format!("Last.fm has nothing on {shown_name} yet.")
+        } else {
+            format!("Connect Last.fm in Settings, under Sharing, to see {shown_name}'s story, popular songs and albums here.")
+        };
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            Icon::LastFm.image(theme::TEXT_DIM, 18.0).paint_at(ui, Rect::from_min_size(ui.cursor().min + vec2(0.0, 1.0), Vec2::splat(18.0)));
+            ui.add_space(26.0);
+            ui.label(RichText::new(text).color(theme::TEXT_DIM));
+        });
+        if !connected {
+            ui.add_space(10.0);
+            if widgets::pill(ui, Some(Icon::Settings), "Open Settings", false).clicked() {
+                cx.push(Action::Navigate(Route::Settings));
+            }
+        }
+        return;
+    };
+
+    // Their most played songs, which play from this PC when they are here
+    // and from YouTube Music when not.
+    if !info.top_tracks.is_empty() {
+        ui.label(RichText::new("Popular on Last.fm").font(theme::bold(22.0)));
+        ui.add_space(10.0);
+        let row_w = ui.available_width().min(760.0);
+        for (i, (title, listeners)) in info.top_tracks.iter().enumerate() {
+            let (rect, response) = ui.allocate_exact_size(vec2(row_w, 46.0), Sense::click());
+            let response = response.on_hover_cursor(CursorIcon::PointingHand);
+            let here = songs.iter().position(|s| crate::local::loose(&s.title) == crate::local::loose(title));
+            if response.hovered() {
+                ui.painter().rect_filled(rect, CornerRadius::same(6), Color32::from_white_alpha(14));
+            }
+            let center = rect.center().y;
+            if response.hovered() {
+                Icon::Play.image(theme::TEXT, 16.0).paint_at(ui, Rect::from_center_size(pos2(rect.left() + 22.0, center), Vec2::splat(16.0)));
+            } else {
+                ui.painter().text(pos2(rect.left() + 22.0, center), egui::Align2::CENTER_CENTER, (i + 1).to_string(), theme::regular(14.0), theme::TEXT_DIM);
+            }
+            let title_g = ui.painter().layout_no_wrap(title.clone(), theme::medium(14.5), theme::TEXT);
+            let title_w = title_g.size().x;
+            ui.painter().galley(pos2(rect.left() + 52.0, center - title_g.size().y / 2.0), title_g, theme::TEXT);
+            if here.is_some() {
+                Icon::Computer
+                    .image(theme::TEXT_DIM, 14.0)
+                    .paint_at(ui, Rect::from_center_size(pos2(rect.left() + 52.0 + title_w + 16.0, center), Vec2::splat(14.0)));
+            }
+            if let Some(n) = listeners {
+                ui.painter().text(
+                    pos2(rect.right() - 12.0, center),
+                    egui::Align2::RIGHT_CENTER,
+                    format!("{} listeners", widgets::thousands(*n)),
+                    theme::regular(13.0),
+                    theme::TEXT_DIM,
+                );
+            }
+            let response = response.on_hover_text(if here.is_some() { "On this PC" } else { "Plays from YouTube Music" });
+            if response.clicked() {
+                match here {
+                    Some(start) => cx.push(Action::PlayTracks {
+                        tracks: songs.to_vec(),
+                        start,
+                        source: Source { title: Some(shown_name.clone()), ..Source::default() },
+                    }),
+                    None => cx.push(Action::PlaySong {
+                        query: format!("{shown_name} {title}"),
+                        artist: Some(shown_name.clone()),
+                    }),
+                }
+            }
+        }
+        ui.add_space(28.0);
+    }
+
+    // Their albums: a click looks them up on YouTube Music.
+    if !info.albums.is_empty() {
+        ui.label(RichText::new("Albums").font(theme::bold(22.0)));
+        ui.add_space(10.0);
+        let items: Vec<Item> = info
+            .albums
+            .iter()
+            .map(|(title, art)| Item {
+                kind: Kind::Album,
+                title: title.clone(),
+                subtitle: shown_name.clone(),
+                thumbnail: art.clone(),
+                target: Some(Target::Search { query: format!("{shown_name} {title}"), params: None }),
+                track: None,
+                play_playlist: None,
+                color: None,
+            })
+            .collect();
+        widgets::card_grid(ui, &mut cx, &items);
+        ui.add_space(20.0);
+    }
+
+    if !info.bio.is_empty() || !info.tags.is_empty() {
+        ui.label(RichText::new("About").font(theme::bold(22.0)));
+        ui.add_space(10.0);
+        if !info.bio.is_empty() {
+            ui.allocate_ui_with_layout(vec2(ui.available_width().min(760.0), 0.0), Layout::top_down(Align::Min), |ui| {
+                ui.add(egui::Label::new(RichText::new(&info.bio).color(theme::TEXT_DIM).font(theme::regular(14.5))).wrap());
+            });
+            ui.add_space(12.0);
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+            for tag in &info.tags {
+                if widgets::chip(ui, tag, false).on_hover_text("Search YouTube Music").clicked() {
+                    cx.push(Action::Search(tag.clone()));
+                }
+            }
+        });
+        ui.add_space(28.0);
+    }
+
+    if !info.similar.is_empty() {
+        ui.label(RichText::new("Fans also like").font(theme::bold(22.0)));
+        ui.add_space(10.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(10.0, 10.0);
+            for other in &info.similar {
+                if widgets::pill(ui, Some(Icon::User), other, false).clicked() {
+                    cx.push(Action::Navigate(Route::Artist(other.clone())));
+                }
+            }
+        });
+    }
 }
 
 /// The songs on this PC matching a search, before YouTube Music's: a few,
