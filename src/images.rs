@@ -179,9 +179,24 @@ impl Images {
                     Ok(bytes) => Some(bytes),
                     Err(_) => {
                         let _permit = permits.acquire().await.ok();
-                        download(&http, &source).await.inspect(|bytes| {
-                            crate::settings::write_atomic(&path, bytes);
-                        })
+                        // Google makes a size it has not made before on the
+                        // spot, and a large one can time out or fail: then
+                        // the size YouTube Music itself shows, always ready.
+                        let usual = usual_size(&source, px);
+                        let wait = if usual.is_some() { Duration::from_secs(6) } else { Duration::from_secs(20) };
+                        match download(&http, &source, wait).await {
+                            Some(bytes) => {
+                                crate::settings::write_atomic(&path, &bytes);
+                                Some(bytes)
+                            }
+                            None => match usual {
+                                Some(usual) => {
+                                    log::info!("artwork at {px} px failed; using YouTube Music's own size");
+                                    download(&http, &usual, Duration::from_secs(20)).await
+                                }
+                                None => None,
+                            },
+                        }
                     }
                 },
             };
@@ -280,10 +295,18 @@ fn sized_key(url: &str, px: u32) -> String {
     if url.starts_with("file:") { format!("{url}#{px}") } else { sized_thumbnail(url, px) }
 }
 
-async fn download(http: &reqwest::Client, url: &str) -> Option<Vec<u8>> {
+/// For Google's artwork wanted larger than YouTube Music shows it (544 px),
+/// that size, to fall back on.
+fn usual_size(source: &str, px: u32) -> Option<String> {
+    const USUAL: u32 = 544;
+    let google = source.contains("googleusercontent.com") || source.contains("ggpht.com");
+    (google && px > USUAL).then(|| sized_thumbnail(source, USUAL)).filter(|usual| usual != source)
+}
+
+async fn download(http: &reqwest::Client, url: &str, wait: Duration) -> Option<Vec<u8>> {
     let response = http
         .get(url)
-        .timeout(Duration::from_secs(20))
+        .timeout(wait)
         // JPEG or PNG, which the media overlay can show too.
         .header("Accept", "image/jpeg,image/png,*/*;q=0.5")
         .send()

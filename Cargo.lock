@@ -2731,7 +2731,7 @@ dependencies = [
 
 [[package]]
 name = "native-ytm"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "anyhow",
  "directories",

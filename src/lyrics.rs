@@ -1,6 +1,8 @@
 //! Lyrics kept on disk once found, so a song's lyrics show at once the next
 //! time, and offline. A song found to have none is remembered for a while
-//! too, then asked about again.
+//! too, then asked about again. Lyrics found while LRCLIB could not answer
+//! (YouTube's plain text in its place) are kept as provisional: shown at
+//! once all the same, and LRCLIB asked again now and then.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -16,11 +18,30 @@ const VERSION: &str = "v2";
 /// How long a song without lyrics is taken at its word: three days.
 const NONE_FOR_SECS: i64 = 3 * 24 * 60 * 60;
 
+/// How long provisional lyrics stand before LRCLIB is asked again.
+const PROVISIONAL_FOR_SECS: i64 = 30 * 60;
+
 #[derive(Serialize, Deserialize)]
 struct Kept {
     lyrics: Option<Lyrics>,
     /// When they were found, in Unix seconds.
     at: i64,
+    /// Every source answered; not so when LRCLIB could not be asked.
+    #[serde(default = "yes")]
+    complete: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// Lyrics from disk.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Found {
+    /// None: the song has none.
+    pub lyrics: Option<Lyrics>,
+    /// Provisional, and long enough ago that LRCLIB is worth asking again.
+    pub recheck: bool,
 }
 
 pub struct LyricsCache {
@@ -52,25 +73,39 @@ impl LyricsCache {
         self.dir.join(format!("{name}.json"))
     }
 
-    /// The song's lyrics as last found: `Some(None)` when it has none.
-    /// None when they have not been looked for (or long enough ago that
-    /// they may have come since).
-    pub fn get(&self, video_id: &str, synced: bool) -> Option<Option<Lyrics>> {
+    /// The song's lyrics as last found. None when they have not been
+    /// looked for (or found to be none long enough ago that they may have
+    /// come since).
+    pub fn get(&self, video_id: &str, synced: bool) -> Option<Found> {
         let bytes = std::fs::read(self.path(video_id, synced)).ok()?;
         let kept: Kept = serde_json::from_slice(&bytes).ok()?;
-        if kept.lyrics.is_none() && unix_now() - kept.at > NONE_FOR_SECS {
+        let age = unix_now() - kept.at;
+        if kept.lyrics.is_none() && (age > NONE_FOR_SECS || !kept.complete) {
             return None;
         }
-        Some(kept.lyrics)
+        Some(Found {
+            recheck: !kept.complete && age > PROVISIONAL_FOR_SECS,
+            lyrics: kept.lyrics,
+        })
     }
 
-    pub fn put(&self, video_id: &str, synced: bool, lyrics: &Option<Lyrics>) {
+    /// Keeps what was found; `complete` when every source answered. A
+    /// provisional answer never replaces a complete one.
+    pub fn put(&self, video_id: &str, synced: bool, lyrics: &Option<Lyrics>, complete: bool) {
+        let path = self.path(video_id, synced);
+        if !complete
+            && let Some(old) = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Kept>(&b).ok())
+            && old.complete
+        {
+            return;
+        }
         let kept = Kept {
             lyrics: lyrics.clone(),
             at: unix_now(),
+            complete,
         };
         if let Ok(json) = serde_json::to_vec(&kept) {
-            crate::settings::write_atomic(&self.path(video_id, synced), &json);
+            crate::settings::write_atomic(&path, &json);
         }
     }
 
@@ -98,12 +133,21 @@ mod tests {
             source: Some("LRCLIB".into()),
             lines: vec![LyricLine { time: 1.5, text: "la la".into() }],
         };
-        cache.put("abc", true, &Some(lyrics.clone()));
-        assert_eq!(cache.get("abc", true), Some(Some(lyrics)));
+        cache.put("abc", true, &Some(lyrics.clone()), true);
+        assert_eq!(cache.get("abc", true), Some(Found { lyrics: Some(lyrics.clone()), recheck: false }));
         // The other kind is asked for apart.
         assert_eq!(cache.get("abc", false), None);
-        cache.put(r"local:C:\Music\a.flac", false, &None);
-        assert_eq!(cache.get(r"local:C:\Music\a.flac", false), Some(None));
+        cache.put(r"local:C:\Music\a.flac", false, &None, true);
+        assert_eq!(cache.get(r"local:C:\Music\a.flac", false).map(|f| f.lyrics), Some(None));
+        // A provisional answer shows, but does not replace a complete one.
+        let plain = Lyrics { text: "plain".into(), source: None, lines: Vec::new() };
+        cache.put("abc", true, &Some(plain.clone()), false);
+        assert_eq!(cache.get("abc", true).and_then(|f| f.lyrics), Some(lyrics));
+        cache.put("def", true, &Some(plain.clone()), false);
+        assert_eq!(cache.get("def", true), Some(Found { lyrics: Some(plain), recheck: false }));
+        // Provisionally none is not kept as none.
+        cache.put("ghi", true, &None, false);
+        assert_eq!(cache.get("ghi", true), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

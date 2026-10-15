@@ -932,12 +932,15 @@ impl App {
                 }
             }
             Response::Lyrics { video_id, result, complete } => {
-                if complete && let Ok(lyrics) = &result {
-                    self.lyrics_cache.put(&video_id, self.settings.synced_lyrics, lyrics);
+                if let Ok(lyrics) = &result {
+                    // A stopgap (YouTube's plain text while LRCLIB could not
+                    // answer) is kept as provisional, so it shows at once
+                    // next time too.
+                    self.lyrics_cache.put(&video_id, self.settings.synced_lyrics, lyrics, complete);
+                }
+                if complete && result.is_ok() {
                     self.lyrics_retry.remove(&video_id);
                 } else {
-                    // A stopgap (YouTube's plain text, or nothing): asked
-                    // again in a while, and not kept.
                     self.lyrics_retry.insert(video_id.clone(), Instant::now() + LYRICS_RETRY);
                 }
                 self.lyrics.insert(
@@ -1285,7 +1288,11 @@ impl App {
         if !self.lyrics.contains_key(&track.video_id)
             && let Some(kept) = self.lyrics_cache.get(&track.video_id, self.settings.synced_lyrics)
         {
-            self.lyrics.insert(track.video_id.clone(), Loadable::Ready(kept));
+            // Provisional ones show, and LRCLIB is asked again meanwhile.
+            if kept.recheck {
+                self.lyrics_retry.insert(track.video_id.clone(), Instant::now());
+            }
+            self.lyrics.insert(track.video_id.clone(), Loadable::Ready(kept.lyrics));
         }
         // A restored song that has not played yet has no info yet.
         if self.now.video_id != track.video_id {
@@ -3212,7 +3219,7 @@ struct Measured {
 }
 
 /// How long before lyrics that came back incomplete are asked for again.
-const LYRICS_RETRY: Duration = Duration::from_secs(90);
+const LYRICS_RETRY: Duration = Duration::from_secs(300);
 
 /// A bitrate at or above this is Premium quality (256 kb/s streams).
 const PREMIUM_KBPS: u32 = 200;
