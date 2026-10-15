@@ -206,6 +206,10 @@ pub enum Response {
     Lyrics {
         video_id: String,
         result: Result<Option<Lyrics>, String>,
+        /// Every source asked answered: what was found can be kept. Not so
+        /// when LRCLIB was out of reach or turned the request away (it
+        /// limits how often it is asked), and the answer is a stopgap.
+        complete: bool,
     },
     Resolved {
         token: u64,
@@ -581,14 +585,18 @@ async fn run(
             };
             let open = async {
                 match &query {
-                    Some(query) => crate::api::lrclib::find(&api.http, query).await.unwrap_or_else(|error| {
-                        log::info!("LRCLIB: {error:#}");
-                        None
-                    }),
-                    None => None,
+                    Some(query) => match crate::api::lrclib::find(&api.http, query).await {
+                        Ok(found) => (found, true),
+                        Err(error) => {
+                            log::info!("LRCLIB: {error:#}");
+                            (None, false)
+                        }
+                    },
+                    None => (None, true),
                 }
             };
-            let (youtube, open) = tokio::join!(youtube, open);
+            let (youtube, (open, answered)) = tokio::join!(youtube, open);
+            let complete = answered && youtube.is_ok();
             // Synced first; then YouTube's own text; then LRCLIB's.
             let result = match (open, youtube) {
                 (Some(synced), _) if !synced.lines.is_empty() => Ok(Some(synced)),
@@ -596,7 +604,7 @@ async fn run(
                 (Some(plain), _) => Ok(Some(plain)),
                 (None, other) => other,
             };
-            Response::Lyrics { video_id, result }
+            Response::Lyrics { video_id, result, complete }
         }
         Request::Resolve {
             token,

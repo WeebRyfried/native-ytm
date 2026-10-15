@@ -79,13 +79,30 @@ pub async fn find(http: &reqwest::Client, query: &Query) -> Result<Option<Lyrics
 }
 
 async fn get(http: &reqwest::Client, url: &str, params: &[(&str, String)]) -> Result<Option<serde_json::Value>> {
-    let response = http
-        .get(url)
-        .query(params)
-        .header("User-Agent", USER_AGENT)
-        .timeout(Duration::from_secs(8))
-        .send()
-        .await?;
+    // LRCLIB turns away requests that come too close together (429, with
+    // a second or so to wait): wait as asked, a little longer each time.
+    let mut attempt = 0;
+    let response = loop {
+        let response = http
+            .get(url)
+            .query(params)
+            .header("User-Agent", USER_AGENT)
+            .timeout(Duration::from_secs(8))
+            .send()
+            .await?;
+        if response.status() != reqwest::StatusCode::TOO_MANY_REQUESTS || attempt == 5 {
+            break response;
+        }
+        attempt += 1;
+        let asked = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(1)
+            .clamp(1, 5);
+        tokio::time::sleep(Duration::from_secs(asked) + Duration::from_millis(600 * attempt)).await;
+    };
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(None);
     }

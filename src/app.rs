@@ -199,6 +199,8 @@ pub struct App {
     pub audio_cache: Arc<crate::cache::AudioCache>,
     /// Lyrics found before, on disk.
     pub lyrics_cache: crate::lyrics::LyricsCache,
+    /// Songs whose lyrics came back incomplete, and when to ask again.
+    lyrics_retry: HashMap<String, Instant>,
     /// How each song on disk stands, for the marks beside their names.
     pub offline: HashMap<String, Mark>,
     offline_gen: u64,
@@ -417,6 +419,7 @@ impl App {
             loaded: None,
             audio_cache,
             lyrics_cache: crate::lyrics::LyricsCache::new(paths.lyrics()),
+            lyrics_retry: HashMap::new(),
             offline: HashMap::new(),
             offline_gen: 0,
             marks_dirty: true,
@@ -585,6 +588,7 @@ impl App {
         self.download_tick();
         self.refresh_marks();
         self.maybe_preload();
+        self.retry_lyrics();
         self.maybe_extend();
         self.upgrade_tick();
         self.presence_tick();
@@ -927,9 +931,14 @@ impl App {
                     Err(error) => self.toast(format!("Could not load the playlist: {error}"), ToastKind::Error),
                 }
             }
-            Response::Lyrics { video_id, result } => {
-                if let Ok(lyrics) = &result {
+            Response::Lyrics { video_id, result, complete } => {
+                if complete && let Ok(lyrics) = &result {
                     self.lyrics_cache.put(&video_id, self.settings.synced_lyrics, lyrics);
+                    self.lyrics_retry.remove(&video_id);
+                } else {
+                    // A stopgap (YouTube's plain text, or nothing): asked
+                    // again in a while, and not kept.
+                    self.lyrics_retry.insert(video_id.clone(), Instant::now() + LYRICS_RETRY);
                 }
                 self.lyrics.insert(
                     video_id,
@@ -1308,6 +1317,26 @@ impl App {
             browse_id,
             query,
         });
+    }
+
+    /// The lyrics on screen came back incomplete a while ago (LRCLIB out of
+    /// reach, or limiting requests): ask again.
+    fn retry_lyrics(&mut self) {
+        let Some(video_id) = self.current().map(|t| t.video_id.clone()) else {
+            return;
+        };
+        if self.lyrics_retry.get(&video_id).is_some_and(|at| Instant::now() >= *at) && self.lyrics_shown() && self.online() {
+            self.lyrics_retry.remove(&video_id);
+            // What is shown stays until the new answer comes.
+            if let Some(Loadable::Ready(shown)) = self.lyrics.remove(&video_id) {
+                self.request_lyrics();
+                if let Some(Loadable::Loading) = self.lyrics.get(&video_id) {
+                    self.lyrics.insert(video_id, Loadable::Ready(shown));
+                }
+            } else {
+                self.request_lyrics();
+            }
+        }
     }
 
     /// Lyrics are on screen: the side panel's tab, or the full view's.
@@ -3181,6 +3210,9 @@ struct Measured {
     at: Option<Instant>,
     busy: bool,
 }
+
+/// How long before lyrics that came back incomplete are asked for again.
+const LYRICS_RETRY: Duration = Duration::from_secs(90);
 
 /// A bitrate at or above this is Premium quality (256 kb/s streams).
 const PREMIUM_KBPS: u32 = 200;

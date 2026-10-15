@@ -10,6 +10,9 @@ use sha2::{Digest, Sha256};
 
 use crate::api::model::Lyrics;
 
+/// Bumped when what was kept before cannot be trusted.
+const VERSION: &str = "v2";
+
 /// How long a song without lyrics is taken at its word: three days.
 const NONE_FOR_SECS: i64 = 3 * 24 * 60 * 60;
 
@@ -27,6 +30,17 @@ pub struct LyricsCache {
 impl LyricsCache {
     pub fn new(dir: PathBuf) -> Self {
         let _ = std::fs::create_dir_all(&dir);
+        // 0.2.5 kept stopgaps too (YouTube's plain lyrics, or none, when
+        // LRCLIB could not be asked): those are let go.
+        let marker = dir.join(VERSION);
+        if !marker.exists() {
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+            let _ = std::fs::write(&marker, b"");
+        }
         Self { dir }
     }
 
