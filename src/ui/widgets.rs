@@ -646,9 +646,12 @@ pub fn track_menu(ui: &mut Ui, cx: &mut Cx<'_>, track: &Track, place: RowPlace<'
         ui.add(egui::Button::image_and_text(icon.image(theme::TEXT, 18.0), text).frame_when_inactive(false))
             .clicked()
     };
-    // A song on this PC: the queue, and its file. YouTube Music's radio,
-    // likes, playlists and links are not for it.
+    // A song on this PC: a radio from YouTube Music, the queue, and its
+    // file. Likes, playlists and links are not for it.
     if let Some(file) = &track.file {
+        if item(ui, Icon::Radio, "Start radio") {
+            cx.push(Action::StartRadio(track.clone()));
+        }
         if !matches!(place, RowPlace::Queue(_)) {
             if item(ui, Icon::PlayNext, "Play next") {
                 cx.push(Action::PlayNext(vec![track.clone()]));

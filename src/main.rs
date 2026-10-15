@@ -203,6 +203,9 @@ static UPDATE_WHEN_FOUND: std::sync::atomic::AtomicBool = std::sync::atomic::Ato
 /// once the scan has found them (N + 1, so 0 is none).
 static PLAY_LOCAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// `localradio:N`: start a radio from the Nth song on this PC, the same way.
+static RADIO_LOCAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn dev_route(app: &mut App) {
     use native_ytm::model::{Action, LibraryTab, Route, SideTab};
     let Ok(route) = std::env::var("NATIVE_YTM_ROUTE") else {
@@ -230,6 +233,10 @@ fn dev_route(app: &mut App) {
             }
             "local" => {
                 PLAY_LOCAL.store(arg.parse::<usize>().unwrap_or(0) + 1, std::sync::atomic::Ordering::Relaxed);
+                continue;
+            }
+            "localradio" => {
+                RADIO_LOCAL.store(arg.parse::<usize>().unwrap_or(0) + 1, std::sync::atomic::Ordering::Relaxed);
                 continue;
             }
             "settings" => Action::Navigate(Route::Settings),
@@ -342,6 +349,13 @@ impl eframe::App for Window {
             let tracks = self.app.local.songs().to_vec();
             let start = (local - 1).min(tracks.len() - 1);
             self.app.actions.push(native_ytm::model::Action::PlayTracks { tracks, start, source: Default::default() });
+        }
+        let radio = RADIO_LOCAL.load(Ordering::Relaxed);
+        if radio > 0 && !self.app.local.songs().is_empty() {
+            RADIO_LOCAL.store(0, Ordering::Relaxed);
+            let songs = self.app.local.songs();
+            let track = songs[(radio - 1).min(songs.len() - 1)].clone();
+            self.app.actions.push(native_ytm::model::Action::StartRadio(track));
         }
         if DOWNLOAD_PLAYING.load(Ordering::Relaxed)
             && self.app.playing()

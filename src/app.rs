@@ -671,9 +671,14 @@ impl App {
                 measured.busy = false;
             }
         }
+        // The music on this PC: its files, and what the app keeps of them
+        // (their pictures and the index).
+        let music = self.local.bytes();
         measured.sizes.map(|sizes| Storage {
             downloads: usage.saved_bytes,
             recent: usage.kept_bytes,
+            local: sizes.local + music,
+            music,
             ..sizes
         })
     }
@@ -2582,7 +2587,20 @@ impl App {
                 }
             }
             Action::StartRadio(track) if track.is_local() => {
-                self.toast("Radio starts from a song on YouTube Music", ToastKind::Info);
+                if track.artists.is_empty() {
+                    self.toast("A radio needs the song's artist, and this file doesn't say", ToastKind::Info);
+                    return;
+                }
+                // The song itself, then at once the radio that follows songs
+                // on this PC: the same song on YouTube Music, or one by an
+                // artist like theirs.
+                self.pending_queue = None;
+                self.radio_dry = false;
+                self.extending = false;
+                let title = Some(format!("{} radio", track.title));
+                self.queue.replace(vec![track], 0, Source { title, ..Source::default() });
+                self.start_current(0.0);
+                self.extend_queue();
             }
             Action::StartRadio(track) => {
                 self.actions.push(Action::PlayWatch {
@@ -3202,8 +3220,10 @@ pub struct Storage {
     pub downloads: u64,
     pub recent: u64,
     pub artwork: u64,
-    /// The artwork and index of the music on this PC.
+    /// The music on this PC: its files, its artwork and index.
     pub local: u64,
+    /// Of which its files, the person's own rather than the app's.
+    pub music: u64,
     pub lyrics: u64,
     /// Logs and the like.
     pub other: u64,

@@ -122,6 +122,7 @@ struct Built {
     words: Vec<Words>,
     playback: HashMap<String, Playback>,
     albums: usize,
+    bytes: u64,
     found: HashMap<String, Found>,
 }
 
@@ -157,6 +158,8 @@ pub struct LocalLibrary {
     asked: HashSet<String>,
     /// How many albums the songs make.
     albums: usize,
+    /// The songs' files, all told.
+    bytes: u64,
     /// Changes whenever the songs do.
     generation: u64,
     progress: Arc<Progress>,
@@ -179,6 +182,7 @@ impl LocalLibrary {
             found_dirty: false,
             asked: HashSet::new(),
             albums: 0,
+            bytes: 0,
             generation: 0,
             progress: Arc::default(),
             folders: Arc::default(),
@@ -266,7 +270,7 @@ impl LocalLibrary {
     }
 
     fn take(&mut self, built: Built) {
-        let Built { mut songs, words, playback, albums, found } = built;
+        let Built { mut songs, words, playback, albums, bytes, found } = built;
         // Pictures found since the scan read the file of them.
         for (key, found) in found {
             self.found.entry(key).or_insert(found);
@@ -278,6 +282,7 @@ impl LocalLibrary {
         self.words = words;
         self.playback = playback;
         self.albums = albums;
+        self.bytes = bytes;
         self.generation += 1;
     }
 
@@ -391,6 +396,11 @@ impl LocalLibrary {
     pub fn albums(&self) -> usize {
         self.albums
     }
+
+    /// The size of the songs' files, all told.
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
 }
 
 /// Which picture a song shares: its album's, or its own when it has none.
@@ -432,6 +442,7 @@ pub fn loose(text: &str) -> String {
 /// A scan's entries as songs, sorted, with their words for search: the
 /// slow part, done on the scan's thread.
 fn build(entries: Vec<Entry>, found: HashMap<String, Found>) -> Built {
+    let bytes = entries.iter().filter(|e| e.meta.is_some()).map(|e| e.size).sum();
     let mut rows: Vec<(Track, Playback, (String, String, u32, u32))> = entries
         .into_iter()
         .filter_map(|entry| {
@@ -490,7 +501,7 @@ fn build(entries: Vec<Entry>, found: HashMap<String, Found>) -> Built {
         .filter_map(|t| t.album.as_ref().map(|a| (a.name.as_str(), Path::new(t.file.as_deref().unwrap_or_default()).parent())))
         .collect::<HashSet<_>>()
         .len();
-    Built { songs, words, playback, albums, found }
+    Built { songs, words, playback, albums, bytes, found }
 }
 
 /// Whether an id is a song on this PC's rather than YouTube's.

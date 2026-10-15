@@ -387,6 +387,29 @@ fn storage(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
     });
 }
 
+/// The widths of a bar's segments for their shares of `total`: each at
+/// least `least`, the larger ones narrowed in proportion to make room.
+fn segment_widths(shares: &[f32], total: f32, least: f32) -> Vec<f32> {
+    let least = least.min(total / shares.len().max(1) as f32);
+    let mut small = vec![false; shares.len()];
+    // Raising one to the least can push another under it: settle.
+    loop {
+        let fixed = small.iter().filter(|s| **s).count() as f32 * least;
+        let rest: f32 = shares.iter().zip(&small).filter(|(_, s)| !**s).map(|(v, _)| v).sum::<f32>().max(f32::EPSILON);
+        let room = (total - fixed).max(0.0);
+        let mut changed = false;
+        for (i, share) in shares.iter().enumerate() {
+            if !small[i] && share / rest * room < least {
+                small[i] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            return shares.iter().zip(&small).map(|(v, s)| if *s { least } else { v / rest * room }).collect();
+        }
+    }
+}
+
 /// What the app keeps on this PC, as one bar of a colour per kind, with a
 /// key beneath: pointing at either picks out that kind.
 fn storage_bar(ui: &mut Ui, sizes: Option<crate::app::Storage>) {
@@ -410,7 +433,8 @@ fn storage_bar(ui: &mut Ui, sizes: Option<crate::app::Storage>) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         ui.label(RichText::new(megabytes(total)).font(theme::bold(22.0)));
-        ui.label(RichText::new("used by Native YTM").color(theme::TEXT_DIM));
+        let whose = if sizes.music > 0 { "used by Native YTM and your music" } else { "used by Native YTM" };
+        ui.label(RichText::new(whose).color(theme::TEXT_DIM));
         if let Some(free) = sizes.free {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(RichText::new(format!("{} free on this drive", megabytes(free))).color(theme::TEXT_DIM).font(theme::regular(13.0)));
@@ -426,13 +450,17 @@ fn storage_bar(ui: &mut Ui, sizes: Option<crate::app::Storage>) {
     let painter = ui.painter();
     painter.rect_filled(rect, CornerRadius::same(7), theme::SURFACE_ACTIVE);
     let shown: Vec<usize> = (0..parts.len()).filter(|i| parts[*i].1 > 0).collect();
+    // Each grows into its share; however small, wide enough to be seen
+    // and pointed at, the rest giving way.
+    let shares: Vec<f32> = shown
+        .iter()
+        .map(|&i| ui.ctx().animate_value_with_time(id.with(i), parts[i].1 as f32 / total.max(1) as f32, 0.45))
+        .collect();
+    let widths = segment_widths(&shares, rect.width(), 12.0);
     let mut x = rect.left();
-    for (n, &i) in shown.iter().enumerate() {
-        let (_, bytes, color) = parts[i];
-        // Each grows into its share; a sliver at least, to be seen.
-        let share = bytes as f32 / total.max(1) as f32;
-        let share = ui.ctx().animate_value_with_time(id.with(i), share, 0.45);
-        let width = (share * rect.width()).max(3.0).min(rect.right() - x);
+    for (n, (&i, width)) in shown.iter().zip(widths).enumerate() {
+        let (_, _, color) = parts[i];
+        let width = width.min(rect.right() - x);
         let segment = Rect::from_min_max(pos2(x, rect.top()), pos2(x + width, rect.bottom()));
         let first = n == 0;
         let last = n + 1 == shown.len();
@@ -815,5 +843,24 @@ fn megabytes(bytes: u64) -> String {
         format!("{mb:.0} MB")
     } else {
         format!("{:.0} KB", (bytes as f64 / 1024.0).max(1.0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::segment_widths;
+
+    #[test]
+    fn small_segments_stay_visible() {
+        // Lyrics at a ten-thousandth of the bar still get the least width,
+        // and the whole stays the bar's width.
+        let widths = segment_widths(&[0.9, 0.0999, 0.0001], 1000.0, 12.0);
+        assert_eq!(widths[2], 12.0);
+        assert!((widths.iter().sum::<f32>() - 1000.0).abs() < 0.01);
+        assert!(widths[0] > widths[1] && widths[1] > 12.0);
+        // Two small ones, one pushed under the least by the other's room.
+        let widths = segment_widths(&[0.98, 0.012, 0.008], 300.0, 12.0);
+        assert_eq!((widths[1], widths[2]), (12.0, 12.0));
+        assert!((widths[0] - 276.0).abs() < 0.01);
     }
 }

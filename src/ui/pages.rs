@@ -125,9 +125,19 @@ fn browse(app: &mut App, ui: &mut Ui, route: &Route, key: &str) {
                 Route::Browse { browse_id, .. } => browse_id.as_str(),
                 _ => "",
             };
+            // An artist's description, up top rather than at the foot.
+            let mut about = None;
             if let Some(header) = &page.header {
                 if header.banner || browse_id.starts_with("UC") && header.channel_id.is_some() {
                     artist_header(ui, &mut cx, header, stats);
+                    about = page.sections.iter().position(|s| s.layout == crate::api::model::Layout::Text && s.text.is_some());
+                    if let Some(text) = about.and_then(|i| page.sections[i].text.as_ref()) {
+                        let width = ui.available_width().min(760.0);
+                        ui.allocate_ui_with_layout(vec2(width, 0.0), Layout::top_down(Align::Min), |ui| {
+                            widgets::read_more(ui, egui::Id::new(("artist-about", browse_id)), text, theme::regular(14.5), theme::TEXT_DIM, width, 3);
+                        });
+                        ui.add_space(28.0);
+                    }
                 } else {
                     collection_header(ui, &mut cx, header, page, browse_id);
                 }
@@ -159,7 +169,7 @@ fn browse(app: &mut App, ui: &mut Ui, route: &Route, key: &str) {
                     ui.label(RichText::new("Nothing here yet").color(theme::TEXT_DIM));
                 });
             }
-            for (index, section) in page.sections.iter().enumerate() {
+            for (index, section) in page.sections.iter().enumerate().filter(|(i, _)| Some(*i) != about) {
                 widgets::section(ui, &mut cx, section, key, index);
                 ui.add_space(28.0);
             }
