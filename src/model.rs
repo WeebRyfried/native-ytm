@@ -270,6 +270,8 @@ pub enum Action {
     CopyLink(String),
     OpenUrl(String),
     ClearImageCache,
+    /// Deletes the lyrics kept on disk.
+    ClearLyricsCache,
     /// Deletes the songs kept from plays.
     ClearSongCache,
     /// Downloads songs for offline listening.

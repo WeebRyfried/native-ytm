@@ -254,7 +254,7 @@ pub struct Suggestions {
     pub items: Vec<Item>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Lyrics {
     pub text: String,
     pub source: Option<String>,
@@ -262,7 +262,7 @@ pub struct Lyrics {
     pub lines: Vec<LyricLine>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct LyricLine {
     /// Seconds into the song.
     pub time: f64,

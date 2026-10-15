@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="../../releases/latest"><img src="https://img.shields.io/badge/download-v0.2.4-ff0033?style=flat-square" alt="Download v0.2.4"></a>
+  <a href="../../releases/latest"><img src="https://img.shields.io/badge/download-v0.2.5-ff0033?style=flat-square" alt="Download v0.2.5"></a>
   <img src="https://img.shields.io/badge/Windows-x64-0078D4?style=flat-square&logo=windows11&logoColor=white" alt="Windows x64">
   <img src="https://img.shields.io/badge/Rust-2024-B7410E?style=flat-square&logo=rust&logoColor=white" alt="Rust 2024">
   <img src="https://img.shields.io/badge/UI-egui%20%2B%20OpenGL-1f1f1f?style=flat-square" alt="egui and OpenGL">
@@ -38,9 +38,14 @@ sounds as good as your account allows.
 - **Premium quality.** With Music Premium, 256 kb/s Opus or AAC. A song
   starts in under a second and switches up to Premium mid-song, without a
   gap, the full-window player showing it happen, codec symbol and all.
-- **Gapless or crossfaded.** Songs follow without a gap, or fade into one
-  another over 1 to 12 seconds (an album still plays as one piece); Opus
-  and AAC, levelled the way YouTube Music levels them, never a click.
+- **Gapless, or a smart crossfade.** Songs follow without a gap, or fade
+  into one another where they go quiet: the last 15 seconds of one and the
+  first 15 of the next are looked at, the silence between them cut, and
+  the fade-out (or the next song's soft intro) overlapped, up to 12 seconds
+  (an album still plays as one piece). Levelled the way YouTube Music
+  levels them, never a click.
+- **The codec, with its symbol**: Opus, AAC, FLAC, MP3, WAV, AIFF, ALAC or
+  Vorbis, and the bitrate, under the title in the full-window player.
 - **Equalizer.** Ten bands with presets (Bass boost, Vocal, Rock, Late
   night…) or a curve of your own, heard the moment you move a band.
 
@@ -50,6 +55,11 @@ sounds as good as your account allows.
   wherever they appear, and play without the network.
 - **Songs kept on disk.** The last 100 songs you heard (or as many as you
   like) stay on disk too, so they start at once and play offline.
+- **Lyrics kept too**, once found: they show at once the next time, and
+  offline.
+- **What it all takes**, in Settings: one bar of a colour per kind
+  (downloads, songs kept, artwork, lyrics…) and the space left on the
+  drive.
 - **Knows when you're offline.** Downloaded songs carry on, the queue skips
   to the next song on disk, pages wait, and everything picks up again on its
   own when the connection is back.
@@ -76,8 +86,9 @@ sounds as good as your account allows.
 - Search finds Japanese titles by how they read: "torikago" finds トリカゴ.
 - Songs without artwork get their album's from Last.fm (or YouTube Music).
 - Artists lead to a page of their own, as on YouTube Music: their picture,
-  Last.fm's listeners, story, tags, popular songs, albums and similar
-  artists, your plays, and their songs on this PC.
+  their story up top (a few lines, the rest a click away), Last.fm's
+  listeners, tags, popular songs, albums and similar artists, your plays,
+  and their songs on this PC.
 
 **Your music**
 - Home, Explore, moods and charts, search with suggestions, albums,
@@ -94,7 +105,8 @@ sounds as good as your account allows.
 - **Discord**: "Listening to" the artist, with the artwork, the song and a
   progress bar on your profile.
 - **Last.fm**: scrobbling and now playing, and in the player bar how many
-  times you've played the song and the artist.
+  times you've played the song and the artist; on an artist's page, how
+  often you've scrobbled them.
 - **Updates in one click.** A new version shows in the top bar: one click
   downloads it, checks it against the digest GitHub publishes, and restarts
   into it, the music carrying on where it was.
@@ -188,11 +200,11 @@ cargo build --release
 | Network | `src/backend.rs` | a two-thread tokio runtime; the interface never waits on it |
 | API | `src/api/` | InnerTube (`WEB_REMIX`) requests and the parsers that turn renderers into the model; LRCLIB for synced lyrics |
 | Streams | `src/stream.rs` | finds a stream for a song (below) |
-| Audio | `src/player/` | range downloader (or a file read as it plays), symphonia (MP4, WebM, AAC, and MP3, FLAC, Vorbis, ALAC, WAV for local files), libopus for Opus, rubato resampler, crossfades, the equaliser (`eq.rs`, in the audio callback), fastframe-audio output |
+| Audio | `src/player/` | range downloader (or a file read as it plays), symphonia (MP4, WebM, AAC, and MP3, FLAC, Vorbis, ALAC, WAV for local files), libopus for Opus, rubato resampler, the smart crossfade (`smart.rs`: where the songs go quiet), the equaliser (`eq.rs`, in the audio callback), fastframe-audio output |
 | Music on this PC | `src/local.rs` | the folder scan (a thread at background priority), tags and pictures read once into an index, search (with readings of Japanese names), artwork found online |
 | Updates | `src/update.rs` | the latest GitHub release, the download checked against its SHA-256 digest, the running program renamed aside for the new one |
 | Lyric readings | `src/readings.rs` | Japanese words read longest match first from a table made from JMdict, then put in romaji or hiragana |
-| Songs on disk | `src/cache.rs` | downloads, and whole files kept from plays (the best quality heard, the least recently played going first) |
+| Songs on disk | `src/cache.rs`, `src/lyrics.rs` | downloads, and whole files kept from plays (the best quality heard, the least recently played going first); lyrics once found |
 | Offline | `src/net.rs` | whether there is internet, from Windows' Network List Manager, asked when a request fails and while offline |
 | Desktop | `src/discord.rs`, `src/lastfm.rs`, `src/platform.rs` | Discord's local pipe, Last.fm's API, DPAPI, the app's identity for the media flyout |
 
@@ -260,7 +272,7 @@ and decoding. [egui and eframe](https://github.com/emilk/egui)
 [th-ch/youtube-music](https://github.com/th-ch/youtube-music) for its Discord
 application. Icons from [Lucide](https://lucide.dev) (ISC); the Last.fm mark
 from [Simple Icons](https://simpleicons.org) (CC0); the Opus and AAC symbols
-from Wikimedia Commons. Those marks belong to their owners. The
+from Wikimedia Commons (the other formats' are the app's own). Those marks belong to their owners. The
 [Inter](https://rsms.me/inter/) typeface (SIL OFL 1.1).
 
 MIT licensed. An independent project, not affiliated with Google or YouTube.

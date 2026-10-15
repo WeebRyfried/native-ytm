@@ -266,13 +266,20 @@ fn quality_chip(ui: &mut Ui, quality: Option<&str>, upgrade: Option<&Upgrade>) {
 /// The codec's symbol for a label such as "OPUS 257 KB/S": its image and
 /// its width for its height.
 fn codec_mark(label: &str) -> Option<(&'static str, &'static [u8], f32)> {
-    if label.starts_with("OPUS") {
-        Some(("bytes://codec-opus.svg", include_bytes!("../../assets/codecs/opus.svg"), 193.2 / 129.2))
-    } else if label.starts_with("AAC") {
-        Some(("bytes://codec-aac.svg", include_bytes!("../../assets/codecs/aac.svg"), 908.0 / 783.0))
-    } else {
-        None
-    }
+    const MARKS: [(&str, &str, &[u8], f32); 8] = [
+        ("OPUS", "bytes://codec-opus.svg", include_bytes!("../../assets/codecs/opus.svg"), 193.2 / 129.2),
+        ("AAC", "bytes://codec-aac.svg", include_bytes!("../../assets/codecs/aac.svg"), 908.0 / 783.0),
+        ("FLAC", "bytes://codec-flac.svg", include_bytes!("../../assets/codecs/flac.svg"), 24.0 / 20.0),
+        ("MP3", "bytes://codec-mp3.svg", include_bytes!("../../assets/codecs/mp3.svg"), 1.0),
+        ("WAV", "bytes://codec-wav.svg", include_bytes!("../../assets/codecs/wav.svg"), 31.0 / 20.0),
+        ("AIFF", "bytes://codec-aiff.svg", include_bytes!("../../assets/codecs/aiff.svg"), 31.0 / 20.0),
+        ("ALAC", "bytes://codec-alac.svg", include_bytes!("../../assets/codecs/alac.svg"), 1.0),
+        ("VORBIS", "bytes://codec-vorbis.svg", include_bytes!("../../assets/codecs/vorbis.svg"), 1.0),
+    ];
+    MARKS
+        .iter()
+        .find(|(name, ..)| label.split_whitespace().next() == Some(name))
+        .map(|&(_, uri, bytes, aspect)| (uri, bytes, aspect))
 }
 
 /// Eases to 1 with a small overshoot, for things that pop in.

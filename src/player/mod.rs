@@ -10,6 +10,7 @@ pub mod eq;
 mod opus;
 pub mod output;
 mod resample;
+pub mod smart;
 pub mod source;
 
 use std::collections::VecDeque;
@@ -423,18 +424,19 @@ struct Next {
     crossfade: bool,
 }
 
-/// The next song fading in over the end of the one playing.
+/// The next song, about to fade in over the end of the one playing: the
+/// ending's last seconds and the next song's first, decoded and held back
+/// while the smart crossfade finds where they meet (see [`smart`]).
 struct Incoming {
     token: u64,
     stream: StreamInfo,
     decoding: Decoding,
-    /// Its decoded samples not yet mixed in.
-    fifo: VecDeque<f32>,
-    /// The fade's length, and how far it has come, in output frames.
-    total: usize,
-    done: usize,
-    /// Its own time at the next frame mixed in.
-    time: Duration,
+    /// The song ending, from its decoder's time on: not yet queued.
+    held: Vec<f32>,
+    /// The song ending has no more: all that is left of it is held.
+    ended: bool,
+    /// The next song's start.
+    head: Vec<f32>,
 }
 
 /// What one packet of a stream gave.
@@ -1035,8 +1037,15 @@ impl Engine {
         if self.output.is_none() {
             return false;
         }
+        if let Some(incoming) = &self.incoming {
+            // Looking ahead goes on whatever is queued, until as much of
+            // the ending is held as is looked at.
+            let (rate, channels) = self.out_format();
+            let held = frames_to_time(incoming.held.len() / channels, rate);
+            return incoming.ended || held < smart::SCAN || self.queued() < AHEAD;
+        }
         let work = match &self.current {
-            Some(decoding) => !decoding.finished || self.next.is_some() || self.incoming.is_some(),
+            Some(decoding) => !decoding.finished || self.next.is_some(),
             None => false,
         };
         let queued = self.queued();
@@ -1074,7 +1083,7 @@ impl Engine {
             return self.crossfade_step(out_rate, out_channels, normalize);
         }
         if self.crossfade_due() {
-            self.start_crossfade(out_rate);
+            self.start_crossfade();
             if self.incoming.is_some() {
                 return true;
             }
@@ -1112,8 +1121,8 @@ impl Engine {
         true
     }
 
-    /// The song playing is within a crossfade of its end, and the next may
-    /// fade in over it.
+    /// The song playing is within the stretch the smart crossfade looks at,
+    /// and the next may fade in over it.
     fn crossfade_due(&self) -> bool {
         if self.crossfade.is_zero() || !self.next.as_ref().is_some_and(|next| next.crossfade) {
             return false;
@@ -1125,32 +1134,31 @@ impl Engine {
             return false;
         };
         let left = duration.saturating_sub(current.next_time);
-        // A fade much shorter than asked for is not worth it.
-        left <= self.crossfade && left >= Duration::from_millis(800)
+        // Too little left to look at is not worth it.
+        left <= smart::SCAN && left >= Duration::from_secs(1)
     }
 
-    /// Opens the next song to fade in over what is left of this one.
-    fn start_crossfade(&mut self, out_rate: u32) {
-        let left = match self.current.as_ref().and_then(|c| Some(c.stream.duration?.saturating_sub(c.next_time))) {
-            Some(left) => left,
-            None => return,
-        };
+    /// Opens the next song, to look at its start beside this one's end.
+    fn start_crossfade(&mut self) {
         let Some(mut next) = self.next.take() else {
             return;
         };
         let opened = next.opened.take();
         match self.open(next.token, next.stream.clone(), Duration::ZERO, opened) {
             Ok(decoding) => {
-                log::info!("crossfading over {:.1} s", left.as_secs_f64());
                 self.incoming = Some(Incoming {
                     token: next.token,
                     stream: next.stream,
                     decoding,
-                    fifo: VecDeque::new(),
-                    total: (duration_to_frames(left, out_rate) as usize).max(1),
-                    done: 0,
-                    time: Duration::ZERO,
+                    held: Vec::new(),
+                    ended: false,
+                    head: Vec::new(),
                 });
+                // Opening made the next song the source to interrupt; the
+                // song playing is still the one being read.
+                if let Some(current) = &self.current {
+                    *self.shared.source.lock() = Some(current.source.clone());
+                }
             }
             Err(OpenError::Interrupted) => self.next = Some(next),
             Err(OpenError::Failed { message, expired }) => {
@@ -1166,84 +1174,122 @@ impl Engine {
         }
     }
 
-    /// One packet of the song ending, mixed with as much of the song coming
-    /// in: the one fading out as the other fades in, at equal power. The
-    /// mix goes into the queue as the new song's, so it is shown from the
-    /// fade's start.
+    /// One packet of looking ahead: the rest of the song ending, then the
+    /// start of the next; once both are in hand, they are joined.
     fn crossfade_step(&mut self, out_rate: u32, out_channels: usize, normalize: bool) -> bool {
         let channels = out_channels.max(1);
-        let (samples, ended) = match self.current.as_mut().map(|c| c.next_block(out_rate, out_channels, normalize)) {
-            Some(Block::Samples(samples)) => (samples, false),
-            Some(Block::End(samples)) => (samples, true),
-            Some(Block::Nothing) => return true,
-            Some(Block::Interrupted) => return false,
-            Some(Block::Failed { message, .. }) => {
-                // The song ending gives out early: the new one carries on.
-                log::warn!("stream failed in a crossfade: {message}");
-                (Vec::new(), true)
-            }
-            None => (Vec::new(), true),
-        };
-        let Some(incoming) = self.incoming.as_mut() else {
+        let Some(mut incoming) = self.incoming.take() else {
             return false;
         };
-        // Enough of the new song to mix with.
-        while incoming.fifo.len() < samples.len() && !incoming.decoding.finished {
+        let scan = duration_to_frames(smart::SCAN, out_rate) as usize * channels;
+        if !incoming.ended {
+            match self.current.as_mut().map(|c| c.next_block(out_rate, out_channels, normalize)) {
+                Some(Block::Samples(samples)) => incoming.held.extend(samples),
+                Some(Block::End(samples)) => {
+                    incoming.held.extend(samples);
+                    incoming.ended = true;
+                }
+                Some(Block::Nothing) => {}
+                Some(Block::Interrupted) => {
+                    self.incoming = Some(incoming);
+                    return false;
+                }
+                Some(Block::Failed { message, .. }) => {
+                    // The song ending gives out early: the next follows on.
+                    log::warn!("stream failed before a crossfade: {message}");
+                    incoming.ended = true;
+                }
+                None => incoming.ended = true,
+            }
+            // More of the ending than is looked at goes to the device.
+            if incoming.held.len() > scan {
+                let extra = (incoming.held.len() - scan) / channels * channels;
+                self.release(&mut incoming, extra, out_rate, channels);
+            }
+        } else if incoming.head.len() < scan && !incoming.decoding.finished {
             match incoming.decoding.next_block(out_rate, out_channels, normalize) {
-                Block::Samples(more) | Block::End(more) => incoming.fifo.extend(more),
+                Block::Samples(samples) | Block::End(samples) => incoming.head.extend(samples),
                 Block::Nothing => {}
-                Block::Interrupted => return false,
+                Block::Interrupted => {
+                    self.incoming = Some(incoming);
+                    return false;
+                }
                 Block::Failed { message, expired } => {
-                    let token = incoming.token;
-                    self.incoming = None;
-                    log::warn!("the song fading in failed: {message}");
+                    // The next song cannot play: the ending is heard as it
+                    // is, and the app hears why.
+                    log::warn!("the song to fade in failed: {message}");
+                    let held = std::mem::take(&mut incoming.held);
+                    self.release(&mut incoming, held.len(), out_rate, channels);
+                    if self.current.as_ref().is_none_or(|c| c.finished) && self.next.is_none() {
+                        self.queue.lock().end_of_stream = true;
+                    }
                     self.send(Event::Failed {
-                        token,
+                        token: incoming.token,
                         message,
                         expired,
                         position: Duration::ZERO,
                     });
-                    if let Some(current) = &mut self.current {
-                        current.deliver(&self.queue, &samples, out_rate, out_channels);
-                    }
                     return true;
                 }
             }
+        } else {
+            self.join(incoming, out_rate, channels);
+            return true;
         }
-        let frames = samples.len() / channels;
-        let total = incoming.total as f32;
-        let mut mixed = Vec::with_capacity(samples.len());
-        for (f, frame) in samples.chunks_exact(channels).enumerate() {
-            let t = ((incoming.done + f) as f32 / total).min(1.0) * std::f32::consts::FRAC_PI_2;
-            let (out_gain, in_gain) = (t.cos(), t.sin());
-            for &sample in frame {
-                mixed.push(sample * out_gain + incoming.fifo.pop_front().unwrap_or(0.0) * in_gain);
-            }
+        // The device is not left to run dry while this goes on.
+        if self.queued() < Duration::from_secs(1) {
+            let second = (out_rate as usize * channels).min(incoming.held.len());
+            self.release(&mut incoming, second, out_rate, channels);
         }
-        incoming.done += frames;
-        self.queue.lock().push(incoming.token, incoming.time, &mixed, channels, out_rate);
-        incoming.time += frames_to_time(frames, out_rate);
-        if let Some(current) = &mut self.current {
-            current.next_time += frames_to_time(frames, out_rate);
-        }
-        if ended || incoming.done >= incoming.total {
-            // Over: the new song is the one playing, the rest of the old
-            // one (silent by now) let go.
-            let Some(incoming) = self.incoming.take() else {
-                return true;
-            };
-            let rest: Vec<f32> = incoming.fifo.into_iter().collect();
-            let mut decoding = incoming.decoding;
-            decoding.next_time = incoming.time;
-            decoding.deliver(&self.queue, &rest, out_rate, out_channels);
-            *self.shared.source.lock() = Some(decoding.source.clone());
-            let finished = decoding.finished;
-            self.current = Some(decoding);
-            if finished && self.next.is_none() {
-                self.queue.lock().end_of_stream = true;
-            }
-        }
+        self.incoming = Some(incoming);
         true
+    }
+
+    /// The first `samples` of the ending held back, to the device after all.
+    fn release(&mut self, incoming: &mut Incoming, samples: usize, out_rate: u32, channels: usize) {
+        let samples = samples.min(incoming.held.len());
+        if samples == 0 {
+            return;
+        }
+        if let Some(current) = &mut self.current {
+            current.deliver(&self.queue, &incoming.held[..samples], out_rate, channels);
+        }
+        incoming.held.drain(..samples);
+    }
+
+    /// The two songs joined where they meet: the ending alone, then the
+    /// overlap (queued as the next song's, so it shows from there on), then
+    /// the next song alone. The silences around the join are left out.
+    fn join(&mut self, incoming: Incoming, out_rate: u32, channels: usize) {
+        let Incoming { token, mut decoding, held, head, .. } = incoming;
+        let plan = smart::plan(&held, &head, channels, out_rate, self.crossfade);
+        let secs = |frames: usize| frames as f64 / f64::from(out_rate);
+        log::info!(
+            "smart crossfade: {:.1} s overlapped, {:.1} s of silence cut from the end and {:.1} s from the start",
+            secs(plan.overlap),
+            secs(plan.cut(held.len() / channels)),
+            secs(plan.skip)
+        );
+        let solo = plan.solo * channels;
+        let overlap = plan.overlap * channels;
+        if let Some(current) = &mut self.current {
+            current.deliver(&self.queue, &held[..solo], out_rate, channels);
+        }
+        let skip = (plan.skip * channels).min(head.len());
+        let next = &head[skip..];
+        let mixed = smart::mix(&held[solo..solo + overlap], &next[..overlap.min(next.len())], channels);
+        let start = frames_to_time(plan.skip, out_rate);
+        self.queue.lock().push(token, start, &mixed, channels, out_rate);
+        decoding.next_time = start + frames_to_time(plan.overlap, out_rate);
+        if next.len() > overlap {
+            decoding.deliver(&self.queue, &next[overlap..], out_rate, channels);
+        }
+        *self.shared.source.lock() = Some(decoding.source.clone());
+        let finished = decoding.finished;
+        self.current = Some(decoding);
+        if finished && self.next.is_none() {
+            self.queue.lock().end_of_stream = true;
+        }
     }
 
     /// The current stream is fully decoded: carry on with the preloaded

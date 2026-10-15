@@ -63,6 +63,15 @@ pub struct Plays {
     pub artist: Option<u64>,
 }
 
+/// An artist's numbers on Last.fm: the person's plays of them, and
+/// everyone's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ArtistStats {
+    pub plays: Option<u64>,
+    pub listeners: Option<u64>,
+    pub scrobbles: Option<u64>,
+}
+
 /// A song's key for its counts: artist and title, as Last.fm matches them.
 type PlaysKey = (String, String);
 
@@ -84,6 +93,7 @@ enum Done {
     Scrobbled { count: usize, result: Result<(), ApiError> },
     NowPlaying(Result<(), ApiError>),
     Plays { key: PlaysKey, plays: Plays },
+    Artist { key: String, stats: Option<ArtistStats> },
 }
 
 #[derive(Debug)]
@@ -131,6 +141,10 @@ pub struct LastFm {
     /// Play counts by song, and those being asked for.
     plays: HashMap<PlaysKey, Plays>,
     asking: HashSet<PlaysKey>,
+    /// Artists' numbers, by name in lower case (None: Last.fm knows them
+    /// not), and those being asked for.
+    artists: HashMap<String, Option<ArtistStats>>,
+    asking_artists: HashSet<String>,
 }
 
 impl LastFm {
@@ -165,6 +179,8 @@ impl LastFm {
             wake,
             plays: HashMap::new(),
             asking: HashSet::new(),
+            artists: HashMap::new(),
+            asking_artists: HashSet::new(),
         }
     }
 
@@ -208,6 +224,36 @@ impl LastFm {
         None
     }
 
+    /// An artist's numbers, the person's plays among them, once Last.fm has
+    /// said; asks the first time. None when not connected, or not known.
+    pub fn artist_stats(&mut self, artist: &str) -> Option<ArtistStats> {
+        let user = self.stored.user.clone().filter(|_| self.stored.session.is_some())?;
+        let key = artist.trim().to_lowercase();
+        if let Some(stats) = self.artists.get(&key) {
+            return *stats;
+        }
+        if self.asking_artists.insert(key.clone()) {
+            if self.artists.len() > 300 {
+                self.artists.clear();
+            }
+            let (http, stored, send) = (self.http.clone(), self.stored.clone(), self.sender());
+            let artist = artist.to_owned();
+            self.runtime.spawn(async move {
+                let params = [("artist", artist.as_str()), ("username", user.as_str())];
+                let stats = read(&http, &stored, "artist.getInfo", &params).await.ok().map(|v| {
+                    let stats = &v["artist"]["stats"];
+                    ArtistStats {
+                        plays: count(&stats["userplaycount"]),
+                        listeners: count(&stats["listeners"]),
+                        scrobbles: count(&stats["playcount"]),
+                    }
+                });
+                send(Done::Artist { key, stats });
+            });
+        }
+        None
+    }
+
     /// What reads Last.fm with the person's API account (no session
     /// needed): artists' pages, artwork. None without an account.
     pub fn reader(&self) -> Option<Reader> {
@@ -221,6 +267,7 @@ impl LastFm {
     /// are asked again.
     pub fn forget_unanswered(&mut self) {
         self.plays.retain(|_, plays| plays.track.is_some() || plays.artist.is_some());
+        self.artists.retain(|_, stats| stats.is_some());
     }
 
     /// The song's page on Last.fm.
@@ -264,6 +311,7 @@ impl LastFm {
         self.stored.session = None;
         self.stored.user = None;
         self.plays.clear();
+        self.artists.clear();
         self.authorising = None;
         self.play = None;
         self.save();
@@ -362,6 +410,9 @@ impl LastFm {
             if let Some(plays) = self.plays.get_mut(&plays_key(&play.scrobble.artist, &play.scrobble.track)) {
                 plays.track = plays.track.map(|n| n + 1);
                 plays.artist = plays.artist.map(|n| n + 1);
+            }
+            if let Some(Some(stats)) = self.artists.get_mut(&play.scrobble.artist.trim().to_lowercase()) {
+                stats.plays = Some(stats.plays.unwrap_or(0) + 1);
             }
             self.pending.push(play.scrobble.clone());
             self.save_queue();
@@ -508,6 +559,10 @@ impl LastFm {
                 Done::Plays { key, plays } => {
                     self.asking.remove(&key);
                     self.plays.insert(key, plays);
+                }
+                Done::Artist { key, stats } => {
+                    self.asking_artists.remove(&key);
+                    self.artists.insert(key, stats);
                 }
             }
         }

@@ -392,14 +392,3 @@ pub fn clear_cache(dir: &Path) -> u64 {
     freed
 }
 
-pub fn cache_size(dir: &Path) -> u64 {
-    std::fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter_map(|e| e.metadata().ok())
-                .map(|m| m.len())
-                .sum()
-        })
-        .unwrap_or(0)
-}

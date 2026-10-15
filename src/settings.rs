@@ -36,7 +36,8 @@ pub struct Settings {
     pub autoplay: bool,
     /// Songs follow one another without a pause (off: a moment of silence).
     pub gapless: bool,
-    /// Each song fades into the next, over `crossfade_secs`.
+    /// Each song fades into the next where it goes quiet (the smart
+    /// crossfade), overlapping by `crossfade_secs` at most.
     pub crossfade: bool,
     pub crossfade_secs: f32,
     pub repeat: Repeat,
@@ -189,6 +190,10 @@ impl Paths {
 
     pub fn images(&self) -> PathBuf {
         self.cache.join("images")
+    }
+
+    pub fn lyrics(&self) -> PathBuf {
+        self.cache.join("lyrics")
     }
 
     pub fn songs(&self) -> PathBuf {

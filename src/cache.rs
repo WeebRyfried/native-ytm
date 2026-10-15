@@ -443,6 +443,20 @@ fn unix_now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
 
+/// The bytes of every file under `dir`.
+pub fn dir_size(dir: &Path) -> u64 {
+    std::fs::read_dir(dir).map_or(0, |entries| {
+        entries
+            .flatten()
+            .map(|entry| match entry.file_type() {
+                Ok(kind) if kind.is_dir() => dir_size(&entry.path()),
+                Ok(_) => entry.metadata().map_or(0, |m| m.len()),
+                Err(_) => 0,
+            })
+            .sum()
+    })
+}
+
 /// The path of a `file:` stream address.
 pub fn file_of(url: &str) -> Option<&Path> {
     url.strip_prefix("file:").map(Path::new)

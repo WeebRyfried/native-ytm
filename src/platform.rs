@@ -258,6 +258,24 @@ pub fn pick_folder(_title: &str) -> Option<std::path::PathBuf> {
 }
 
 /// Waits up to `limit` for another process to end.
+/// The space free on the drive `path` is on, for this user.
+#[cfg(windows)]
+pub fn free_space(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut free = 0u64;
+    // SAFETY: `wide` is a NUL-terminated path alive for the call; the
+    // totals not wanted are null.
+    let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut free, std::ptr::null_mut(), std::ptr::null_mut()) };
+    (ok != 0).then_some(free)
+}
+
+#[cfg(not(windows))]
+pub fn free_space(_path: &Path) -> Option<u64> {
+    None
+}
+
 #[cfg(windows)]
 pub fn wait_for_exit(pid: u32, limit: std::time::Duration) {
     use windows_sys::Win32::Foundation::CloseHandle;

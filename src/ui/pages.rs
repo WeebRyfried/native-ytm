@@ -83,6 +83,16 @@ fn browse(app: &mut App, ui: &mut Ui, route: &Route, key: &str) {
     }
     let state = app.pages.get(key).expect("checked");
     let loading_more = state.loading_more || state.loading_tracks;
+    // An artist's page: their numbers on Last.fm, the person's plays too.
+    let artist = match (&state.data, route) {
+        (Loadable::Ready(page), Route::Browse { browse_id, .. }) => page
+            .header
+            .as_ref()
+            .filter(|h| h.banner || browse_id.starts_with("UC") && h.channel_id.is_some())
+            .map(|h| h.title.clone()),
+        _ => None,
+    };
+    let stats = artist.and_then(|name| app.lastfm.artist_stats(&name));
     let current = app.queue.current_track().map(|t| t.video_id.clone());
     let playing = app.playing();
     let signed_in = app.signed_in;
@@ -117,7 +127,7 @@ fn browse(app: &mut App, ui: &mut Ui, route: &Route, key: &str) {
             };
             if let Some(header) = &page.header {
                 if header.banner || browse_id.starts_with("UC") && header.channel_id.is_some() {
-                    artist_header(ui, &mut cx, header);
+                    artist_header(ui, &mut cx, header, stats);
                 } else {
                     collection_header(ui, &mut cx, header, page, browse_id);
                 }
@@ -238,21 +248,8 @@ fn collection_header(ui: &mut Ui, cx: &mut Cx<'_>, header: &Header, page: &Page,
             }
             if let Some(description) = &header.description {
                 ui.add_space(8.0);
-                let mut job = egui::text::LayoutJob::single_section(
-                    description.replace('\n', " "),
-                    egui::TextFormat::simple(theme::regular(14.0), theme::TEXT_DIM),
-                );
-                job.wrap = egui::text::TextWrapping {
-                    max_width: text_w,
-                    max_rows: 3,
-                    break_anywhere: false,
-                    overflow_character: Some('\u{2026}'),
-                };
-                let galley = ui.fonts_mut(|f| f.layout_job(job));
-                let response = ui.label(galley);
-                if description.len() > 200 {
-                    response.on_hover_text(description);
-                }
+                let id = egui::Id::new(("description", browse_id));
+                widgets::read_more(ui, id, description, theme::regular(14.0), theme::TEXT_DIM, text_w, 3);
             }
             ui.add_space(16.0);
             ui.horizontal(|ui| {
@@ -404,7 +401,7 @@ fn play_all(
     });
 }
 
-fn artist_header(ui: &mut Ui, cx: &mut Cx<'_>, header: &Header) {
+fn artist_header(ui: &mut Ui, cx: &mut Cx<'_>, header: &Header, stats: Option<crate::lastfm::ArtistStats>) {
     let width = ui.available_width() + theme::PAGE_MARGIN * 2.0;
     let height = (width * 0.32).clamp(240.0, 400.0);
     let top = ui.cursor().top() - 8.0;
@@ -432,7 +429,7 @@ fn artist_header(ui: &mut Ui, cx: &mut Cx<'_>, header: &Header) {
     let mut child = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(Rect::from_min_max(
-                pos2(rect.left() + theme::PAGE_MARGIN, rect.bottom() - 156.0),
+                pos2(rect.left() + theme::PAGE_MARGIN, rect.bottom() - if stats.is_some() { 184.0 } else { 156.0 }),
                 pos2(rect.right() - theme::PAGE_MARGIN, rect.bottom()),
             ))
             .layout(Layout::top_down(Align::Min)),
@@ -440,6 +437,9 @@ fn artist_header(ui: &mut Ui, cx: &mut Cx<'_>, header: &Header) {
     child.add(egui::Label::new(RichText::new(&header.title).font(theme::bold(46.0)).color(Color32::WHITE)).truncate());
     if let Some(subtitle) = &header.subtitle {
         child.label(RichText::new(subtitle).color(theme::TEXT_DIM).font(theme::regular(14.0)));
+    }
+    if let Some(stats) = stats {
+        lastfm_line(&mut child, stats);
     }
     child.add_space(14.0);
     child.horizontal(|ui| {
@@ -468,6 +468,31 @@ fn artist_header(ui: &mut Ui, cx: &mut Cx<'_>, header: &Header) {
     });
     // The banner's height, less the top margin it reaches into.
     ui.add_space(height + 12.0);
+}
+
+/// The person's scrobbles of an artist, and everyone's listeners, beside
+/// Last.fm's mark.
+fn lastfm_line(ui: &mut Ui, stats: crate::lastfm::ArtistStats) {
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+        Icon::LastFm.image(theme::ACCENT_TEXT, 16.0).paint_at(ui, rect);
+        let mine = match stats.plays.unwrap_or(0) {
+            0 => "Not in your scrobbles yet".to_owned(),
+            1 => "You've scrobbled them once".to_owned(),
+            n => format!("You've scrobbled them {} times", widgets::thousands(n)),
+        };
+        ui.label(RichText::new(mine).font(theme::medium(14.0)).color(theme::ACCENT_TEXT));
+        if let Some(n) = stats.listeners {
+            ui.label(RichText::new(format!("\u{00b7} {} listeners on Last.fm", widgets::thousands(n))).color(theme::TEXT_DIM).font(theme::regular(14.0)));
+        }
+    })
+    .response
+    .on_hover_text(match stats.scrobbles {
+        Some(n) => format!("{} scrobbles of theirs on Last.fm, all told", widgets::thousands(n)),
+        None => "From your Last.fm".to_owned(),
+    });
 }
 
 fn library(app: &mut App, ui: &mut Ui, tab: LibraryTab, key: &str) {
@@ -862,7 +887,35 @@ fn artist(app: &mut App, ui: &mut Ui, name: &str) {
             });
         });
     });
-    ui.add_space(36.0);
+    ui.add_space(28.0);
+
+    // What Last.fm says of them, up top: a few lines, the rest a click away,
+    // and their tags.
+    if let Some(info) = info
+        && (!info.bio.is_empty() || !info.tags.is_empty())
+    {
+        let width = ui.available_width().min(760.0);
+        ui.allocate_ui_with_layout(vec2(width, 0.0), Layout::top_down(Align::Min), |ui| {
+            if !info.bio.is_empty() {
+                let id = egui::Id::new(("artist-bio", &key));
+                widgets::read_more(ui, id, &info.bio, theme::regular(14.5), theme::TEXT_DIM, width, 3);
+                ui.add_space(14.0);
+            }
+            if !info.tags.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                    for tag in &info.tags {
+                        if widgets::chip(ui, tag, false).on_hover_text("Search YouTube Music").clicked() {
+                            cx.push(Action::Search(tag.clone()));
+                        }
+                    }
+                });
+            }
+        });
+        ui.add_space(32.0);
+    } else {
+        ui.add_space(8.0);
+    }
 
     if !songs.is_empty() {
         ui.label(RichText::new("On this PC").font(theme::bold(22.0)));
@@ -972,26 +1025,6 @@ fn artist(app: &mut App, ui: &mut Ui, name: &str) {
             .collect();
         widgets::card_grid(ui, &mut cx, &items);
         ui.add_space(20.0);
-    }
-
-    if !info.bio.is_empty() || !info.tags.is_empty() {
-        ui.label(RichText::new("About").font(theme::bold(22.0)));
-        ui.add_space(10.0);
-        if !info.bio.is_empty() {
-            ui.allocate_ui_with_layout(vec2(ui.available_width().min(760.0), 0.0), Layout::top_down(Align::Min), |ui| {
-                ui.add(egui::Label::new(RichText::new(&info.bio).color(theme::TEXT_DIM).font(theme::regular(14.5))).wrap());
-            });
-            ui.add_space(12.0);
-        }
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
-            for tag in &info.tags {
-                if widgets::chip(ui, tag, false).on_hover_text("Search YouTube Music").clicked() {
-                    cx.push(Action::Search(tag.clone()));
-                }
-            }
-        });
-        ui.add_space(28.0);
     }
 
     if !info.similar.is_empty() {

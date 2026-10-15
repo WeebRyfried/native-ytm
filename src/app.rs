@@ -197,6 +197,8 @@ pub struct App {
     loaded: Option<(u64, StreamInfo)>,
     /// Songs kept on disk.
     pub audio_cache: Arc<crate::cache::AudioCache>,
+    /// Lyrics found before, on disk.
+    pub lyrics_cache: crate::lyrics::LyricsCache,
     /// How each song on disk stands, for the marks beside their names.
     pub offline: HashMap<String, Mark>,
     offline_gen: u64,
@@ -213,8 +215,8 @@ pub struct App {
     history_sent: u64,
     /// Found once, for Settings: whether yt-dlp has a JavaScript runtime.
     js_runtime: Option<bool>,
-    /// The artwork cache's size, and when it was measured.
-    artwork: Option<(u64, Instant)>,
+    /// What is kept on disk, by kind, as last measured.
+    storage: Arc<parking_lot::Mutex<Measured>>,
     /// The Cached page's lists (downloaded, played lately), as of a
     /// generation of the cache.
     cached_lists: Option<(u64, Arc<Vec<Track>>, Arc<Vec<Track>>)>,
@@ -414,6 +416,7 @@ impl App {
             upgrade: None,
             loaded: None,
             audio_cache,
+            lyrics_cache: crate::lyrics::LyricsCache::new(paths.lyrics()),
             offline: HashMap::new(),
             offline_gen: 0,
             marks_dirty: true,
@@ -424,7 +427,7 @@ impl App {
             stalled: false,
             history_sent: 0,
             js_runtime: None,
-            artwork: None,
+            storage: Arc::default(),
             cached_lists: None,
             pending_queue: None,
             extending: false,
@@ -636,16 +639,39 @@ impl App {
         }
     }
 
-    /// The artwork cache's size on disk, measured at most every ten seconds.
-    pub fn artwork_bytes(&mut self) -> u64 {
-        match self.artwork {
-            Some((bytes, at)) if at.elapsed() < Duration::from_secs(10) => bytes,
-            _ => {
-                let bytes = crate::images::cache_size(&self.paths.images());
-                self.artwork = Some((bytes, Instant::now()));
-                bytes
+    /// What the app keeps on disk, by kind: measured on a thread of its
+    /// own at most every ten seconds, so None until first measured.
+    pub fn storage(&mut self) -> Option<Storage> {
+        let usage = self.audio_cache.usage();
+        let mut measured = self.storage.lock();
+        if measured.at.is_none_or(|at| at.elapsed() > Duration::from_secs(10)) && !measured.busy {
+            measured.busy = true;
+            let shared = self.storage.clone();
+            let ctx = self.ctx.clone();
+            let (images, local, lyrics, cache) = (self.paths.images(), self.paths.cache.join("local"), self.paths.lyrics(), self.paths.cache.clone());
+            let other = [self.paths.logs(), self.paths.scratch()];
+            let spawned = std::thread::Builder::new().name("storage".into()).spawn(move || {
+                let sizes = Storage {
+                    artwork: crate::cache::dir_size(&images),
+                    local: crate::cache::dir_size(&local),
+                    lyrics: crate::cache::dir_size(&lyrics),
+                    other: other.iter().map(|d| crate::cache::dir_size(d)).sum(),
+                    free: crate::platform::free_space(&cache),
+                    ..Storage::default()
+                };
+                let mut measured = shared.lock();
+                *measured = Measured { sizes: Some(sizes), at: Some(Instant::now()), busy: false };
+                ctx.request_repaint();
+            });
+            if spawned.is_err() {
+                measured.busy = false;
             }
         }
+        measured.sizes.map(|sizes| Storage {
+            downloads: usage.saved_bytes,
+            recent: usage.kept_bytes,
+            ..sizes
+        })
     }
 
     pub fn playing(&self) -> bool {
@@ -902,6 +928,9 @@ impl App {
                 }
             }
             Response::Lyrics { video_id, result } => {
+                if let Ok(lyrics) = &result {
+                    self.lyrics_cache.put(&video_id, self.settings.synced_lyrics, lyrics);
+                }
                 self.lyrics.insert(
                     video_id,
                     match result {
@@ -1243,6 +1272,12 @@ impl App {
         let Some(track) = self.current().cloned() else {
             return;
         };
+        // Found before: from disk, at once and offline too.
+        if !self.lyrics.contains_key(&track.video_id)
+            && let Some(kept) = self.lyrics_cache.get(&track.video_id, self.settings.synced_lyrics)
+        {
+            self.lyrics.insert(track.video_id.clone(), Loadable::Ready(kept));
+        }
         // A restored song that has not played yet has no info yet.
         if self.now.video_id != track.video_id {
             self.track_info(&track.video_id);
@@ -1909,8 +1944,9 @@ impl App {
             return;
         };
         let left = duration.saturating_sub(self.player.position());
-        // Early enough that a crossfade finds it ready.
-        let ahead = Duration::from_secs(20) + self.settings.transitions().0;
+        // Early enough that the smart crossfade finds its start ready to
+        // look at, beside the last seconds of this one.
+        let ahead = Duration::from_secs(20) + if self.settings.crossfade { crate::player::smart::SCAN } else { Duration::ZERO };
         if left > ahead {
             return;
         }
@@ -3094,8 +3130,15 @@ impl App {
                 self.marks_dirty = true;
                 self.toast(format!("Stopped; {} not downloaded", crate::ui::widgets::songs(left)), ToastKind::Info);
             }
+            Action::ClearLyricsCache => {
+                self.storage.lock().at = None;
+                let freed = crate::cache::dir_size(self.lyrics_cache.dir());
+                let _ = std::fs::remove_dir_all(self.lyrics_cache.dir());
+                let _ = std::fs::create_dir_all(self.lyrics_cache.dir());
+                self.toast(format!("Freed {:.1} MB", freed as f64 / 1_048_576.0), ToastKind::Info);
+            }
             Action::ClearImageCache => {
-                self.artwork = None;
+                self.storage.lock().at = None;
                 let freed = crate::images::clear_cache(&self.paths.images());
                 self.toast(format!("Freed {:.1} MB", freed as f64 / 1_048_576.0), ToastKind::Info);
             }
@@ -3115,6 +3158,28 @@ impl App {
         self.actions.push(Action::OpenSignIn);
         false
     }
+}
+
+/// What the app keeps on disk, by kind, in bytes, for Settings.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Storage {
+    pub downloads: u64,
+    pub recent: u64,
+    pub artwork: u64,
+    /// The artwork and index of the music on this PC.
+    pub local: u64,
+    pub lyrics: u64,
+    /// Logs and the like.
+    pub other: u64,
+    /// Free on the drive it is all on.
+    pub free: Option<u64>,
+}
+
+#[derive(Default)]
+struct Measured {
+    sizes: Option<Storage>,
+    at: Option<Instant>,
+    busy: bool,
 }
 
 /// A bitrate at or above this is Premium quality (256 kb/s streams).

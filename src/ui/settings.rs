@@ -79,14 +79,14 @@ fn playback(ui: &mut Ui, draft: &mut Settings) {
         divider(ui);
         toggle_row(
             ui,
-            "Crossfade",
-            "Each song fades into the next. Songs of the same album still follow without one, as they were made to.",
+            "Smart crossfade",
+            "Each song fades into the next where it goes quiet: its fade-out, or the next one's soft intro, with the silence between them cut. Songs of the same album still follow without one, as they were made to.",
             &mut draft.crossfade,
         );
         if draft.crossfade {
             ui.horizontal(|ui| {
                 ui.add_space(2.0);
-                ui.label(RichText::new("Fade over").color(theme::TEXT_DIM));
+                ui.label(RichText::new("Overlap at most").color(theme::TEXT_DIM));
                 ui.spacing_mut().slider_width = (ui.available_width() - 150.0).clamp(160.0, 420.0);
                 ui.add(
                     egui::Slider::new(&mut draft.crossfade_secs, 1.0..=12.0)
@@ -331,8 +331,10 @@ fn updates(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
 
 fn storage(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
     let usage = app.audio_cache.usage();
-    let artwork = app.artwork_bytes();
+    let sizes = app.storage();
     card(ui, "Downloads and storage", |ui| {
+        storage_bar(ui, sizes);
+        divider(ui);
         let detail = if usage.saved == 0 {
             "Nothing yet. Download a song, an album or a playlist from its menu or its page.".to_owned()
         } else {
@@ -366,14 +368,127 @@ fn storage(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
         });
         ui.add_space(8.0);
         divider(ui);
+        let measured = |bytes: fn(&crate::app::Storage) -> u64| sizes.as_ref().map_or_else(|| "measuring\u{2026}".to_owned(), |s| megabytes(bytes(s)));
         let mut clear = false;
-        row(ui, "Artwork", &format!("Album art saved for quick loading: {}.", megabytes(artwork)), 120.0, |ui| {
+        row(ui, "Artwork", &format!("Album art saved for quick loading: {}.", measured(|s| s.artwork)), 120.0, |ui| {
             clear = widgets::pill(ui, Some(Icon::Trash), "Clear", false).clicked();
         });
         if clear {
             app.actions.push(Action::ClearImageCache);
         }
+        divider(ui);
+        let mut clear = false;
+        row(ui, "Lyrics", &format!("Lyrics found before, kept so they show at once, and offline: {}.", measured(|s| s.lyrics)), 120.0, |ui| {
+            clear = widgets::pill(ui, Some(Icon::Trash), "Clear", false).clicked();
+        });
+        if clear {
+            app.actions.push(Action::ClearLyricsCache);
+        }
     });
+}
+
+/// What the app keeps on this PC, as one bar of a colour per kind, with a
+/// key beneath: pointing at either picks out that kind.
+fn storage_bar(ui: &mut Ui, sizes: Option<crate::app::Storage>) {
+    let id = egui::Id::new("storage-bar");
+    ui.add_space(18.0);
+    let Some(sizes) = sizes else {
+        ui.label(RichText::new("Measuring\u{2026}").color(theme::TEXT_DIM));
+        ui.add_space(18.0);
+        return;
+    };
+    let parts = [
+        ("Downloads", sizes.downloads, theme::ACCENT),
+        ("Recently played", sizes.recent, Color32::from_rgb(0xff, 0x9f, 0x0a)),
+        ("Artwork", sizes.artwork, Color32::from_rgb(0x0a, 0x84, 0xff)),
+        ("Music on this PC", sizes.local, Color32::from_rgb(0x30, 0xd1, 0x58)),
+        ("Lyrics", sizes.lyrics, Color32::from_rgb(0xbf, 0x5a, 0xf2)),
+        ("Other", sizes.other, Color32::from_gray(0x8e)),
+    ];
+    let total: u64 = parts.iter().map(|p| p.1).sum();
+
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.label(RichText::new(megabytes(total)).font(theme::bold(22.0)));
+        ui.label(RichText::new("used by Native YTM").color(theme::TEXT_DIM));
+        if let Some(free) = sizes.free {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(RichText::new(format!("{} free on this drive", megabytes(free))).color(theme::TEXT_DIM).font(theme::regular(13.0)));
+            });
+        }
+    });
+    ui.add_space(10.0);
+
+    // The kind pointed at, last frame, in the bar or its key.
+    let picked: Option<usize> = ui.data(|d| d.get_temp(id));
+    let mut pointed = None;
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 14.0), Sense::hover());
+    let painter = ui.painter();
+    painter.rect_filled(rect, CornerRadius::same(7), theme::SURFACE_ACTIVE);
+    let shown: Vec<usize> = (0..parts.len()).filter(|i| parts[*i].1 > 0).collect();
+    let mut x = rect.left();
+    for (n, &i) in shown.iter().enumerate() {
+        let (_, bytes, color) = parts[i];
+        // Each grows into its share; a sliver at least, to be seen.
+        let share = bytes as f32 / total.max(1) as f32;
+        let share = ui.ctx().animate_value_with_time(id.with(i), share, 0.45);
+        let width = (share * rect.width()).max(3.0).min(rect.right() - x);
+        let segment = Rect::from_min_max(pos2(x, rect.top()), pos2(x + width, rect.bottom()));
+        let first = n == 0;
+        let last = n + 1 == shown.len();
+        let radius = CornerRadius {
+            nw: if first { 7 } else { 0 },
+            sw: if first { 7 } else { 0 },
+            ne: if last { 7 } else { 0 },
+            se: if last { 7 } else { 0 },
+        };
+        let color = match picked {
+            Some(p) if p != i => color.gamma_multiply(0.35),
+            _ => color,
+        };
+        // A hairline of the card between kinds.
+        let inner = if last { segment } else { segment.with_max_x(segment.right() - 2.0) };
+        painter.rect_filled(inner, radius, color);
+        if response.hover_pos().is_some_and(|p| segment.x_range().contains(p.x)) {
+            pointed = Some(i);
+        }
+        x += width;
+    }
+    if let Some(i) = pointed {
+        let (name, bytes, _) = parts[i];
+        let percent = bytes as f64 / total.max(1) as f64 * 100.0;
+        response.on_hover_text(format!("{name}: {} ({percent:.0}%)", megabytes(bytes)));
+    }
+    ui.add_space(12.0);
+
+    // The key: a dot of each colour, the kind, its size.
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(18.0, 8.0);
+        for &i in &shown {
+            let (name, bytes, color) = parts[i];
+            let name_g = ui.painter().layout_no_wrap(name.to_owned(), theme::medium(13.0), theme::TEXT);
+            let size_g = ui.painter().layout_no_wrap(megabytes(bytes), theme::regular(13.0), theme::TEXT_DIM);
+            let width = 14.0 + name_g.size().x + 6.0 + size_g.size().x;
+            let (rect, response) = ui.allocate_exact_size(vec2(width, 20.0), Sense::hover());
+            if response.hovered() {
+                pointed = Some(i);
+            }
+            let faded = matches!(picked, Some(p) if p != i);
+            let alpha = if faded { 0.45 } else { 1.0 };
+            let y = rect.center().y;
+            ui.painter().circle_filled(pos2(rect.left() + 4.5, y), 4.5, color.gamma_multiply(alpha));
+            let name_w = name_g.size().x;
+            ui.painter().galley(pos2(rect.left() + 14.0, y - name_g.size().y / 2.0), name_g, theme::TEXT.gamma_multiply(alpha));
+            ui.painter().galley(pos2(rect.left() + 20.0 + name_w, y - size_g.size().y / 2.0), size_g, theme::TEXT_DIM.gamma_multiply(alpha));
+        }
+    });
+    ui.data_mut(|d| match pointed {
+        Some(i) => {
+            d.insert_temp(id, i);
+        }
+        None => d.remove::<usize>(id),
+    });
+    ui.add_space(18.0);
 }
 
 fn connections(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
@@ -694,5 +809,11 @@ fn divider(ui: &mut Ui) {
 
 fn megabytes(bytes: u64) -> String {
     let mb = bytes as f64 / 1_048_576.0;
-    if mb >= 1024.0 { format!("{:.1} GB", mb / 1024.0) } else { format!("{mb:.0} MB") }
+    if mb >= 1024.0 {
+        format!("{:.1} GB", mb / 1024.0)
+    } else if mb >= 1.0 || bytes == 0 {
+        format!("{mb:.0} MB")
+    } else {
+        format!("{:.0} KB", (bytes as f64 / 1024.0).max(1.0))
+    }
 }

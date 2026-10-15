@@ -171,6 +171,54 @@ pub fn pill(ui: &mut Ui, icon: Option<Icon>, text: &str, primary: bool) -> Respo
 }
 
 /// A chip, as for search filters and moods.
+/// Text cut to `rows` lines, opened in full by a click on it or on "Read
+/// more" beneath (and closed again by "Show less"), unfolding smoothly.
+pub fn read_more(ui: &mut Ui, id: Id, text: &str, font: egui::FontId, color: Color32, width: f32, rows: usize) {
+    let mut open = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    let layout = |ui: &Ui, text: String, rows: usize| {
+        let mut job = egui::text::LayoutJob::single_section(text, egui::TextFormat::simple(font.clone(), color));
+        job.wrap = egui::text::TextWrapping {
+            max_width: width,
+            max_rows: rows,
+            break_anywhere: false,
+            overflow_character: Some('\u{2026}'),
+        };
+        ui.fonts_mut(|f| f.layout_job(job))
+    };
+    // Shut, its paragraphs run together, so the lines shown are all words.
+    let short = layout(ui, text.split_whitespace().collect::<Vec<_>>().join(" "), rows);
+    let full = layout(ui, text.to_owned(), usize::MAX);
+    let cut = short.elided;
+    let target = if open { full.size().y } else { short.size().y };
+    let height = ui.ctx().animate_value_with_time(id.with("height"), target, 0.28);
+    let sense = if cut || open { Sense::click() } else { Sense::hover() };
+    let (rect, response) = ui.allocate_exact_size(vec2(width.min(full.size().x.max(short.size().x)), height), sense);
+    let unfolding = open || height > short.size().y + 0.5;
+    let painter = ui.painter_at(rect.expand2(vec2(0.0, 1.0)));
+    if unfolding {
+        painter.galley(rect.min, full, color);
+    } else {
+        painter.galley(rect.min, short, color);
+    }
+    let mut toggle = response.on_hover_cursor(CursorIcon::PointingHand).clicked();
+    if cut || open {
+        ui.add_space(6.0);
+        let label = if open { "Show less" } else { "Read more" };
+        let link = ui
+            .add(egui::Label::new(RichText::new(label).font(theme::semibold(13.5)).color(theme::TEXT)).sense(Sense::click()))
+            .on_hover_cursor(CursorIcon::PointingHand);
+        if link.hovered() {
+            let r = link.rect;
+            ui.painter().hline(r.x_range(), r.bottom(), Stroke::new(1.0, theme::TEXT_DIM));
+        }
+        toggle |= link.clicked();
+    }
+    if toggle {
+        open = !open;
+        ui.data_mut(|d| d.insert_temp(id, open));
+    }
+}
+
 pub fn chip(ui: &mut Ui, text: &str, selected: bool) -> Response {
     let font = theme::regular(13.5);
     let galley = ui.painter().layout_no_wrap(text.to_owned(), font, theme::TEXT);

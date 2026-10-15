@@ -10,6 +10,7 @@ pub mod discord;
 pub mod images;
 pub mod lastfm;
 pub mod local;
+pub mod lyrics;
 pub mod model;
 pub mod net;
 pub mod platform;
