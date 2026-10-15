@@ -49,6 +49,8 @@ enum WatchPurpose {
     RadioAfter { skip: Option<String> },
     /// Lyrics and rating for the song now playing.
     Info { video_id: String },
+    /// Where the next song's lyrics are, to look them up before it plays.
+    Lyrics { track: Track },
     /// A whole playlist's songs, to download.
     Offline { title: String },
 }
@@ -150,6 +152,16 @@ pub struct SearchState {
     pub focus: bool,
 }
 
+/// The stats page: which stats it shows, and those loaded, with when and,
+/// for the app's own, as of how many plays written.
+pub struct StatsView {
+    pub source: crate::stats::Source,
+    pub period: crate::stats::Period,
+    /// The source has been chosen (Last.fm, when connected, the first time).
+    chosen: bool,
+    pub summaries: HashMap<(crate::stats::Source, crate::stats::Period), (Loadable<crate::stats::Summary>, Instant, u64)>,
+}
+
 pub struct SignInDialog {
     pub text: String,
     pub error: Option<String>,
@@ -190,6 +202,8 @@ pub struct App {
     /// Songs being resolved ahead of time, so a slow resolve (yt-dlp) is
     /// done before they are wanted.
     prefetching: HashSet<String>,
+    /// The song being found through yt-dlp because it was pointed at.
+    account_prewarm: Option<String>,
     /// A quick start, switching to the better stream when it comes.
     pub upgrade: Option<Upgrade>,
     /// The stream the player has for the current token: its quality and
@@ -199,6 +213,8 @@ pub struct App {
     pub audio_cache: Arc<crate::cache::AudioCache>,
     /// Lyrics found before, on disk.
     pub lyrics_cache: crate::lyrics::LyricsCache,
+    /// Home, Explore and the library's pages as they last loaded.
+    kept_pages: crate::kept_pages::KeptPages,
     /// Songs whose lyrics came back incomplete, and when to ask again.
     lyrics_retry: HashMap<String, Instant>,
     /// How each song on disk stands, for the marks beside their names.
@@ -237,6 +253,10 @@ pub struct App {
     pub sign_in: Option<SignInDialog>,
     pub picker: Option<Vec<Track>>,
     pub new_playlist: Option<(String, Vec<Track>)>,
+    /// A playlist being renamed (its id, the name being typed), or about
+    /// to be deleted (its id and name).
+    pub rename_playlist: Option<(String, String)>,
+    pub delete_playlist: Option<(String, String)>,
     pub toasts: Vec<Toast>,
     pub side_tab: SideTab,
     /// The full-window player: the artwork, with the queue or the lyrics.
@@ -299,6 +319,19 @@ pub struct App {
     /// Settings changed and not yet written (a slider being dragged writes
     /// once it rests).
     settings_dirty: Option<Instant>,
+    /// Windows telling when the folders of music change, and whether they
+    /// have since they were last looked through.
+    folder_watch: Option<crate::watch::FolderWatch>,
+    folders_changed: Arc<AtomicBool>,
+    /// Windows starts the app when this user signs in.
+    pub autostart: bool,
+    /// The plays the app hears, kept for its stats, and the stats page.
+    pub play_log: crate::stats::PlayLog,
+    pub stats: StatsView,
+    stats_done: (std::sync::mpsc::Sender<(crate::stats::Period, crate::stats::Summary)>, Receiver<(crate::stats::Period, crate::stats::Summary)>),
+    /// Recent searches and lyric offsets, and when they last changed.
+    pub personal: crate::personal::Personal,
+    personal_dirty: Option<Instant>,
     pub window_styled: bool,
     pub drag_from: Option<usize>,
     /// A scroll position to jump the page to once (screenshots).
@@ -415,10 +448,12 @@ impl App {
             retried: None,
             streams: HashMap::new(),
             prefetching: HashSet::new(),
+            account_prewarm: None,
             upgrade: None,
             loaded: None,
             audio_cache,
             lyrics_cache: crate::lyrics::LyricsCache::new(paths.lyrics()),
+            kept_pages: crate::kept_pages::KeptPages::new(paths.pages()),
             lyrics_retry: HashMap::new(),
             offline: HashMap::new(),
             offline_gen: 0,
@@ -444,6 +479,8 @@ impl App {
             sign_in: None,
             picker: None,
             new_playlist: None,
+            rename_playlist: None,
+            delete_playlist: None,
             toasts: Vec::new(),
             side_tab: SideTab::UpNext,
             full_view: false,
@@ -480,6 +517,19 @@ impl App {
             wants_show: false,
             last_saved: Instant::now(),
             settings_dirty: None,
+            folder_watch: None,
+            autostart: false,
+            play_log: crate::stats::PlayLog::new(paths.plays()),
+            stats: StatsView {
+                source: crate::stats::Source::App,
+                period: crate::stats::Period::Month,
+                chosen: false,
+                summaries: HashMap::new(),
+            },
+            stats_done: std::sync::mpsc::channel(),
+            folders_changed: Arc::new(AtomicBool::new(false)),
+            personal: settings::load(&paths.personal()),
+            personal_dirty: None,
             window_styled: false,
             drag_from: None,
             scroll_to: None,
@@ -500,8 +550,10 @@ impl App {
         }
         app.backend.send(Request::Bootstrap);
         app.request_page(&Route::Home, false);
+        app.check_autostart();
         let folders = app.settings.local_folders.clone();
         app.local.scan(&folders);
+        app.watch_folders();
         if app.settings.restore_session {
             app.restore_session();
         }
@@ -571,6 +623,15 @@ impl App {
             self.on_player(event);
         }
         self.images.poll();
+        while let Ok((period, summary)) = self.stats_done.1.try_recv() {
+            let written = self.play_log.written;
+            self.stats.summaries.insert((crate::stats::Source::App, period), (Loadable::Ready(summary), Instant::now(), written));
+        }
+        if self.folders_changed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            log::info!("the folders of music changed: looking through them again");
+            let folders = self.settings.local_folders.clone();
+            self.local.scan(&folders);
+        }
         if self.local.poll() {
             self.local_hits = None;
         }
@@ -604,6 +665,12 @@ impl App {
             self.save_settings();
         } else if self.settings_dirty.is_some() {
             crate::theme::repaint_in(&self.ctx, Duration::from_millis(650));
+        }
+        if self.personal_dirty.is_some_and(|at| at.elapsed() > Duration::from_secs(2)) {
+            self.personal_dirty = None;
+            settings::save(&self.paths.personal(), &self.personal);
+        } else if self.personal_dirty.is_some() {
+            crate::theme::repaint_in(&self.ctx, Duration::from_millis(2100));
         }
         let actions = std::mem::take(&mut self.actions);
         for action in actions {
@@ -643,6 +710,84 @@ impl App {
         }
     }
 
+    /// The stats chosen, unless loaded lately: the app's own on a thread
+    /// (reading every play kept), Last.fm's from Last.fm.
+    fn load_stats(&mut self, force: bool) {
+        use crate::stats::Source;
+        let (source, period) = (self.stats.source, self.stats.period);
+        let fresh = self.stats.summaries.get(&(source, period)).is_some_and(|(loaded, at, written)| match (source, loaded) {
+            (_, Loadable::Loading) => true,
+            (Source::App, Loadable::Ready(_)) => *written == self.play_log.written && at.elapsed() < Duration::from_secs(600),
+            (Source::LastFm, Loadable::Ready(_)) => at.elapsed() < Duration::from_secs(600),
+            (_, Loadable::Failed(_)) => at.elapsed() < Duration::from_secs(15),
+        });
+        if fresh && !force {
+            return;
+        }
+        match source {
+            Source::App => {
+                self.stats.summaries.insert((source, period), (Loadable::Loading, Instant::now(), self.play_log.written));
+                let path = self.play_log.path().to_path_buf();
+                let tx = self.stats_done.0.clone();
+                let waker = self.waker.clone();
+                let _ = std::thread::Builder::new().name("stats".into()).spawn(move || {
+                    let plays = crate::stats::load(&path);
+                    let summary = crate::stats::summarize(&plays, period, crate::stats::unix_now());
+                    let _ = tx.send((period, summary));
+                    waker.wake();
+                });
+            }
+            Source::LastFm => match self.lastfm.reader().filter(|r| r.user().is_some()) {
+                Some(reader) => {
+                    self.stats.summaries.insert((source, period), (Loadable::Loading, Instant::now(), 0));
+                    self.backend.send(Request::LastFmStats { period, reader });
+                }
+                None => {
+                    let error = "Connect Last.fm in Settings, under Sharing, to see your stats from it.".to_owned();
+                    self.stats.summaries.insert((source, period), (Loadable::Failed(error), Instant::now(), 0));
+                }
+            },
+        }
+    }
+
+    /// Whether Windows starts the app at sign-in; when it does, that it
+    /// starts this copy (the program was moved, say). Test profiles leave
+    /// it alone.
+    fn check_autostart(&mut self) {
+        if settings::profile().is_some() {
+            return;
+        }
+        let Some(command) = crate::platform::autostart() else {
+            return;
+        };
+        self.autostart = true;
+        if crate::platform::autostart_command().is_some_and(|ours| ours != command) {
+            log::info!("starting with Windows: pointing at this copy of the app");
+            crate::platform::set_autostart(true);
+        }
+    }
+
+    /// Asks Windows to say when anything in the folders of music changes,
+    /// in place of any watch before.
+    fn watch_folders(&mut self) {
+        self.folder_watch = None;
+        let changed = self.folders_changed.clone();
+        let waker = self.waker.clone();
+        self.folder_watch = crate::watch::FolderWatch::start(
+            &self.settings.local_folders,
+            Arc::new(move || {
+                changed.store(true, std::sync::atomic::Ordering::SeqCst);
+                waker.wake();
+            }),
+        );
+    }
+
+    /// What a page depends on besides its address: the account (signed in
+    /// or not), the language and the region.
+    fn page_context(&self) -> String {
+        format!("{}|{}|{}", if self.signed_in { "in" } else { "out" }, self.settings.language, self.settings.region.trim())
+    }
+
     /// What the app keeps on disk, by kind: measured on a thread of its
     /// own at most every ten seconds, so None until first measured.
     pub fn storage(&mut self) -> Option<Storage> {
@@ -653,7 +798,7 @@ impl App {
             let shared = self.storage.clone();
             let ctx = self.ctx.clone();
             let (images, local, lyrics, cache) = (self.paths.images(), self.paths.cache.join("local"), self.paths.lyrics(), self.paths.cache.clone());
-            let other = [self.paths.logs(), self.paths.scratch()];
+            let other = [self.paths.logs(), self.paths.scratch(), self.paths.pages()];
             let spawned = std::thread::Builder::new().name("storage".into()).spawn(move || {
                 let sizes = Storage {
                     artwork: crate::cache::dir_size(&images),
@@ -796,12 +941,18 @@ impl App {
                 {
                     self.network.check_now();
                 }
+                if let Ok(page) = &result {
+                    self.kept_pages.put(&key, &self.page_context(), page);
+                }
                 let state = self.pages.entry(key).or_insert_with(PageState::loading);
-                state.data = match result {
-                    Ok(page) => Loadable::Ready(page),
-                    Err(error) => Loadable::Failed(error),
-                };
+                // A page kept from last time stays when the fresh one fails.
+                match (result, &state.data) {
+                    (Ok(page), _) => state.data = Loadable::Ready(page),
+                    (Err(_), Loadable::Ready(_)) if state.loading_more => {}
+                    (Err(error), _) => state.data = Loadable::Failed(error),
+                }
                 state.loading_more = false;
+                state.loading_tracks = false;
             }
             Response::More {
                 key,
@@ -935,6 +1086,13 @@ impl App {
                     Ok(_) => self.toast("That playlist is empty", ToastKind::Info),
                     Err(error) => self.toast(format!("Could not load the playlist: {error}"), ToastKind::Error),
                 }
+            }
+            Response::LastFmStats { period, result } => {
+                let loaded = match result {
+                    Ok(summary) => Loadable::Ready(summary),
+                    Err(error) => Loadable::Failed(error),
+                };
+                self.stats.summaries.insert((crate::stats::Source::LastFm, period), (loaded, Instant::now(), 0));
             }
             Response::Lyrics { video_id, result, complete } => {
                 if let Ok(lyrics) = &result {
@@ -1129,6 +1287,19 @@ impl App {
                 }
             }
             WatchPurpose::Offline { .. } => {}
+            WatchPurpose::Lyrics { track } => {
+                let browse_id = result.ok().and_then(|watch| watch.lyrics_id);
+                let query = self.lyrics_query(&track);
+                if query.is_none() && browse_id.is_none() {
+                    self.lyrics.insert(track.video_id, Loadable::Ready(None));
+                    return;
+                }
+                self.backend.send(Request::Lyrics {
+                    video_id: track.video_id,
+                    browse_id,
+                    query,
+                });
+            }
             WatchPurpose::Info { video_id } => {
                 if self.now.video_id != video_id {
                     return;
@@ -1216,6 +1387,27 @@ impl App {
                     how: How::Account,
                 });
             }
+        } else if self.account_streams()
+            && let Some(stream) = self.quick_stream(&video_id)
+        {
+            // Found a moment ago, when it was pointed at: it starts at once,
+            // and the account's stream takes over when it comes.
+            self.loaded = Some((token, stream.clone()));
+            self.player.load(token, stream.clone(), Duration::from_secs_f64(start), true);
+            self.upgrade = Some(Upgrade {
+                token,
+                phase: UpgradePhase::Finding,
+                from: Some(stream.quality.clone()),
+                to: None,
+                quick_failed: false,
+            });
+            self.backend.send(Request::Resolve {
+                token,
+                video_id: video_id.clone(),
+                purpose: Purpose::Upgrade,
+                start,
+                how: How::Account,
+            });
         } else if self.account_streams() {
             // The account's stream takes seconds through yt-dlp: start on
             // the quick one and switch when the better one arrives.
@@ -1308,16 +1500,7 @@ impl App {
         if self.lyrics.contains_key(&video_id) || !self.now.info_ready {
             return;
         }
-        let query = track
-            .artists
-            .first()
-            .filter(|_| self.settings.synced_lyrics)
-            .map(|artist| crate::api::lrclib::Query {
-                title: track.title.clone(),
-                artist: artist.name.clone(),
-                album: track.album.as_ref().map(|a| a.name.clone()),
-                duration: track.duration,
-            });
+        let query = self.lyrics_query(&track);
         let browse_id = self.now.lyrics_id.clone();
         if query.is_none() && browse_id.is_none() {
             self.lyrics.insert(video_id, Loadable::Ready(None));
@@ -1328,6 +1511,61 @@ impl App {
             video_id,
             browse_id,
             query,
+        });
+    }
+
+    /// What LRCLIB is asked for a song's synced lyrics, when they are wanted.
+    fn lyrics_query(&self, track: &Track) -> Option<crate::api::lrclib::Query> {
+        track
+            .artists
+            .first()
+            .filter(|_| self.settings.synced_lyrics)
+            .map(|artist| crate::api::lrclib::Query {
+                title: track.title.clone(),
+                artist: artist.name.clone(),
+                album: track.album.as_ref().map(|a| a.name.clone()),
+                duration: track.duration,
+            })
+    }
+
+    /// The next song's lyrics, looked up while this one plays, so they are
+    /// there the moment it starts (LRCLIB can be slow to answer when it is
+    /// busy). Only while lyrics are on screen.
+    fn prefetch_lyrics(&mut self, track: &Track) {
+        if !self.lyrics_shown() || !self.online() || self.lyrics.contains_key(&track.video_id) {
+            return;
+        }
+        if let Some(kept) = self.lyrics_cache.get(&track.video_id, self.settings.synced_lyrics) {
+            if kept.recheck {
+                self.lyrics_retry.insert(track.video_id.clone(), Instant::now());
+            }
+            self.lyrics.insert(track.video_id.clone(), Loadable::Ready(kept.lyrics));
+            return;
+        }
+        self.lyrics.insert(track.video_id.clone(), Loadable::Loading);
+        log::info!("looking up the lyrics of the next song, {}, ahead of it", track.title);
+        if track.is_local() {
+            // YouTube knows nothing of a song on this PC: LRCLIB alone.
+            match self.lyrics_query(track) {
+                Some(query) => self.backend.send(Request::Lyrics {
+                    video_id: track.video_id.clone(),
+                    browse_id: None,
+                    query: Some(query),
+                }),
+                None => {
+                    self.lyrics.insert(track.video_id.clone(), Loadable::Ready(None));
+                }
+            }
+            return;
+        }
+        // YouTube's own lyrics are named in the song's info: that first.
+        let seq = self.next_seq();
+        self.watch_purposes.insert(seq, WatchPurpose::Lyrics { track: track.clone() });
+        self.backend.send(Request::Watch {
+            seq,
+            video_id: Some(track.video_id.clone()),
+            playlist_id: None,
+            params: None,
         });
     }
 
@@ -1387,6 +1625,41 @@ impl App {
         {
             upgrade.phase = UpgradePhase::Done(Instant::now());
         }
+    }
+
+    /// Any stream of the song found within the hour, whatever its quality:
+    /// one to start on while a better one comes.
+    fn quick_stream(&self, video_id: &str) -> Option<StreamInfo> {
+        self.streams
+            .get(video_id)
+            .filter(|(_, at)| at.elapsed() < STREAM_FRESH)
+            .map(|(stream, _)| stream.clone())
+    }
+
+    /// Finds a song's stream while the pointer rests on it, so a click
+    /// starts it at once: the quick, signed-out stream, in a fraction of a
+    /// second. A song only Premium members can play has none of those, and
+    /// comes through yt-dlp, in seconds: that starts now too, one at a time.
+    fn prewarm(&mut self, track: &Track) {
+        let video_id = &track.video_id;
+        if track.is_local()
+            || !self.online()
+            || self.current().is_some_and(|t| &t.video_id == video_id)
+            || self.quick_stream(video_id).is_some()
+            || self.audio_cache.has_at_least(video_id, 1)
+            || self.prefetching.contains(video_id)
+            || self.prefetching.len() >= 4
+        {
+            return;
+        }
+        self.prefetching.insert(video_id.clone());
+        self.backend.send(Request::Resolve {
+            token: 0,
+            video_id: video_id.clone(),
+            purpose: Purpose::Prewarm,
+            start: 0.0,
+            how: How::Native,
+        });
     }
 
     /// The song's stream at the quality wanted, if it is at hand: kept on
@@ -1466,6 +1739,28 @@ impl App {
                 self.streams.insert(video_id, (stream, Instant::now()));
             }
             (Purpose::Prefetch, Err(error)) => log::info!("prefetch of {video_id} failed: {error}"),
+            (Purpose::Prewarm, Ok((stream, _))) => {
+                self.prefetching.remove(&video_id);
+                self.streams.insert(video_id, (stream, Instant::now()));
+            }
+            (Purpose::Prewarm, Err(error)) => {
+                self.prefetching.remove(&video_id);
+                // For Premium members only: through yt-dlp with the account,
+                // which takes seconds, so it starts now. One at a time.
+                let busy = self.prefetching.iter().any(|id| self.account_prewarm.as_deref() == Some(id.as_str()));
+                if error.contains("Premium") && self.signed_in && self.backend.ytdlp_found().is_some() && !busy {
+                    log::info!("{video_id} is for Premium members: finding it through yt-dlp ahead of a click");
+                    self.account_prewarm = Some(video_id.clone());
+                    self.prefetching.insert(video_id.clone());
+                    self.backend.send(Request::Resolve {
+                        token: 0,
+                        video_id,
+                        purpose: Purpose::Prefetch,
+                        start: 0.0,
+                        how: How::Account,
+                    });
+                }
+            }
             (Purpose::Load, Ok((stream, _))) => {
                 let quick = self.upgrade.as_ref().is_some_and(|u| u.token == token);
                 // A quick start's stream is not kept: played again, the song
@@ -2001,6 +2296,7 @@ impl App {
             return;
         }
         self.preload_wanted_for = Some(entry.uid);
+        self.prefetch_lyrics(&entry.track);
         let token = self.next_seq();
         self.preload = Some((token, entry.uid));
         let stream = if entry.track.is_local() {
@@ -2312,6 +2608,7 @@ impl App {
         self.save_settings();
         let folders = self.settings.local_folders.clone();
         self.local.scan(&folders);
+        self.watch_folders();
         self.toast(format!("Looking for music in {name}"), ToastKind::Info);
     }
 
@@ -2392,7 +2689,17 @@ impl App {
                     filter: *filter,
                 });
             }
-            Route::Settings => {}
+            Route::Settings | Route::LocalAlbum(_) => {}
+            Route::Stats => {
+                // Last.fm's, when connected, the first time.
+                if !self.stats.chosen {
+                    self.stats.chosen = true;
+                    if self.lastfm.reader().is_some_and(|r| r.user().is_some()) {
+                        self.stats.source = crate::stats::Source::LastFm;
+                    }
+                }
+                self.load_stats(force);
+            }
             Route::Artist(name) => {
                 let key = name.to_lowercase();
                 if force || !matches!(self.artists.get(&key), Some(Loadable::Ready(_) | Loadable::Loading)) {
@@ -2407,7 +2714,14 @@ impl App {
             }
             _ => {
                 if let Some((browse_id, params)) = route.browse() {
-                    self.pages.insert(key.clone(), PageState::loading());
+                    // Kept from last time: shown at once, and the fresh
+                    // copy asked for all the same.
+                    let kept = (!self.pages.contains_key(&key)).then(|| self.kept_pages.get(&key, &self.page_context())).flatten();
+                    let state = match kept {
+                        Some(page) => PageState::kept(page),
+                        None => PageState::loading(),
+                    };
+                    self.pages.insert(key.clone(), state);
                     self.backend.send(Request::Browse {
                         key,
                         browse_id,
@@ -2468,6 +2782,10 @@ impl App {
             // An artist of songs on this PC: their page from Last.fm's.
             Target::Browse { browse_id, .. } if browse_id.starts_with(local::ARTIST) => {
                 self.navigate(Route::Artist(browse_id[local::ARTIST.len()..].to_owned()));
+            }
+            // An album of songs on this PC: its page, from the songs.
+            Target::Browse { browse_id, .. } if browse_id.starts_with(local::ALBUM) => {
+                self.navigate(Route::LocalAlbum(browse_id[local::ALBUM.len()..].to_owned()));
             }
             Target::Browse { browse_id, params } => {
                 let route = match browse_id.as_str() {
@@ -2586,6 +2904,7 @@ impl App {
                     });
                 }
             }
+            Action::Prewarm(track) => self.prewarm(&track),
             Action::StartRadio(track) if track.is_local() => {
                 if track.artists.is_empty() {
                     self.toast("A radio needs the song's artist, and this file doesn't say", ToastKind::Info);
@@ -2861,6 +3180,45 @@ impl App {
                     set_video_id,
                 });
             }
+            Action::OpenRenamePlaylist { playlist_id, title } => self.rename_playlist = Some((playlist_id, title)),
+            Action::OpenDeletePlaylist { playlist_id, title } => self.delete_playlist = Some((playlist_id, title)),
+            Action::RenamePlaylist { playlist_id, title } => {
+                self.rename_playlist = None;
+                let title = title.trim().to_owned();
+                if title.is_empty() || !self.require_sign_in() {
+                    return;
+                }
+                // Shown renamed at once: its page and the sidebar.
+                let browse_id = format!("VL{}", playlist_id.trim_start_matches("VL"));
+                if let Some(page) = self.pages.get_mut(&format!("browse:{browse_id}:")).and_then(|s| s.data.ready_mut())
+                    && let Some(header) = page.header.as_mut()
+                {
+                    header.title = title.clone();
+                }
+                for item in self.playlists.iter_mut() {
+                    if matches!(&item.target, Some(Target::Browse { browse_id: id, .. }) if *id == browse_id) {
+                        item.title = title.clone();
+                    }
+                }
+                self.backend.send(Request::RenamePlaylist { playlist_id, title });
+            }
+            Action::DeletePlaylist { playlist_id, title } => {
+                self.delete_playlist = None;
+                if !self.require_sign_in() {
+                    return;
+                }
+                // Gone at once: from the sidebar, and its page left.
+                let browse_id = format!("VL{}", playlist_id.trim_start_matches("VL"));
+                self.playlists.retain(|item| !matches!(&item.target, Some(Target::Browse { browse_id: id, .. }) if *id == browse_id));
+                let key = format!("browse:{browse_id}:");
+                self.pages.remove(&key);
+                self.pages.remove(&Route::Library(LibraryTab::Playlists).key());
+                if self.route.key() == key {
+                    self.navigate(Route::Library(LibraryTab::Playlists));
+                }
+                self.history.retain(|route| route.key() != key);
+                self.backend.send(Request::DeletePlaylist { playlist_id, title });
+            }
             Action::CreatePlaylist { title, tracks } => {
                 self.new_playlist = None;
                 self.picker = None;
@@ -2928,6 +3286,9 @@ impl App {
                 if query.is_empty() {
                     return;
                 }
+                if self.personal.add_search(&query) {
+                    self.personal_dirty = Some(Instant::now());
+                }
                 self.search.suggestions = Suggestions::default();
                 self.search.suggest_for.clear();
                 let filter = if matches!(self.route, Route::Search { .. }) {
@@ -2936,6 +3297,30 @@ impl App {
                     Filter::All
                 };
                 self.navigate(Route::Search { query, filter });
+            }
+            Action::ForgetSearch(query) => {
+                self.personal.remove_search(&query);
+                self.personal_dirty = Some(Instant::now());
+            }
+            Action::ForgetSearches => {
+                self.personal.searches.clear();
+                self.personal_dirty = Some(Instant::now());
+            }
+            Action::NudgeLyrics { video_id, by } => {
+                let now = self.personal.nudge_lyrics(&video_id, by);
+                self.personal_dirty = Some(Instant::now());
+                let text = if now > 0.0 {
+                    format!("Lyrics {now:.1} s later")
+                } else if now < 0.0 {
+                    format!("Lyrics {:.1} s earlier", -now)
+                } else {
+                    "Lyrics back in their own time".to_owned()
+                };
+                self.toast(text, ToastKind::Info);
+            }
+            Action::ResetLyrics(video_id) => {
+                self.personal.reset_lyrics(&video_id);
+                self.personal_dirty = Some(Instant::now());
             }
             Action::SetSearchFilter(filter) => {
                 let query = self.search.query.clone();
@@ -3003,6 +3388,7 @@ impl App {
                 self.save_settings();
                 let folders = self.settings.local_folders.clone();
                 self.local.scan(&folders);
+                self.watch_folders();
             }
             Action::RescanLocal => {
                 let folders = self.settings.local_folders.clone();
@@ -3034,6 +3420,21 @@ impl App {
                 }
                 self.save_settings();
             }
+            Action::ShowStats { source, period } => {
+                self.stats.source = source;
+                self.stats.period = period;
+                self.load_stats(false);
+            }
+            Action::SetAutostart(on) => {
+                if settings::profile().is_some() {
+                    self.toast("A test profile does not start with Windows", ToastKind::Info);
+                } else if crate::platform::set_autostart(on) {
+                    self.autostart = on;
+                    self.toast(if on { "Starts with Windows, in the tray" } else { "No longer starts with Windows" }, ToastKind::Info);
+                } else {
+                    self.toast("Windows would not change what starts with it", ToastKind::Error);
+                }
+            }
             Action::ToggleSidebar => {
                 self.settings.sidebar = !self.settings.sidebar;
                 self.save_settings();
@@ -3063,11 +3464,13 @@ impl App {
                 dialog.text = text;
                 dialog.busy = true;
                 dialog.error = None;
+                self.kept_pages.clear();
                 self.backend.send(Request::SetAuth(Some(auth)));
                 self.signed_in = true;
                 self.backend.send(Request::Account);
             }
             Action::SignOut => {
+                self.kept_pages.clear();
                 self.backend.send(Request::SetAuth(None));
                 crate::platform::forget_cookie(&self.paths.account());
                 self.signed_in = false;
@@ -3134,6 +3537,8 @@ impl App {
                 }
                 if new.local_folders != self.settings.local_folders {
                     self.local.scan(&new.local_folders);
+                    self.settings.local_folders = new.local_folders.clone();
+                    self.watch_folders();
                 }
                 if new.check_updates && !self.settings.check_updates {
                     self.update_due = Some(Instant::now());
@@ -3390,6 +3795,9 @@ impl App {
         let duration = self.duration();
         let uid = self.current_uid.unwrap_or(0);
         let track = self.queue.current_track().cloned();
+        // The app's own count of plays, for its stats.
+        self.play_log
+            .tick(track.as_ref().filter(|_| self.current_token != 0).map(|t| (uid, t, position, duration, playing)));
         let current = track.as_ref().filter(|_| self.current_token != 0).map(|track| lastfm::Current {
             uid,
             track,
@@ -3455,6 +3863,10 @@ impl App {
     }
 
     pub fn shutdown(&mut self) {
+        self.play_log.finish();
+        if self.personal_dirty.take().is_some() {
+            settings::save(&self.paths.personal(), &self.personal);
+        }
         self.audio_cache.save();
         self.save_session();
         self.save_settings();
@@ -3463,6 +3875,12 @@ impl App {
 }
 
 impl fastframe_shell::Resident for App {
+    /// Started with Windows: straight to the tray, the window a click on
+    /// its icon away. Without a tray icon there would be no way back to it.
+    fn start_hidden(&mut self) -> bool {
+        self.tray.is_some()
+    }
+
     fn closed(&self) -> fastframe_shell::Closed {
         if !self.quit && self.hide {
             fastframe_shell::Closed::Hide

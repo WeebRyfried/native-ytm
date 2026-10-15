@@ -139,7 +139,7 @@ pub enum Target {
 }
 
 /// Anything in a shelf, carousel or grid.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Item {
     pub kind: Kind,
     pub title: String,
@@ -154,7 +154,7 @@ pub struct Item {
     pub color: Option<u32>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Layout {
     /// Rows of tracks or results.
     List,
@@ -168,7 +168,7 @@ pub enum Layout {
     Card,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Section {
     pub title: String,
     /// The small line above a carousel's title.
@@ -182,7 +182,7 @@ pub struct Section {
     pub continuation: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Header {
     pub title: String,
     pub subtitle: Option<String>,
@@ -207,7 +207,7 @@ pub struct Header {
     pub banner: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Chip {
     pub title: String,
     pub target: Target,
@@ -216,7 +216,7 @@ pub struct Chip {
 
 /// A browse page: home, explore, an artist, an album, a playlist, the
 /// library, a mood.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Page {
     pub header: Option<Header>,
     /// An album or playlist's songs.

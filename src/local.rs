@@ -47,6 +47,9 @@ const RETRY_SECS: u64 = 3 * 24 * 3600;
 /// The id an artist's link carries: their page, made from Last.fm's.
 pub const ARTIST: &str = "artist:";
 
+/// An album of the music on this PC, in its page's address.
+pub const ALBUM: &str = "localalbum:";
+
 /// What a file's tags say, and how it is encoded.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -145,8 +148,27 @@ pub struct Progress {
     again: AtomicBool,
 }
 
+/// An album of the music on this PC: its songs share its name and its
+/// artist (the album artist's tag, else the first song's artist).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LocalAlbum {
+    /// What its page is found by: its artist and name.
+    pub key: String,
+    pub title: String,
+    /// Its artist, or "Various artists" when its songs' differ.
+    pub artist: String,
+    pub year: Option<u16>,
+    pub art: Option<String>,
+    pub songs: usize,
+    pub seconds: u64,
+    /// The folder its first song is in.
+    pub folder: Option<String>,
+}
+
 pub struct LocalLibrary {
     dir: PathBuf,
+    /// The albums the songs make, as of the songs' generation.
+    album_list: (u64, Arc<Vec<LocalAlbum>>),
     /// Every song, by artist, album, disc and track.
     songs: Arc<Vec<Track>>,
     /// Each song's words for search.
@@ -175,6 +197,7 @@ impl LocalLibrary {
     pub fn new(dir: PathBuf, wake: Arc<dyn Fn() + Send + Sync>) -> Self {
         Self {
             dir,
+            album_list: (u64::MAX, Arc::default()),
             songs: Arc::default(),
             words: Vec::new(),
             playback: HashMap::new(),
@@ -401,7 +424,72 @@ impl LocalLibrary {
     pub fn bytes(&self) -> u64 {
         self.bytes
     }
+
+    /// The albums, in the songs' order (by artist, then album), made again
+    /// only when the songs change.
+    pub fn album_list(&mut self) -> Arc<Vec<LocalAlbum>> {
+        if self.album_list.0 != self.generation {
+            self.album_list = (self.generation, Arc::new(albums_of(&self.songs)));
+        }
+        self.album_list.1.clone()
+    }
+
+    /// An album's songs, in order, by its key.
+    pub fn album_songs(&self, key: &str) -> Vec<Track> {
+        let id = format!("{ALBUM}{key}");
+        self.songs.iter().filter(|s| s.album.as_ref().and_then(|a| a.id.as_deref()) == Some(id.as_str())).cloned().collect()
+    }
 }
+
+/// What an album is found by: its artist and its name, in lower case.
+pub fn album_key(artist: &str, album: &str) -> String {
+    format!("{}\t{}", artist.trim().to_lowercase(), album.trim().to_lowercase())
+}
+
+/// The albums songs make, in their order.
+fn albums_of(songs: &[Track]) -> Vec<LocalAlbum> {
+    let mut albums: Vec<LocalAlbum> = Vec::new();
+    let mut at: HashMap<String, usize> = HashMap::new();
+    for song in songs {
+        let Some(album) = &song.album else { continue };
+        let Some(key) = album.id.as_deref().and_then(|id| id.strip_prefix(ALBUM)) else {
+            continue;
+        };
+        let artist = song.artists.first().map(|a| a.name.clone()).unwrap_or_default();
+        let seconds = u64::from(song.duration.unwrap_or(0));
+        match at.get(key) {
+            Some(&i) => {
+                let entry = &mut albums[i];
+                entry.songs += 1;
+                entry.seconds += seconds;
+                if !entry.artist.eq_ignore_ascii_case(&artist) && entry.artist != VARIOUS {
+                    entry.artist = VARIOUS.to_owned();
+                }
+                entry.year = entry.year.or(song.year);
+                if entry.art.is_none() {
+                    entry.art = song.thumbnail.clone();
+                }
+            }
+            None => {
+                at.insert(key.to_owned(), albums.len());
+                albums.push(LocalAlbum {
+                    key: key.to_owned(),
+                    title: album.name.clone(),
+                    artist,
+                    year: song.year,
+                    art: song.thumbnail.clone(),
+                    songs: 1,
+                    seconds,
+                    folder: song.file.as_deref().and_then(|f| Path::new(f).parent()).map(|p| p.to_string_lossy().into_owned()),
+                });
+            }
+        }
+    }
+    albums
+}
+
+/// An album whose songs are by more than one artist.
+const VARIOUS: &str = "Various artists";
 
 /// Which picture a song shares: its album's, or its own when it has none.
 fn art_key(track: &Track) -> String {
@@ -537,12 +625,17 @@ fn track_of(path: &str, meta: &Meta) -> Track {
     } else {
         meta.artists.clone()
     };
+    // The album leads to its page, by its artist and name.
+    let album = (!meta.album.is_empty()).then(|| {
+        let by = if meta.album_artist.is_empty() { artists.first().cloned().unwrap_or_default() } else { meta.album_artist.clone() };
+        Link::new(meta.album.clone(), Some(format!("{ALBUM}{}", album_key(&by, &meta.album))))
+    });
     Track {
         video_id: id_of(path),
         title,
         // Each artist leads to their page.
         artists: artists.into_iter().map(|name| Link::new(name.clone(), Some(format!("{ARTIST}{name}")))).collect(),
-        album: (!meta.album.is_empty()).then(|| Link::new(meta.album.clone(), None)),
+        album,
         duration: meta.duration_ms.map(|ms| ((ms + 500) / 1000) as u32),
         thumbnail: meta.art.as_ref().map(|art| format!("file:{art}")),
         year: meta.year,
@@ -587,21 +680,30 @@ fn scan(folders: &[PathBuf], dir: &Path, progress: &Progress, tx: &Sender<Built>
     for folder in folders {
         walk(folder, &mut files, &mut seen, 0);
     }
-    let mut entries = Vec::with_capacity(files.len());
-    let mut covers = HashMap::new();
+    // The files the index knows as they are stay; the rest are read, on a
+    // few threads at once (each at background priority) when there are
+    // many, as on a first scan.
+    let mut entries: Vec<Option<Entry>> = Vec::with_capacity(files.len());
+    let mut unread = Vec::new();
     let mut changed = index.version != VERSION;
     for (path, size, modified) in files {
-        progress.seen.fetch_add(1, Ordering::Relaxed);
         let key = path.to_string_lossy().into_owned();
         match known.remove(&key) {
-            Some(entry) if entry.size == size && entry.modified == modified => entries.push(entry),
+            Some(entry) if entry.size == size && entry.modified == modified => {
+                progress.seen.fetch_add(1, Ordering::Relaxed);
+                entries.push(Some(entry));
+            }
             _ => {
                 changed = true;
-                let meta = read_meta(&path, size, &art_dir, &mut covers);
-                entries.push(Entry { path: key, size, modified, meta });
+                unread.push((entries.len(), path, key, size, modified));
+                entries.push(None);
             }
         }
     }
+    for (at, entry) in read_all(&unread, &art_dir, progress) {
+        entries[at] = Some(entry);
+    }
+    let entries: Vec<Entry> = entries.into_iter().flatten().collect();
     // Files gone from the folders, or folders no longer scanned.
     changed |= !known.is_empty();
     if changed {
@@ -614,6 +716,43 @@ fn scan(folders: &[PathBuf], dir: &Path, progress: &Progress, tx: &Sender<Built>
         let _ = tx.send(build(entries, found));
         wake();
     }
+}
+
+/// Reads the files not in the index (where each goes among the entries,
+/// its path, key, size and time), on as many threads as is worth it: a
+/// few files on this one, many on up to four.
+fn read_all(unread: &[(usize, PathBuf, String, u64, u64)], art_dir: &Path, progress: &Progress) -> Vec<(usize, Entry)> {
+    let threads = std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).clamp(1, 4));
+    let threads = if unread.len() < 16 { 1 } else { threads };
+    let next = AtomicUsize::new(0);
+    let read = parking_lot::Mutex::new(Vec::with_capacity(unread.len()));
+    let work = || {
+        // The pictures beside the songs, by folder: each folder looked in once.
+        let mut covers = HashMap::new();
+        loop {
+            let n = next.fetch_add(1, Ordering::Relaxed);
+            let Some((at, path, key, size, modified)) = unread.get(n) else {
+                break;
+            };
+            let meta = read_meta(path, *size, art_dir, &mut covers);
+            progress.seen.fetch_add(1, Ordering::Relaxed);
+            read.lock().push((*at, Entry { path: key.clone(), size: *size, modified: *modified, meta }));
+        }
+    };
+    if threads == 1 {
+        work();
+    } else {
+        std::thread::scope(|scope| {
+            for _ in 0..threads {
+                scope.spawn(|| {
+                    lower_priority();
+                    work();
+                });
+            }
+        });
+        log::info!("read {} files on {threads} threads", unread.len());
+    }
+    read.into_inner()
 }
 
 /// The audio files under `dir`, with their sizes and times.
@@ -843,7 +982,13 @@ fn keep_art(art_dir: &Path, visual: &Visual) -> Option<String> {
     let path = art_dir.join(format!("{hash:016x}.{ext}"));
     if !path.is_file() {
         let _ = std::fs::create_dir_all(art_dir);
-        crate::settings::write_atomic(&path, data);
+        // Songs of one album, read at once on two threads, carry the same
+        // picture: each writes its own temporary file, and the last rename
+        // stands.
+        let tmp = art_dir.join(format!("{hash:016x}.{:?}.tmp", std::thread::current().id()).replace(['(', ')'], ""));
+        if std::fs::write(&tmp, data).is_ok() && std::fs::rename(&tmp, &path).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
     path.is_file().then(|| path.to_string_lossy().into_owned())
 }

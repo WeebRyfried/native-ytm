@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="../../releases/latest"><img src="https://img.shields.io/badge/download-v0.2.8-ff0033?style=flat-square" alt="Download v0.2.8"></a>
+  <a href="../../releases/latest"><img src="https://img.shields.io/badge/download-v0.2.9-ff0033?style=flat-square" alt="Download v0.2.9"></a>
   <img src="https://img.shields.io/badge/Windows-x64-0078D4?style=flat-square&logo=windows11&logoColor=white" alt="Windows x64">
   <img src="https://img.shields.io/badge/Rust-2024-B7410E?style=flat-square&logo=rust&logoColor=white" alt="Rust 2024">
   <img src="https://img.shields.io/badge/UI-egui%20%2B%20OpenGL-1f1f1f?style=flat-square" alt="egui and OpenGL">
@@ -56,7 +56,7 @@ sounds as good as your account allows.
 - **Songs kept on disk.** The last 100 songs you heard (or as many as you
   like) stay on disk too, so they start at once and play offline.
 - **Lyrics kept too**, once found: they show at once the next time, and
-  offline.
+  offline. The next song's are looked up while one plays.
 - **What it all takes**, in Settings: one bar of a colour per kind
   (downloads, songs kept, artwork, lyrics…) and the space left on the
   drive.
@@ -66,7 +66,9 @@ sounds as good as your account allows.
 
 **Lyrics and the full view**
 - **Synced lyrics** that follow the song: the line being sung lit, the rest
-  dim, the view gliding along. Click a line to play from there.
+  dim, the view gliding along. Click a line to play from there. Lines a
+  little early or late? Move them half a second at a time from the corner
+  of the lyrics; it is kept for that song.
 - **Readings over Japanese lyrics** in the full-window player: how each
   word sounds, set small over it, in romaji or as furigana.
 - **A full-window player**: the artwork large over a wash of its own colours,
@@ -85,22 +87,37 @@ sounds as good as your account allows.
   the files that changed.
 - Search finds Japanese titles by how they read: "torikago" finds トリカゴ.
 - Songs without artwork get their album's from Last.fm (or YouTube Music).
+- **Albums and artists** as well as songs, and a page for each album: its
+  cover, how it sounds (FLAC 24-bit 96 kHz…), its songs in order, and the
+  artist's other albums here.
+- **Watched folders.** Songs added, renamed, retagged or deleted show up on
+  their own: Windows tells the app when a folder changes, so nothing runs
+  in the meantime. A first scan reads several files at once.
 - Artists lead to a page of their own, as on YouTube Music: their picture,
   their story up top (a few lines, the rest a click away), Last.fm's
   listeners, tags, popular songs, albums and similar artists, your plays,
   and their songs on this PC.
 
 **Your music**
-- Home, Explore, moods and charts, search with suggestions, albums,
-  artists, playlists, all with infinite scrolling.
+- Home, Explore, moods and charts, search with suggestions and your recent
+  searches, albums, artists, playlists, all with infinite scrolling.
+- **Quick.** Home, Explore and the library open at once as they were last
+  time, while the fresh copy loads; artwork comes in YouTube Music's own
+  sizes, which arrive in about a tenth of a second; and a song you point
+  at has its stream found meanwhile, so the click plays it at once.
 - Signed in: your playlists, Liked music, the library, likes, saving,
-  subscribing, creating playlists, songs only Premium members can play.
+  subscribing, creating, renaming and deleting playlists, songs only
+  Premium members can play.
+- **Your stats**: your top artists, songs and albums over 7 days to all
+  time, the plays day by day, from Last.fm or from the app's own count
+  (which takes in the songs on this PC, and the time listened).
 - A queue that does what you expect: play next, drag to reorder, shuffle,
   repeat, and radio that keeps going when it runs out.
 
 **At home on Windows**
 - The media keys and the volume flyout, with the song's name and artwork.
-- Closes to the tray and keeps playing. One copy at a time.
+- Closes to the tray and keeps playing. One copy at a time. Starts with
+  Windows if you like, straight to the tray.
 - **Your YouTube Music history** gets what you play, as on the web.
 - **Discord**: "Listening to" the artist, with the artwork, the song and a
   progress bar on your profile.
@@ -204,7 +221,10 @@ cargo build --release
 | Music on this PC | `src/local.rs` | the folder scan (a thread at background priority), tags and pictures read once into an index, search (with readings of Japanese names), artwork found online |
 | Updates | `src/update.rs` | the latest GitHub release, the download checked against its SHA-256 digest, the running program renamed aside for the new one |
 | Lyric readings | `src/readings.rs` | Japanese words read longest match first from a table made from JMdict, then put in romaji or hiragana |
-| Songs on disk | `src/cache.rs`, `src/lyrics.rs` | downloads, and whole files kept from plays (the best quality heard, the least recently played going first); lyrics once found |
+| Songs on disk | `src/cache.rs`, `src/lyrics.rs`, `src/kept_pages.rs` | downloads, and whole files kept from plays (the best quality heard, the least recently played going first); lyrics once found; Home and the library's pages as they last loaded |
+| Stats | `src/stats.rs`, `src/ui/stats.rs` | the plays the app hears (one line of JSON each), summed over a stretch; Last.fm's own over the same |
+| Folder watch | `src/watch.rs` | Windows' change notifications for the folders of music, a burst of changes settled into one look through them |
+| Remembered | `src/personal.rs` | recent searches, and how far each song's lyrics are moved |
 | Offline | `src/net.rs` | whether there is internet, from Windows' Network List Manager, asked when a request fails and while offline |
 | Desktop | `src/discord.rs`, `src/lastfm.rs`, `src/platform.rs` | Discord's local pipe, Last.fm's API, DPAPI, the app's identity for the media flyout |
 
@@ -235,7 +255,7 @@ system's fallback fonts instead of reading them in.
 **For development**, the app takes a few environment variables:
 `NATIVE_YTM_ROUTE` opens pages or plays at start (`search:QUERY`,
 `browse:ID`, `play:VIDEO_ID`, `explore`, `library`, `settings`, `queue`,
-`lyrics`, `signin`, `full`, `fullscreen`, `cached`, `device`, `artist:NAME`, `local:N` to
+`lyrics`, `signin`, `full`, `fullscreen`, `cached`, `device`, `deviceview:N` (0 songs, 1 albums, 2 artists), `artist:NAME`, `localalbum:N`, `localradio:N`, `stats` (`stats:app` for the app's own), `recent` (the empty search box, focused), `local:N` to
 play the songs on this PC from the Nth, `update` to install an update once
 found, and `download` for the song playing, joined with `|`);
 `NATIVE_YTM_VERSION` makes the app believe it is that version (to be offered

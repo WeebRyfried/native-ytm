@@ -171,6 +171,11 @@ fn search_field(app: &mut App, ui: &mut Ui, width: f32) {
         ui.data_mut(|d| d.insert_temp(open_id, true));
     }
     let open = ui.data(|d| d.get_temp::<bool>(open_id).unwrap_or(false));
+    // Nothing typed yet: the searches made lately.
+    if open && app.search.input.trim().is_empty() && !app.personal.searches.is_empty() {
+        recent_searches(app, ui, rect, width, id, open_id);
+        return;
+    }
     let suggestions = &app.search.suggestions;
     if !open || app.search.input.trim().is_empty() || (suggestions.queries.is_empty() && suggestions.items.is_empty()) {
         if !has_focus {
@@ -220,6 +225,69 @@ fn search_field(app: &mut App, ui: &mut Ui, width: f32) {
         && !inner.response.hovered()
         && !ui.rect_contains_pointer(rect)
     {
+        ui.data_mut(|d| d.insert_temp(open_id, false));
+    }
+    if ui.input(|i| i.key_pressed(Key::Escape)) {
+        ui.data_mut(|d| d.insert_temp(open_id, false));
+        ui.memory_mut(|m| m.surrender_focus(id));
+    }
+}
+
+/// Under the empty search field: the searches made lately, each a click
+/// away, each with a cross to forget it, and "Clear" for all of them.
+fn recent_searches(app: &mut App, ui: &mut Ui, field: Rect, width: f32, id: egui::Id, open_id: egui::Id) {
+    let searches = app.personal.searches.clone();
+    let area = egui::Area::new(id.with("recent"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(pos2(field.left(), field.bottom() + 4.0));
+    let inner = area.show(ui.ctx(), |ui| {
+        egui::Frame::popup(ui.style())
+            .fill(theme::POPUP)
+            .inner_margin(egui::Margin::same(6))
+            .show(ui, |ui| {
+                let w = width - 12.0;
+                ui.set_width(w);
+                ui.horizontal(|ui| {
+                    ui.add_space(10.0);
+                    ui.label(RichText::new("Recent searches").font(theme::semibold(13.0)).color(theme::TEXT_DIM));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.add_space(6.0);
+                        let clear = ui
+                            .add(egui::Label::new(RichText::new("Clear").font(theme::medium(13.0)).color(theme::TEXT_DIM)).sense(Sense::click()))
+                            .on_hover_cursor(CursorIcon::PointingHand)
+                            .on_hover_text("Forget every recent search");
+                        if clear.clicked() {
+                            app.actions.push(Action::ForgetSearches);
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+                for query in searches.iter().take(8) {
+                    let (row, response) = ui.allocate_exact_size(vec2(w, 36.0), Sense::click());
+                    let response = response.on_hover_cursor(CursorIcon::PointingHand);
+                    let forget = Rect::from_center_size(pos2(row.right() - 18.0, row.center().y), Vec2::splat(26.0));
+                    let forget_response = ui.interact(forget, id.with(("forget", query)), Sense::click()).on_hover_text("Forget this search");
+                    if response.hovered() || forget_response.hovered() {
+                        ui.painter().rect_filled(row, CornerRadius::same(6), Color32::from_white_alpha(16));
+                        let tint = if forget_response.hovered() { theme::TEXT } else { theme::TEXT_DIM };
+                        Icon::Close.image(tint, 16.0).paint_at(ui, Rect::from_center_size(forget.center(), Vec2::splat(16.0)));
+                    }
+                    Icon::Clock.image(theme::TEXT_DIM, 18.0).paint_at(ui, Rect::from_min_size(pos2(row.left() + 10.0, row.center().y - 9.0), Vec2::splat(18.0)));
+                    let text = ui.painter().layout_no_wrap(query.clone(), theme::regular(14.5), theme::TEXT);
+                    let clip = Rect::from_min_max(pos2(row.left() + 40.0, row.top()), pos2(forget.left() - 4.0, row.bottom()));
+                    ui.painter().with_clip_rect(clip).galley(pos2(clip.left(), row.center().y - text.size().y / 2.0), text, theme::TEXT);
+                    if forget_response.clicked() {
+                        app.actions.push(Action::ForgetSearch(query.clone()));
+                    } else if response.clicked() {
+                        app.search.input = query.clone();
+                        app.actions.push(Action::Search(query.clone()));
+                        ui.data_mut(|d| d.insert_temp(open_id, false));
+                    }
+                }
+            });
+    });
+    // A click anywhere else closes it, as the suggestions do.
+    if ui.input(|i| i.pointer.any_pressed()) && !inner.response.hovered() && !ui.rect_contains_pointer(field) {
         ui.data_mut(|d| d.insert_temp(open_id, false));
     }
     if ui.input(|i| i.key_pressed(Key::Escape)) {

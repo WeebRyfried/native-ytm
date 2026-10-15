@@ -18,7 +18,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         .id_salt(("page", key.clone()))
         .auto_shrink([false, false]);
     let ready = match &route {
-        Route::Settings => true,
+        Route::Settings | Route::LocalAlbum(_) | Route::Stats => true,
         Route::Artist(name) => matches!(app.artists.get(&name.to_lowercase()), Some(Loadable::Ready(_))),
         _ => app.pages.get(&key).is_some_and(|p| matches!(p.data, Loadable::Ready(_))),
     };
@@ -43,6 +43,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                         Route::Settings => crate::ui::settings::show(app, ui),
                         Route::Library(tab) => library(app, ui, *tab, &key),
                         Route::Artist(name) => artist(app, ui, name),
+                        Route::LocalAlbum(album) => local_album(app, ui, album),
+                        Route::Stats => crate::ui::stats::show(app, ui),
                         _ => browse(app, ui, &route, &key),
                     }
                 });
@@ -56,7 +58,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                     app.actions.push(Action::SearchMore);
                 }
             }
-            Route::Settings | Route::Artist(_) => {}
+            Route::Settings | Route::Artist(_) | Route::LocalAlbum(_) | Route::Stats => {}
             _ => {
                 if let Some(state) = app.pages.get(&key)
                     && let Loadable::Ready(page) = &state.data
@@ -272,7 +274,12 @@ fn collection_header(ui: &mut Ui, cx: &mut Cx<'_>, header: &Header, page: &Page,
                     watch: false,
                     title: Some(header.title.clone()),
                 };
-                if widgets::pill(ui, Some(Icon::Play), "Play", true).clicked() {
+                let play = widgets::pill(ui, Some(Icon::Play), "Play", true);
+                // Pointed at, the first song's stream is found meanwhile.
+                if let Some(first) = tracks.first() {
+                    widgets::prewarm_on_hover(ui, cx, play.hovered(), first);
+                }
+                if play.clicked() {
                     play_all(cx, &tracks, &playlist_id, page.tracks_continuation.is_some(), false, &header.title, source.clone());
                 }
                 if widgets::pill(ui, Some(Icon::Shuffle), "Shuffle", false).clicked() {
@@ -319,6 +326,18 @@ fn collection_header(ui: &mut Ui, cx: &mut Cx<'_>, header: &Header, page: &Page,
                             params: Some("wAEB".into()),
                             title: Some(format!("{} radio", header.title)),
                         });
+                    }
+                    // The account's own playlist: renamed, or deleted.
+                    if header.editable && browse_id.starts_with("VL") && !matches!(browse_id, "VLLM" | "VLSE") {
+                        ui.separator();
+                        let id = browse_id.trim_start_matches("VL").to_owned();
+                        if entry(ui, Icon::Pencil, "Rename") {
+                            cx.push(Action::OpenRenamePlaylist { playlist_id: id.clone(), title: header.title.clone() });
+                        }
+                        if entry(ui, Icon::Trash, "Delete playlist") {
+                            cx.push(Action::OpenDeletePlaylist { playlist_id: id, title: header.title.clone() });
+                        }
+                        ui.separator();
                     }
                     let url = if browse_id.starts_with("MPRE") {
                         playlist_id.as_ref().map(|id| format!("https://music.youtube.com/playlist?list={id}"))
@@ -654,6 +673,7 @@ fn cached(app: &mut App, ui: &mut Ui) {
 /// The songs in the person's own folders: all of them, to play, shuffle
 /// or filter; or, before any folder is added, how to add one.
 fn device(app: &mut App, ui: &mut Ui) {
+    let albums_list = app.local.album_list();
     let songs = app.local.songs();
     let scanning = app.local.scanning();
     let scanned = app.local.scanned;
@@ -748,12 +768,223 @@ fn device(app: &mut App, ui: &mut Ui) {
         }
         return;
     }
-    if shown.is_empty() {
-        ui.add_space(12.0);
-        ui.label(RichText::new(format!("Nothing matches \u{201c}{}\u{201d}", filter.trim())).color(theme::TEXT_DIM));
-        return;
+    // Songs, albums or artists: the songs one list, the rest cards.
+    let view_id = egui::Id::new("device-view");
+    let mut view: u8 = ui.data(|d| d.get_temp(view_id)).unwrap_or(0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        for (n, label) in [(0u8, "Songs"), (1, "Albums"), (2, "Artists")] {
+            if widgets::chip(ui, label, view == n).clicked() {
+                view = n;
+                ui.data_mut(|d| d.insert_temp(view_id, n));
+            }
+        }
+    });
+    ui.add_space(16.0);
+    let wanted = filter.trim().to_lowercase();
+    let matches = |text: &str| wanted.is_empty() || text.to_lowercase().contains(&wanted) || crate::local::loose(text).contains(&crate::local::loose(&wanted));
+    match view {
+        1 => {
+            let items: Vec<Item> = albums_list
+                .iter()
+                .filter(|a| matches(&a.title) || matches(&a.artist))
+                .map(|a| Item {
+                    kind: Kind::Album,
+                    title: a.title.clone(),
+                    subtitle: match a.year {
+                        Some(year) => format!("{} \u{2022} {year}", a.artist),
+                        None => a.artist.clone(),
+                    },
+                    thumbnail: a.art.clone(),
+                    target: Some(Target::Browse { browse_id: format!("{}{}", crate::local::ALBUM, a.key), params: None }),
+                    track: None,
+                    play_playlist: None,
+                    color: None,
+                })
+                .collect();
+            if items.is_empty() {
+                nothing_matches(ui, &filter);
+            } else {
+                widgets::card_grid(ui, &mut cx, &items);
+            }
+        }
+        2 => {
+            // Each artist once, with how many songs and an album's cover.
+            let mut artists: Vec<(String, usize, Option<String>)> = Vec::new();
+            for song in songs.iter() {
+                for artist in &song.artists {
+                    match artists.iter_mut().find(|(name, _, _)| name.eq_ignore_ascii_case(&artist.name)) {
+                        Some((_, count, art)) => {
+                            *count += 1;
+                            if art.is_none() {
+                                art.clone_from(&song.thumbnail);
+                            }
+                        }
+                        None => artists.push((artist.name.clone(), 1, song.thumbnail.clone())),
+                    }
+                }
+            }
+            artists.sort_by_key(|(name, _, _)| name.to_lowercase());
+            let items: Vec<Item> = artists
+                .into_iter()
+                .filter(|(name, _, _)| matches(name))
+                .map(|(name, count, art)| Item {
+                    kind: Kind::Artist,
+                    subtitle: widgets::songs(count),
+                    target: Some(Target::Browse { browse_id: format!("{}{name}", crate::local::ARTIST), params: None }),
+                    title: name,
+                    thumbnail: art,
+                    track: None,
+                    play_playlist: None,
+                    color: None,
+                })
+                .collect();
+            if items.is_empty() {
+                nothing_matches(ui, &filter);
+            } else {
+                widgets::card_grid(ui, &mut cx, &items);
+            }
+        }
+        _ => {
+            if shown.is_empty() {
+                nothing_matches(ui, &filter);
+                return;
+            }
+            widgets::track_list(ui, &mut cx, &shown, RowPlace::List, &source, true);
+        }
     }
-    widgets::track_list(ui, &mut cx, &shown, RowPlace::List, &source, true);
+}
+
+fn nothing_matches(ui: &mut Ui, filter: &str) {
+    ui.add_space(12.0);
+    ui.label(RichText::new(format!("Nothing matches \u{201c}{}\u{201d}", filter.trim())).color(theme::TEXT_DIM));
+}
+
+/// An album of the music on this PC, made from its files: its cover, its
+/// names, how it sounds, its songs in order, and the artist's other albums
+/// here.
+fn local_album(app: &mut App, ui: &mut Ui, key: &str) {
+    let albums = app.local.album_list();
+    let Some(album) = albums.iter().find(|a| a.key == key).cloned() else {
+        ui.add_space(40.0);
+        if app.local.scanned {
+            ui.vertical_centered(|ui| ui.label(RichText::new("This album is no longer on this PC").color(theme::TEXT_DIM)));
+        } else {
+            widgets::spinner(ui);
+        }
+        return;
+    };
+    let songs = app.local.album_songs(key);
+    let quality = songs.first().and_then(|s| app.local.stream_for(s)).map(|s| s.quality);
+    let current = app.queue.current_track().map(|t| t.video_id.clone());
+    let playing = app.playing();
+    let signed_in = app.signed_in;
+    let online = app.online();
+    let mut cx = Cx {
+        images: &mut app.images,
+        actions: &mut app.actions,
+        current: current.as_deref(),
+        playing,
+        signed_in,
+        offline: &app.offline,
+        online,
+        romanized: app.settings.romanized_titles,
+    };
+    let source = Source { title: Some(album.title.clone()), ..Source::default() };
+
+    ui.add_space(16.0);
+    let width = ui.available_width();
+    let art = if width > 760.0 { 232.0 } else { 168.0 };
+    ui.horizontal_top(|ui| {
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(art), Sense::hover());
+        ui.painter().add(
+            egui::Shadow { offset: [0, 8], blur: 28, spread: 0, color: Color32::from_black_alpha(110) }.as_shape(rect, CornerRadius::same(8)),
+        );
+        widgets::paint_art(ui, cx.images, album.art.as_deref(), rect, 8.0, false);
+        ui.add_space(28.0);
+        ui.vertical(|ui| {
+            let text_w = (width - art - 28.0).max(200.0);
+            ui.set_width(text_w);
+            ui.add_space(8.0);
+            ui.label(RichText::new("ALBUM \u{00b7} ON THIS PC").font(theme::semibold(12.0)).color(theme::TEXT_DIM));
+            ui.add_space(4.0);
+            ui.add(egui::Label::new(RichText::new(&album.title).font(theme::bold(32.0))).wrap());
+            ui.add_space(6.0);
+            // The artist leads to their page, unless the album is many artists'.
+            let by = if album.artist == "Various artists" {
+                crate::api::model::Link::new(album.artist.clone(), None)
+            } else {
+                crate::api::model::Link::new(album.artist.clone(), Some(format!("{}{}", crate::local::ARTIST, album.artist)))
+            };
+            ui.horizontal(|ui| widgets::links(ui, &mut cx, std::slice::from_ref(&by), theme::medium(15.0), theme::TEXT, text_w));
+            let minutes = (album.seconds + 30) / 60;
+            let length = if minutes >= 60 {
+                format!("{} h {} min", minutes / 60, minutes % 60)
+            } else if minutes > 0 {
+                format!("{minutes} min")
+            } else {
+                format!("{} sec", album.seconds)
+            };
+            let mut line = vec!["Album".to_owned()];
+            if let Some(year) = album.year {
+                line.push(year.to_string());
+            }
+            line.push(widgets::songs(album.songs));
+            line.push(length);
+            ui.label(RichText::new(line.join(" \u{2022} ")).color(theme::TEXT_DIM).font(theme::regular(14.0)));
+            if let Some(quality) = &quality {
+                ui.label(RichText::new(quality).color(theme::TEXT_FAINT).font(theme::regular(13.0)));
+            }
+            ui.add_space(16.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                if widgets::pill(ui, Some(Icon::Play), "Play", true).clicked() && !songs.is_empty() {
+                    cx.push(Action::SetShuffle(false));
+                    cx.push(Action::PlayTracks { tracks: songs.clone(), start: 0, source: source.clone() });
+                }
+                if widgets::pill(ui, Some(Icon::Shuffle), "Shuffle", false).clicked() && !songs.is_empty() {
+                    cx.push(Action::SetShuffle(true));
+                    cx.push(Action::PlayTracks { tracks: songs.clone(), start: fastrand::usize(..songs.len()), source: source.clone() });
+                }
+                if let Some(first) = songs.first()
+                    && widgets::pill(ui, Some(Icon::Radio), "Start radio", false)
+                        .on_hover_text("This album's first song, then YouTube Music's radio of it")
+                        .clicked()
+                {
+                    cx.push(Action::StartRadio(first.clone()));
+                }
+                if let Some(folder) = album.folder.clone()
+                    && widgets::icon_button(ui, Icon::Folder, 20.0, theme::TEXT_DIM, "Show in folder").clicked()
+                {
+                    cx.push(Action::ShowInFolder(folder));
+                }
+            });
+        });
+    });
+    ui.add_space(24.0);
+    widgets::track_list(ui, &mut cx, &songs, RowPlace::Album, &source, false);
+
+    // The artist's other albums on this PC.
+    let more: Vec<Item> = albums
+        .iter()
+        .filter(|a| a.key != album.key && a.artist == album.artist && album.artist != "Various artists")
+        .map(|a| Item {
+            kind: Kind::Album,
+            title: a.title.clone(),
+            subtitle: a.year.map(|y| y.to_string()).unwrap_or_else(|| widgets::songs(a.songs)),
+            thumbnail: a.art.clone(),
+            target: Some(Target::Browse { browse_id: format!("{}{}", crate::local::ALBUM, a.key), params: None }),
+            track: None,
+            play_playlist: None,
+            color: None,
+        })
+        .collect();
+    if !more.is_empty() {
+        ui.add_space(32.0);
+        ui.label(RichText::new(format!("More by {}", album.artist)).font(theme::bold(22.0)));
+        ui.add_space(10.0);
+        widgets::card_grid(ui, &mut cx, &more);
+    }
 }
 
 /// Before any folder: what the page is for, and the way to begin.

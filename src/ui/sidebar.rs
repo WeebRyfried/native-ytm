@@ -53,6 +53,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     if nav(ui, Icon::Library, "Library", matches!(route, Route::Library(_))) {
         app.actions.push(Action::Navigate(Route::Library(LibraryTab::Playlists)));
     }
+    if nav(ui, Icon::Chart, "Stats", route == Route::Stats) {
+        app.actions.push(Action::Navigate(Route::Stats));
+    }
     ui.add_space(10.0);
     let divider = ui.available_rect_before_wrap();
     ui.painter().hline(

@@ -258,6 +258,90 @@ pub fn pick_folder(_title: &str) -> Option<std::path::PathBuf> {
 }
 
 /// Waits up to `limit` for another process to end.
+/// Where Windows looks for what to start when this user signs in, and the
+/// app's name there.
+const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+const RUN_NAME: &str = "Native YTM";
+
+/// What starts the app with Windows: this program, into the tray.
+pub fn autostart_command() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    Some(format!("\"{}\" --background", exe.display()))
+}
+
+/// What Windows starts for the app when this user signs in, if anything.
+pub fn autostart() -> Option<String> {
+    read_string(RUN_KEY, RUN_NAME)
+}
+
+/// Starts the app with Windows, or no longer. True once done.
+pub fn set_autostart(on: bool) -> bool {
+    match (on, autostart_command()) {
+        (true, Some(command)) => write_string(RUN_KEY, RUN_NAME, &command),
+        (true, None) => false,
+        (false, _) => delete_value(RUN_KEY, RUN_NAME),
+    }
+}
+
+#[cfg(windows)]
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(Some(0)).collect()
+}
+
+/// A text value under HKEY_CURRENT_USER.
+#[cfg(windows)]
+fn read_string(key: &str, name: &str) -> Option<String> {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_SZ, RegGetValueW};
+    let (key, name) = (wide(key), wide(name));
+    let mut buffer = vec![0u16; 1024];
+    let mut size = (buffer.len() * 2) as u32;
+    // SAFETY: NUL-terminated names, and a buffer of `size` bytes.
+    let status = unsafe {
+        RegGetValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), buffer.as_mut_ptr().cast(), &mut size)
+    };
+    if status != 0 {
+        return None;
+    }
+    let len = (size as usize / 2).saturating_sub(1).min(buffer.len());
+    Some(String::from_utf16_lossy(&buffer[..len]))
+}
+
+#[cfg(windows)]
+fn write_string(key: &str, name: &str, value: &str) -> bool {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, REG_SZ, RegSetKeyValueW};
+    let (key, name, value) = (wide(key), wide(name), wide(value));
+    // SAFETY: NUL-terminated names, and the value's bytes with its NUL.
+    let status = unsafe {
+        RegSetKeyValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr(), REG_SZ, value.as_ptr().cast(), (value.len() * 2) as u32)
+    };
+    status == 0
+}
+
+#[cfg(windows)]
+fn delete_value(key: &str, name: &str) -> bool {
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RegDeleteKeyValueW};
+    let (key, name) = (wide(key), wide(name));
+    // SAFETY: NUL-terminated names.
+    let status = unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, key.as_ptr(), name.as_ptr()) };
+    // Gone already counts.
+    status == 0 || status == 2
+}
+
+#[cfg(not(windows))]
+fn read_string(_key: &str, _name: &str) -> Option<String> {
+    None
+}
+
+#[cfg(not(windows))]
+fn write_string(_key: &str, _name: &str, _value: &str) -> bool {
+    false
+}
+
+#[cfg(not(windows))]
+fn delete_value(_key: &str, _name: &str) -> bool {
+    false
+}
+
 /// The space free on the drive `path` is on, for this user.
 #[cfg(windows)]
 pub fn free_space(path: &Path) -> Option<u64> {
@@ -406,6 +490,26 @@ fn ensure_shortcut(marker: &Path) -> windows::core::Result<()> {
         })();
         CoUninitialize();
         result
+    }
+}
+
+#[cfg(all(test, windows))]
+mod registry_tests {
+    use super::*;
+
+    /// Under a key of the tests' own, which is removed after.
+    #[test]
+    fn writes_reads_and_deletes_a_value() {
+        let key = r"Software\native-ytm-test";
+        assert!(write_string(key, "Command", "\"C:\\Program Files\\x.exe\" --background"));
+        assert_eq!(read_string(key, "Command").as_deref(), Some("\"C:\\Program Files\\x.exe\" --background"));
+        assert!(delete_value(key, "Command"));
+        assert_eq!(read_string(key, "Command"), None);
+        assert!(delete_value(key, "Command"));
+        let wide_key = wide(key);
+        // SAFETY: a NUL-terminated name of the test's own key.
+        unsafe { windows_sys::Win32::System::Registry::RegDeleteKeyW(windows_sys::Win32::System::Registry::HKEY_CURRENT_USER, wide_key.as_ptr()) };
+        assert!(autostart_command().is_some_and(|c| c.ends_with(" --background")));
     }
 }
 

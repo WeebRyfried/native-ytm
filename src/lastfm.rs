@@ -638,6 +638,11 @@ pub struct Reader {
 }
 
 impl Reader {
+    /// The person's Last.fm name, when connected.
+    pub fn user(&self) -> Option<&str> {
+        self.user.as_deref()
+    }
+
     async fn get(&self, http: &reqwest::Client, method: &str, params: &[(&str, &str)]) -> Result<Value, ApiError> {
         let stored = Stored { key: self.key.clone(), ..Stored::default() };
         read(http, &stored, method, params).await
@@ -689,6 +694,113 @@ impl Reader {
                 .map(|a| (text(&a["name"]), image(&a["image"])))
                 .filter(|(a, _)| !a.is_empty() && a != "(null)")
                 .collect(),
+        })
+    }
+
+    /// A read asked once more, a moment later, should it fail: Last.fm
+    /// turns some down when several come at once.
+    async fn get_again(&self, http: &reqwest::Client, method: &str, params: &[(&str, &str)]) -> Result<Value, ApiError> {
+        match self.get(http, method, params).await {
+            Ok(value) => Ok(value),
+            Err(error) => {
+                log::info!("Last.fm {method}: {error:?}; asking again");
+                tokio::time::sleep(Duration::from_millis(900)).await;
+                self.get(http, method, params).await.inspect_err(|error| log::info!("Last.fm {method} again: {error:?}"))
+            }
+        }
+    }
+
+    /// The person's listening over a stretch, as Last.fm counts it: their
+    /// top artists, songs and albums, and how many scrobbles, artists and
+    /// songs. Artists take the cover of their top album as their picture
+    /// (Last.fm gives them none of their own now).
+    pub async fn stats(&self, http: &reqwest::Client, period: crate::stats::Period) -> Result<crate::stats::Summary, String> {
+        use crate::stats::{Ranked, Summary};
+        let user = self.user.clone().ok_or_else(|| "Connect Last.fm in Settings to see your stats from it".to_owned())?;
+        let user = user.as_str();
+        let span = period.lastfm();
+        let top = [("user", user), ("period", span), ("limit", "10")];
+        let albums_query = [("user", user), ("period", span), ("limit", "12")];
+        let from = period.days().map(|days| (crate::stats::unix_now() - days * 24 * 60 * 60).to_string());
+        let mut recent_query = vec![("user", user), ("limit", "1")];
+        if let Some(from) = &from {
+            recent_query.push(("from", from.as_str()));
+        }
+        let info_query = [("user", user)];
+        let (artists, tracks, albums, recent, info) = tokio::join!(
+            self.get_again(http, "user.getTopArtists", &top),
+            self.get_again(http, "user.getTopTracks", &top),
+            self.get_again(http, "user.getTopAlbums", &albums_query),
+            self.get_again(http, "user.getRecentTracks", &recent_query),
+            self.get_again(http, "user.getInfo", &info_query),
+        );
+        let artists = artists.map_err(|e| describe(&e))?;
+        let list = |v: &Value| -> Vec<Value> {
+            match v {
+                Value::Array(items) => items.clone(),
+                Value::Object(_) => vec![v.clone()],
+                _ => Vec::new(),
+            }
+        };
+        let text = |v: &Value| v.as_str().unwrap_or_default().trim().to_owned();
+        let named = |r: &Ranked| !r.name.is_empty() && r.name != "(null)";
+        let top_albums: Vec<Ranked> = albums
+            .ok()
+            .map(|v| list(&v["topalbums"]["album"]))
+            .unwrap_or_default()
+            .iter()
+            .map(|a| Ranked {
+                name: text(&a["name"]),
+                by: Some(text(&a["artist"]["name"])).filter(|s| !s.is_empty()),
+                plays: count(&a["playcount"]).unwrap_or(0),
+                art: image(&a["image"]),
+                track: None,
+            })
+            .filter(named)
+            .collect();
+        let top_artists: Vec<Ranked> = list(&artists["topartists"]["artist"])
+            .iter()
+            .map(|a| {
+                let name = text(&a["name"]);
+                let art = top_albums
+                    .iter()
+                    .find(|album| album.art.is_some() && album.by.as_deref().is_some_and(|by| by.eq_ignore_ascii_case(&name)))
+                    .and_then(|album| album.art.clone());
+                Ranked { name, by: None, plays: count(&a["playcount"]).unwrap_or(0), art, track: None }
+            })
+            .filter(named)
+            .collect();
+        let tracks = tracks.ok();
+        let top_songs: Vec<Ranked> = tracks
+            .as_ref()
+            .map(|v| list(&v["toptracks"]["track"]))
+            .unwrap_or_default()
+            .iter()
+            .map(|t| Ranked {
+                name: text(&t["name"]),
+                by: Some(text(&t["artist"]["name"])).filter(|s| !s.is_empty()),
+                plays: count(&t["playcount"]).unwrap_or(0),
+                art: None,
+                track: None,
+            })
+            .filter(named)
+            .collect();
+        let info = info.ok();
+        let plays = match &from {
+            Some(_) => recent.ok().and_then(|v| count(&v["recenttracks"]["@attr"]["total"])),
+            None => info.as_ref().and_then(|v| count(&v["user"]["playcount"])),
+        };
+        Ok(Summary {
+            plays,
+            seconds: None,
+            artists: count(&artists["topartists"]["@attr"]["total"]),
+            songs: tracks.as_ref().and_then(|v| count(&v["toptracks"]["@attr"]["total"])),
+            top_artists,
+            top_songs,
+            top_albums,
+            bins: Vec::new(),
+            bin: crate::stats::Bins::default(),
+            since: info.as_ref().and_then(|v| count(&v["user"]["registered"]["unixtime"])).map(|t| t as i64),
         })
     }
 

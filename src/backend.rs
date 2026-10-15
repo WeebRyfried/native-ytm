@@ -21,6 +21,8 @@ pub enum Purpose {
     Preload,
     /// Only find it, for later: resolving is slow.
     Prefetch,
+    /// Found while the pointer rests on it, so a click starts it at once.
+    Prewarm,
     /// A better stream of the song already starting, to switch to.
     Upgrade,
     /// Downloading the song for offline listening.
@@ -118,6 +120,19 @@ pub enum Request {
         video_id: String,
         set_video_id: String,
     },
+    /// The person's stats from Last.fm over a stretch.
+    LastFmStats {
+        period: crate::stats::Period,
+        reader: crate::lastfm::Reader,
+    },
+    RenamePlaylist {
+        playlist_id: String,
+        title: String,
+    },
+    DeletePlaylist {
+        playlist_id: String,
+        title: String,
+    },
     CreatePlaylist {
         title: String,
         video_ids: Vec<String>,
@@ -202,6 +217,10 @@ pub enum Response {
     PlaylistTracks {
         seq: u64,
         result: Result<Vec<Track>, String>,
+    },
+    LastFmStats {
+        period: crate::stats::Period,
+        result: Result<crate::stats::Summary, String>,
     },
     Lyrics {
         video_id: String,
@@ -674,6 +693,20 @@ async fn run(
                 .await,
             "Removed from playlist",
             Some(key),
+        ),
+        Request::LastFmStats { period, reader } => Response::LastFmStats {
+            period,
+            result: reader.stats(&api.http, period).await,
+        },
+        Request::RenamePlaylist { playlist_id, title } => done(
+            api.rename_playlist(&playlist_id, &title).await,
+            &format!("Renamed to {title}"),
+            Some("library-playlists".into()),
+        ),
+        Request::DeletePlaylist { playlist_id, title } => done(
+            api.delete_playlist(&playlist_id).await,
+            &format!("Deleted {title}"),
+            Some("library-playlists".into()),
         ),
         Request::CreatePlaylist { title, video_ids } => match api.create_playlist(&title, true).await {
             Ok(id) => {

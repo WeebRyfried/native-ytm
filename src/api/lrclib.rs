@@ -11,6 +11,14 @@ use serde::Deserialize;
 use super::model::{LyricLine, Lyrics};
 
 const API: &str = "https://lrclib.net/api";
+
+/// LRCLIB turns away requests that come too close together: every lookup
+/// asks it one request at a time, this far apart.
+const SPACING: Duration = Duration::from_millis(350);
+
+/// When LRCLIB was last asked; held while a request is out.
+static GATE: std::sync::LazyLock<tokio::sync::Mutex<Option<std::time::Instant>>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(None));
 /// LRCLIB asks clients to name themselves.
 const USER_AGENT: &str = concat!("native-ytm/", env!("CARGO_PKG_VERSION"));
 
@@ -79,8 +87,21 @@ pub async fn find(http: &reqwest::Client, query: &Query) -> Result<Option<Lyrics
 }
 
 async fn get(http: &reqwest::Client, url: &str, params: &[(&str, String)]) -> Result<Option<serde_json::Value>> {
-    // LRCLIB turns away requests that come too close together (429, with
-    // a second or so to wait): wait as asked, a little longer each time.
+    let mut last = GATE.lock().await;
+    if let Some(at) = *last {
+        let wait = SPACING.saturating_sub(at.elapsed());
+        if !wait.is_zero() {
+            tokio::time::sleep(wait).await;
+        }
+    }
+    let result = get_now(http, url, params).await;
+    *last = Some(std::time::Instant::now());
+    result
+}
+
+async fn get_now(http: &reqwest::Client, url: &str, params: &[(&str, String)]) -> Result<Option<serde_json::Value>> {
+    // Turned away all the same (429, with a second or so to wait): wait as
+    // asked, a little longer each time.
     let mut attempt = 0;
     let response = loop {
         let response = http

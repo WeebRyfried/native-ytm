@@ -403,6 +403,7 @@ pub fn track_row(
     // Where the pointer is, not which widget has it: the artwork and the
     // menu button sit over the row and would take its hover away.
     let hovered = response.contains_pointer() || response.context_menu_opened();
+    prewarm_on_hover(ui, cx, hovered, track);
     let shade = ui.ctx().animate_bool_with_time(response.id.with("hover"), hovered, 0.1);
     if shade > 0.0 {
         ui.painter()
@@ -535,6 +536,27 @@ pub fn track_row(
         play = true;
     }
     RowResponse { play, response }
+}
+
+/// A song pointed at for a moment has its stream found meanwhile, so a
+/// click on it starts at once. One song at a time: the one under the
+/// pointer.
+pub fn prewarm_on_hover(ui: &Ui, cx: &mut Cx<'_>, hovered: bool, track: &Track) {
+    const DWELL: f64 = 0.25;
+    if !hovered || track.is_local() || !cx.online {
+        return;
+    }
+    let id = Id::new("prewarm-hover");
+    let now = ui.input(|i| i.time);
+    let (pointed, since, asked): (String, f64, bool) = ui.data(|d| d.get_temp(id)).unwrap_or_default();
+    if pointed != track.video_id {
+        ui.data_mut(|d| d.insert_temp(id, (track.video_id.clone(), now, false)));
+        // The pointer may rest without moving: look again then.
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(DWELL + 0.02));
+    } else if !asked && now - since >= DWELL {
+        cx.push(Action::Prewarm(track.clone()));
+        ui.data_mut(|d| d.insert_temp(id, (pointed, since, true)));
+    }
 }
 
 /// 1248 as "1,248".

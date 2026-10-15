@@ -19,6 +19,10 @@ pub enum Route {
     Settings,
     /// An artist's page made from Last.fm's, with their songs on this PC.
     Artist(String),
+    /// An album of the music on this PC, by its key (artist and name).
+    LocalAlbum(String),
+    /// The person's listening stats.
+    Stats,
 }
 
 impl Route {
@@ -34,6 +38,8 @@ impl Route {
             }
             Route::Settings => "settings".into(),
             Route::Artist(name) => format!("artist:{}", name.to_lowercase()),
+            Route::LocalAlbum(key) => format!("localalbum:{key}"),
+            Route::Stats => "stats".into(),
         }
     }
 
@@ -142,6 +148,17 @@ impl PageState {
             filter: String::new(),
         }
     }
+
+    /// A page kept from last time, shown while the fresh one loads: none of
+    /// its "more" is asked for until then, its tokens being old.
+    pub fn kept(page: Page) -> Self {
+        Self {
+            data: Loadable::Ready(page),
+            loading_more: true,
+            loading_tracks: true,
+            filter: String::new(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -201,6 +218,8 @@ pub enum Action {
         title: Option<String>,
     },
     StartRadio(Track),
+    /// The pointer rests on a song: find its stream meanwhile.
+    Prewarm(Track),
     PlayNext(Vec<Track>),
     AddToQueue(Vec<Track>),
     PlayQueueEntry(u64),
@@ -235,10 +254,37 @@ pub enum Action {
         title: String,
         tracks: Vec<Track>,
     },
+    /// Asks for a playlist's new name, or whether to delete it.
+    OpenRenamePlaylist {
+        playlist_id: String,
+        title: String,
+    },
+    OpenDeletePlaylist {
+        playlist_id: String,
+        title: String,
+    },
+    RenamePlaylist {
+        playlist_id: String,
+        title: String,
+    },
+    DeletePlaylist {
+        playlist_id: String,
+        title: String,
+    },
     LoadMore(String),
     LoadMoreTracks(String),
     SearchMore,
     Search(String),
+    /// Forgets one of the recent searches, or all of them.
+    ForgetSearch(String),
+    ForgetSearches,
+    /// Moves the song's synced lyrics later (or earlier, negative), in
+    /// seconds; or back to their own timing.
+    NudgeLyrics {
+        video_id: String,
+        by: f32,
+    },
+    ResetLyrics(String),
     SetSearchFilter(Filter),
     Suggest(String),
     ShowSidePanel(SideTab),
@@ -263,6 +309,13 @@ pub enum Action {
     LastFmConnect,
     LastFmDisconnect,
     ToggleSidebar,
+    /// Starts the app with Windows, into the tray, or no longer.
+    SetAutostart(bool),
+    /// Shows the stats from this source over this stretch.
+    ShowStats {
+        source: crate::stats::Source,
+        period: crate::stats::Period,
+    },
     OpenSignIn,
     SignIn(String),
     SignOut,

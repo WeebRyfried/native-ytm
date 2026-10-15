@@ -12,7 +12,7 @@ use crate::api::model::{LyricLine, Lyrics};
 use crate::app::App;
 use crate::model::{Action, Loadable};
 use crate::readings::{self, Dictionary, Style};
-use crate::theme;
+use crate::theme::{self, Icon};
 use crate::ui::widgets;
 
 /// A line laid out, with the readings over it: each one's centre, from
@@ -193,7 +193,9 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, big: bool
     }
     lines.extend(lyrics.lines.iter().cloned());
 
-    let position = app.position() + LEAD;
+    // Lyrics a little early or late for this recording: moved, per song.
+    let offset = app.personal.lyric_offset(video_id);
+    let position = app.position() + LEAD - offset;
     let playing = app.playing();
     let current = lines.iter().rposition(|l| l.time <= position);
     let dots_h = size * 0.9;
@@ -348,8 +350,11 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, big: bool
             );
         }
     }
+    if response.contains_pointer() || offset != 0.0 {
+        nudge(app, ui, rect, video_id, offset, response.contains_pointer());
+    }
     if let Some(time) = clicked_line {
-        app.actions.push(Action::Seek(time.max(0.0)));
+        app.actions.push(Action::Seek((time + offset).max(0.0)));
         // Back to following, from the line clicked.
         view.hand_until = 0.0;
         view.by_hand = false;
@@ -362,6 +367,62 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, big: bool
     {
         let wait = (next.time - position).max(0.016);
         theme::repaint_in(ui.ctx(), std::time::Duration::from_secs_f64(wait));
+    }
+}
+
+/// In the lyrics' corner: lines earlier or later by half a second, for a
+/// song whose lyrics run ahead of it or behind it; a click on the amount
+/// puts them back. Faint while the pointer is elsewhere, and only there
+/// at all then when the song's lyrics are moved.
+fn nudge(app: &mut App, ui: &mut Ui, area: Rect, video_id: &str, offset: f64, pointed: bool) {
+    let id = ui.id().with(("lyrics-nudge", video_id));
+    let shown = ui.ctx().animate_bool_with_time(id, pointed, 0.2).max(if offset != 0.0 { 0.55 } else { 0.0 });
+    if shown <= 0.01 {
+        return;
+    }
+    let label = if offset > 0.0 {
+        format!("{offset:.1} s later")
+    } else if offset < 0.0 {
+        format!("{:.1} s earlier", -offset)
+    } else {
+        "In time".to_owned()
+    };
+    let painter = ui.painter().clone();
+    let galley = painter.layout_no_wrap(label, theme::medium(12.5), theme::TEXT);
+    let (h, button) = (30.0, 32.0);
+    let w = button * 2.0 + galley.size().x + 16.0;
+    let bar = Rect::from_min_size(pos2(area.right() - w - 10.0, area.bottom() - h - 10.0), vec2(w, h));
+    painter.rect_filled(bar, CornerRadius::same(15), theme::POPUP.gamma_multiply(shown));
+    painter.rect_stroke(bar, CornerRadius::same(15), egui::Stroke::new(1.0, theme::DIVIDER.gamma_multiply(shown)), egui::StrokeKind::Inside);
+    let earlier = Rect::from_min_size(bar.min, vec2(button, h));
+    let later = Rect::from_min_size(pos2(bar.right() - button, bar.top()), vec2(button, h));
+    let middle = Rect::from_min_max(pos2(earlier.right(), bar.top()), pos2(later.left(), bar.bottom()));
+    let earlier_r = ui.interact(earlier, id.with("earlier"), Sense::click()).on_hover_text("Lines come half a second earlier");
+    let later_r = ui.interact(later, id.with("later"), Sense::click()).on_hover_text("Lines come half a second later");
+    let middle_r = ui.interact(middle, id.with("reset"), Sense::click());
+    let middle_r = if offset != 0.0 { middle_r.on_hover_text("Back to the lyrics' own timing") } else { middle_r.on_hover_text("Lyrics early or late? Move them here; it is kept for this song") };
+    for (r, rect, icon) in [(&earlier_r, earlier, Icon::Minus), (&later_r, later, Icon::Plus)] {
+        let tint = if r.hovered() { theme::TEXT } else { theme::TEXT_DIM };
+        if r.hovered() {
+            painter.circle_filled(rect.center(), 12.0, Color32::from_white_alpha((24.0 * shown) as u8));
+            ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+        }
+        icon.image(tint.gamma_multiply(shown), 16.0).paint_at(ui, Rect::from_center_size(rect.center(), egui::Vec2::splat(16.0)));
+    }
+    let text_color = if offset != 0.0 { theme::ACCENT_TEXT } else { theme::TEXT_DIM };
+    painter.galley_with_override_text_color(middle.center() - galley.size() / 2.0, galley, text_color.gamma_multiply(shown));
+    if offset != 0.0 && middle_r.hovered() {
+        ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
+    }
+    if earlier_r.clicked() {
+        app.actions.push(Action::NudgeLyrics { video_id: video_id.to_owned(), by: -0.5 });
+    } else if later_r.clicked() {
+        app.actions.push(Action::NudgeLyrics { video_id: video_id.to_owned(), by: 0.5 });
+    } else if middle_r.clicked() && offset != 0.0 {
+        app.actions.push(Action::ResetLyrics(video_id.to_owned()));
+    }
+    if shown < 1.0 && pointed {
+        theme::next_frame(ui.ctx());
     }
 }
 

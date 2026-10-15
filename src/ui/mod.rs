@@ -12,6 +12,7 @@ mod player_bar;
 mod settings;
 mod side_panel;
 mod sidebar;
+mod stats;
 mod topbar;
 pub mod widgets;
 

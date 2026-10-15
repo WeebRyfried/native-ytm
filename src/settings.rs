@@ -188,12 +188,27 @@ impl Paths {
         self.config.join("account.bin")
     }
 
+    /// Recent searches and lyric offsets.
+    pub fn personal(&self) -> PathBuf {
+        self.config.join("personal.json")
+    }
+
+    /// The plays the app has heard, for its stats.
+    pub fn plays(&self) -> PathBuf {
+        self.config.join("plays.jsonl")
+    }
+
     pub fn images(&self) -> PathBuf {
         self.cache.join("images")
     }
 
     pub fn lyrics(&self) -> PathBuf {
         self.cache.join("lyrics")
+    }
+
+    /// Pages as they last loaded, shown at once on the next start.
+    pub fn pages(&self) -> PathBuf {
+        self.cache.join("pages")
     }
 
     pub fn songs(&self) -> PathBuf {

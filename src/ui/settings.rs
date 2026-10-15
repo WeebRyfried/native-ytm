@@ -27,7 +27,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         your_music(app, ui, &mut draft);
         storage(app, ui, &mut draft);
         connections(app, ui, &mut draft);
-        appearance(ui, &mut draft);
+        appearance(app, ui, &mut draft);
         updates(app, ui, &mut draft);
         keyboard(ui);
         advanced(app, ui, &mut draft);
@@ -576,7 +576,7 @@ fn connections(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
     });
 }
 
-fn appearance(ui: &mut Ui, draft: &mut Settings) {
+fn appearance(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
     card(ui, "Window", |ui| {
         toggle_row(
             ui,
@@ -586,6 +586,17 @@ fn appearance(ui: &mut Ui, draft: &mut Settings) {
         );
         divider(ui);
         toggle_row(ui, "Keep playing when closed", "Closing the window leaves the music playing, from the icon in the taskbar's corner.", &mut draft.close_to_tray);
+        divider(ui);
+        let mut autostart = app.autostart;
+        toggle_row(
+            ui,
+            "Start with Windows",
+            "Opens in the taskbar's corner when you sign in to Windows, ready for the media keys; the window is a click on its icon away.",
+            &mut autostart,
+        );
+        if autostart != app.autostart {
+            app.actions.push(Action::SetAutostart(autostart));
+        }
         divider(ui);
         row(ui, "Interface size", "Everything larger or smaller.", 230.0, |ui| {
             ui.spacing_mut().slider_width = 150.0;
@@ -841,6 +852,8 @@ fn megabytes(bytes: u64) -> String {
         format!("{:.1} GB", mb / 1024.0)
     } else if mb >= 1.0 || bytes == 0 {
         format!("{mb:.0} MB")
+    } else if bytes as f64 / 1024.0 >= 999.5 {
+        "1 MB".to_owned()
     } else {
         format!("{:.0} KB", (bytes as f64 / 1024.0).max(1.0))
     }

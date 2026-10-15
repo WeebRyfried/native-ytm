@@ -234,6 +234,9 @@ fastframe_icons::icons! {
         FolderPlus => "folder-plus",
         Computer => lucide "monitor",
         Update => "circle-arrow-down",
+        Clock => lucide "clock",
+        Pencil => lucide "pencil",
+        Minus => lucide "minus",
     }
 }
 

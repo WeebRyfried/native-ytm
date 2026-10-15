@@ -316,6 +316,30 @@ impl Innertube {
         Ok(())
     }
 
+    /// Renames one of the account's own playlists.
+    pub async fn rename_playlist(&self, playlist_id: &str, title: &str) -> Result<()> {
+        let response = self
+            .post(
+                "browse/edit_playlist",
+                json!({
+                    "playlistId": playlist_id.trim_start_matches("VL"),
+                    "actions": [{ "action": "ACTION_SET_PLAYLIST_NAME", "playlistName": title }],
+                }),
+            )
+            .await?;
+        match response["status"].as_str() {
+            Some("STATUS_SUCCEEDED") | None => Ok(()),
+            Some(status) => bail!("{status}"),
+        }
+    }
+
+    /// Deletes one of the account's own playlists, for good.
+    pub async fn delete_playlist(&self, playlist_id: &str) -> Result<()> {
+        self.post("playlist/delete", json!({ "playlistId": playlist_id.trim_start_matches("VL") }))
+            .await?;
+        Ok(())
+    }
+
     pub async fn create_playlist(&self, title: &str, private: bool) -> Result<String> {
         let response = self
             .post(

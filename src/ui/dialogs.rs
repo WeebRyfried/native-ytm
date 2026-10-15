@@ -1,5 +1,5 @@
-//! Dialogs over the window: signing in, saving to a playlist, and naming
-//! a new one.
+//! Dialogs over the window: signing in, saving to a playlist, naming a new
+//! one, renaming one, and making sure before deleting one.
 
 use egui::{Align, Color32, CornerRadius, CursorIcon, Id, Layout, Margin, Rect, RichText, Sense, Ui, Vec2, pos2, vec2};
 
@@ -18,6 +18,100 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     }
     if app.new_playlist.is_some() {
         new_playlist(app, ctx);
+    }
+    if app.rename_playlist.is_some() {
+        rename_playlist(app, ctx);
+    }
+    if app.delete_playlist.is_some() {
+        delete_playlist(app, ctx);
+    }
+}
+
+/// A playlist of the account's own, renamed.
+fn rename_playlist(app: &mut App, ctx: &egui::Context) {
+    let mut close = false;
+    let mut rename = None;
+    let response = egui::Modal::new(Id::new("rename-playlist"))
+        .frame(frame())
+        .backdrop_color(theme::SCRIM)
+        .show(ctx, |ui: &mut Ui| {
+            ui.set_width(380.0);
+            ui.label(RichText::new("Rename playlist").font(theme::bold(20.0)));
+            ui.add_space(12.0);
+            let (id, title) = app.rename_playlist.as_mut().expect("shown");
+            let edit = ui.add(
+                egui::TextEdit::singleline(title)
+                    .hint_text("Title")
+                    .desired_width(f32::INFINITY)
+                    .font(theme::regular(15.0)),
+            );
+            // Focused, the name chosen, as a rename box does.
+            let focus_id = Id::new("rename-playlist-focused");
+            if !ui.data(|d| d.get_temp::<bool>(focus_id).unwrap_or(false)) {
+                edit.request_focus();
+                if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), edit.id) {
+                    let all = egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(title.chars().count()));
+                    state.cursor.set_char_range(Some(all));
+                    state.store(ui.ctx(), edit.id);
+                }
+                ui.data_mut(|d| d.insert_temp(focus_id, true));
+            }
+            ui.add_space(16.0);
+            let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                let ready = !title.trim().is_empty();
+                if (widgets::pill(ui, None, "Rename", ready).clicked() || enter) && ready {
+                    rename = Some((id.clone(), title.clone()));
+                }
+                if widgets::pill(ui, None, "Cancel", false).clicked() {
+                    close = true;
+                }
+            });
+        });
+    if let Some((playlist_id, title)) = rename {
+        app.actions.push(Action::RenamePlaylist { playlist_id, title });
+        ctx.data_mut(|d| d.remove::<bool>(Id::new("rename-playlist-focused")));
+    } else if response.should_close() || close {
+        app.rename_playlist = None;
+        ctx.data_mut(|d| d.remove::<bool>(Id::new("rename-playlist-focused")));
+    }
+}
+
+/// Deleting a playlist of the account's own, once sure.
+fn delete_playlist(app: &mut App, ctx: &egui::Context) {
+    let mut close = false;
+    let mut delete = false;
+    let (id, title) = app.delete_playlist.clone().expect("shown");
+    let response = egui::Modal::new(Id::new("delete-playlist"))
+        .frame(frame())
+        .backdrop_color(theme::SCRIM)
+        .show(ctx, |ui: &mut Ui| {
+            ui.set_width(400.0);
+            ui.label(RichText::new("Delete playlist?").font(theme::bold(20.0)));
+            ui.add_space(10.0);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(format!("\u{201c}{title}\u{201d} goes from your YouTube Music account, on every device. This cannot be undone."))
+                        .color(theme::TEXT_DIM),
+                )
+                .wrap(),
+            );
+            ui.add_space(18.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                if widgets::pill(ui, Some(Icon::Trash), "Delete", true).clicked() {
+                    delete = true;
+                }
+                if widgets::pill(ui, None, "Cancel", false).clicked() {
+                    close = true;
+                }
+            });
+        });
+    if delete {
+        app.actions.push(Action::DeletePlaylist { playlist_id: id, title });
+    } else if response.should_close() || close {
+        app.delete_playlist = None;
     }
 }
 

@@ -21,6 +21,8 @@ fn main() {
     if let Some(pid) = updated_from {
         platform::wait_for_exit(pid, std::time::Duration::from_secs(15));
     }
+    // Started with Windows: into the tray, no window.
+    let background = args.iter().any(|a| a == "--background");
     let resume = if args.iter().any(|a| a == "--resume-playing") {
         Some(true)
     } else if args.iter().any(|a| a == "--resume") {
@@ -50,7 +52,8 @@ fn main() {
         _ => return,
     };
     // Only the running copy logs, so a second launch never replaces its
-    // log file.
+    // log file. The last few runs' logs are kept beside it.
+    rotate_logs(&paths.logs(), "native-ytm", 3);
     if let Err(error) = fastframe_log::Logging::new("native-ytm", env!("CARGO_PKG_VERSION"))
         .filter("warn,native_ytm=info,fastframe_audio=info")
         .file(paths.logs().join("native-ytm.log"))
@@ -74,7 +77,7 @@ fn main() {
         app.resume_after_update(playing);
     }
     let config = paths.config.clone();
-    let result = fastframe_shell::Shell::new(app, &waker).run(|lease| {
+    let result = fastframe_shell::Shell::new(app, &waker).start_hidden(background).run(|lease| {
         let viewport = egui::ViewportBuilder::default()
             .with_title("Native YTM")
             .with_app_id("native-ytm")
@@ -166,6 +169,16 @@ impl Shot {
     }
 }
 
+/// Moves the last run's log aside before this run's starts: `name.log`
+/// becomes `name.1.log`, that one `name.2.log`, and so on, `keep` of them.
+fn rotate_logs(dir: &std::path::Path, name: &str, keep: usize) {
+    let path = |n: usize| if n == 0 { dir.join(format!("{name}.log")) } else { dir.join(format!("{name}.{n}.log")) };
+    let _ = std::fs::remove_file(path(keep));
+    for n in (0..keep).rev() {
+        let _ = std::fs::rename(path(n), path(n + 1));
+    }
+}
+
 fn fnv(s: &str) -> u64 {
     s.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, b| (hash ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3))
 }
@@ -206,6 +219,12 @@ static PLAY_LOCAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsi
 /// `localradio:N`: start a radio from the Nth song on this PC, the same way.
 static RADIO_LOCAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// `localalbum:N`: open the page of the Nth album on this PC, the same way.
+static ALBUM_LOCAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// `deviceview:N`: On this PC as songs (0), albums (1) or artists (2).
+static DEVICE_VIEW: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn dev_route(app: &mut App) {
     use native_ytm::model::{Action, LibraryTab, Route, SideTab};
     let Ok(route) = std::env::var("NATIVE_YTM_ROUTE") else {
@@ -237,6 +256,27 @@ fn dev_route(app: &mut App) {
             }
             "localradio" => {
                 RADIO_LOCAL.store(arg.parse::<usize>().unwrap_or(0) + 1, std::sync::atomic::Ordering::Relaxed);
+                continue;
+            }
+            "localalbum" => {
+                ALBUM_LOCAL.store(arg.parse::<usize>().unwrap_or(0) + 1, std::sync::atomic::Ordering::Relaxed);
+                continue;
+            }
+            "deviceview" => {
+                DEVICE_VIEW.store(arg.parse::<usize>().unwrap_or(0) + 1, std::sync::atomic::Ordering::Relaxed);
+                Action::Navigate(Route::Library(LibraryTab::Device))
+            }
+            "stats" => {
+                app.actions.push(Action::Navigate(Route::Stats));
+                // `stats:app` for the app's own.
+                if arg == "app" {
+                    app.actions.push(Action::ShowStats { source: native_ytm::stats::Source::App, period: native_ytm::stats::Period::Month });
+                }
+                continue;
+            }
+            "recent" => {
+                app.search.input.clear();
+                app.search.focus = true;
                 continue;
             }
             "settings" => Action::Navigate(Route::Settings),
@@ -349,6 +389,18 @@ impl eframe::App for Window {
             let tracks = self.app.local.songs().to_vec();
             let start = (local - 1).min(tracks.len() - 1);
             self.app.actions.push(native_ytm::model::Action::PlayTracks { tracks, start, source: Default::default() });
+        }
+        let album = ALBUM_LOCAL.load(Ordering::Relaxed);
+        if album > 0 && !self.app.local.songs().is_empty() {
+            ALBUM_LOCAL.store(0, Ordering::Relaxed);
+            let albums = self.app.local.album_list();
+            if let Some(found) = albums.get((album - 1).min(albums.len().saturating_sub(1))) {
+                self.app.actions.push(native_ytm::model::Action::Navigate(native_ytm::model::Route::LocalAlbum(found.key.clone())));
+            }
+        }
+        let view = DEVICE_VIEW.swap(0, Ordering::Relaxed);
+        if view > 0 {
+            ctx.data_mut(|d| d.insert_temp(egui::Id::new("device-view"), (view - 1) as u8));
         }
         let radio = RADIO_LOCAL.load(Ordering::Relaxed);
         if radio > 0 && !self.app.local.songs().is_empty() {

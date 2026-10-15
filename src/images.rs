@@ -18,6 +18,24 @@ const BUDGET: usize = 48 * 1024 * 1024;
 /// ...and any left undrawn this long go regardless.
 const STALE: Duration = Duration::from_secs(300);
 
+/// The sizes asked for: YouTube Music's own (60, 120, 226 and 544 px),
+/// which Google keeps ready and sends in a tenth of a second, where any
+/// other size is made on the spot (half a second, or seconds for a large
+/// one, or not at all); then 1200 for the largest views.
+const SIZES: [u32; 5] = [60, 120, 226, 544, 1200];
+
+/// The size of YouTube Music's own the full-window views fall back on.
+const USUAL: u32 = 544;
+
+/// What the cache folder holds was fetched at these sizes; files from
+/// other sizes are let go once (bump when the sizes change).
+const SIZES_VERSION: &str = "sizes-v2";
+
+/// The smallest of the sizes asked for that covers `px`.
+fn snap(px: u32) -> u32 {
+    SIZES.into_iter().find(|&size| size >= px).unwrap_or(SIZES[SIZES.len() - 1])
+}
+
 enum Entry {
     Loading,
     Ready {
@@ -58,6 +76,16 @@ impl Images {
         dir: PathBuf,
     ) -> Self {
         let _ = std::fs::create_dir_all(&dir);
+        // Artwork kept at the sizes asked for before would never be asked
+        // for again.
+        let marker = dir.join(SIZES_VERSION);
+        if !marker.exists() {
+            let freed = clear_cache(&dir);
+            if freed > 0 {
+                log::info!("artwork cache cleared for the new sizes ({:.1} MB)", freed as f64 / 1_048_576.0);
+            }
+            let _ = std::fs::write(&marker, b"");
+        }
         let (tx, rx) = channel();
         Self {
             entries: HashMap::new(),
@@ -75,7 +103,7 @@ impl Images {
     /// Artwork at about `px` pixels square, if it is ready; otherwise starts
     /// fetching it.
     pub fn get(&mut self, url: &str, px: u32) -> Option<TextureHandle> {
-        let px = px.clamp(32, 1200).next_power_of_two().min(1200);
+        let px = snap(px);
         let key = sized_key(url, px);
         let source = if url.starts_with("file:") { url.to_owned() } else { key.clone() };
         self.entry(key, source, px, Make::Texture)
@@ -84,10 +112,18 @@ impl Images {
     /// The artwork at `px`, or while that loads, a smaller size already
     /// here, so a big view never flashes empty.
     pub fn get_or_smaller(&mut self, url: &str, px: u32) -> Option<TextureHandle> {
+        let px = snap(px);
         if let Some(texture) = self.get(url, px) {
             return Some(texture);
         }
-        [512, 256, 128, 64, 32].into_iter().find_map(|size| match self.entries.get_mut(&sized_key(url, size)) {
+        // A large size can take seconds to be made: meanwhile YouTube
+        // Music's own largest, which comes at once.
+        if px > USUAL
+            && let Some(texture) = self.get(url, USUAL)
+        {
+            return Some(texture);
+        }
+        SIZES.into_iter().rev().filter(|&size| size < px).find_map(|size| match self.entries.get_mut(&sized_key(url, size)) {
             Some(Entry::Ready { texture, used, .. }) => {
                 *used = Instant::now();
                 Some(texture.clone())
@@ -130,7 +166,7 @@ impl Images {
         if let Some(path) = url.strip_prefix("file:") {
             return Some(PathBuf::from(path));
         }
-        let px = px.clamp(32, 1200).next_power_of_two().min(1200);
+        let px = snap(px);
         let source = sized_thumbnail(url, px);
         if let Some(Entry::Ready { file, .. }) = self.entries.get(&source) {
             return Some(file.clone());
@@ -298,7 +334,6 @@ fn sized_key(url: &str, px: u32) -> String {
 /// For Google's artwork wanted larger than YouTube Music shows it (544 px),
 /// that size, to fall back on.
 fn usual_size(source: &str, px: u32) -> Option<String> {
-    const USUAL: u32 = 544;
     let google = source.contains("googleusercontent.com") || source.contains("ggpht.com");
     (google && px > USUAL).then(|| sized_thumbnail(source, USUAL)).filter(|usual| usual != source)
 }
@@ -415,3 +450,19 @@ pub fn clear_cache(dir: &Path) -> u64 {
     freed
 }
 
+#[cfg(test)]
+mod size_tests {
+    use super::snap;
+
+    #[test]
+    fn sizes_snap_to_youtube_musics_own() {
+        assert_eq!(snap(1), 60);
+        assert_eq!(snap(56), 60);
+        assert_eq!(snap(64), 120);
+        assert_eq!(snap(200), 226);
+        assert_eq!(snap(290), 544);
+        assert_eq!(snap(544), 544);
+        assert_eq!(snap(800), 1200);
+        assert_eq!(snap(4000), 1200);
+    }
+}
