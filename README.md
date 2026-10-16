@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="../../releases/latest"><img src="https://img.shields.io/badge/download-v0.2.9-ff0033?style=flat-square" alt="Download v0.2.9"></a>
+  <a href="../../releases/latest"><img src="https://img.shields.io/badge/download-v0.3.0-ff0033?style=flat-square" alt="Download v0.3.0"></a>
   <img src="https://img.shields.io/badge/Windows-x64-0078D4?style=flat-square&logo=windows11&logoColor=white" alt="Windows x64">
   <img src="https://img.shields.io/badge/Rust-2024-B7410E?style=flat-square&logo=rust&logoColor=white" alt="Rust 2024">
   <img src="https://img.shields.io/badge/UI-egui%20%2B%20OpenGL-1f1f1f?style=flat-square" alt="egui and OpenGL">
@@ -104,7 +104,8 @@ sounds as good as your account allows.
 - **Quick.** Home, Explore and the library open at once as they were last
   time, while the fresh copy loads; artwork comes in YouTube Music's own
   sizes, which arrive in about a tenth of a second; and a song you point
-  at has its stream found meanwhile, so the click plays it at once.
+  at has its stream found meanwhile, so the click plays it at once (with
+  Premium, the 256 kb/s stream takes over when it comes).
 - Signed in: your playlists, Liked music, the library, likes, saving,
   subscribing, creating, renaming and deleting playlists, songs only
   Premium members can play.
@@ -120,7 +121,8 @@ sounds as good as your account allows.
   Windows if you like, straight to the tray.
 - **Your YouTube Music history** gets what you play, as on the web.
 - **Discord**: "Listening to" the artist, with the artwork, the song and a
-  progress bar on your profile.
+  progress bar on your profile. Songs on this PC show their album's
+  artwork too, found online, since Discord shows only pictures on the web.
 - **Last.fm**: scrobbling and now playing, and in the player bar how many
   times you've played the song and the artist; on an artist's page, how
   often you've scrobbled them.
@@ -263,8 +265,8 @@ the latest release); `NATIVE_YTM_SHOT=out.png`
 saves a screenshot after `NATIVE_YTM_SHOT_DELAY` ms and quits;
 `NATIVE_YTM_SCROLL`, `NATIVE_YTM_SEEK`, `NATIVE_YTM_MUTE`;
 `NATIVE_YTM_NO_DISCORD`; `NATIVE_YTM_PROFILE=DIR` runs a separate copy with
-its own data; `NATIVE_YTM_WIGGLE=x,y` and `NATIVE_YTM_WHEEL=x,y` make up
-pointer input; `NATIVE_YTM_NO_FRAME_SKIP` draws identical frames anyway;
+its own data; `NATIVE_YTM_WIGGLE=x,y`, `NATIVE_YTM_WHEEL=x,y` and
+`NATIVE_YTM_CLICK=x,y[,seconds]` make up pointer input; `NATIVE_YTM_NO_FRAME_SKIP` draws identical frames anyway;
 `NATIVE_YTM_OFFLINE` makes the app believe it is offline.
 `ytm-probe` is a console tool for when YouTube changes something: `dump`
 prints what the parsers make of live pages, `play` resolves and plays a

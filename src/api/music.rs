@@ -185,12 +185,15 @@ impl Innertube {
         }
         match playlist_id {
             Some(playlist_id) => body["playlistId"] = json!(playlist_id),
-            None => {
+            // A song alone: its radio. With params of their own (a shelf's
+            // songs, for "Play all"), as YouTube Music sends them.
+            None if params.is_none() => {
                 if let Some(video_id) = video_id {
                     body["playlistId"] = json!(format!("RDAMVM{video_id}"));
                     body["params"] = json!("wAEB");
                 }
             }
+            None => {}
         }
         if let Some(params) = params {
             body["params"] = json!(params);
@@ -384,7 +387,7 @@ pub enum Rating {
     None,
 }
 
-fn urlencode(s: &str) -> String {
+pub fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {

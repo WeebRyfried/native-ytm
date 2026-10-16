@@ -345,23 +345,39 @@ impl LocalLibrary {
     /// The songs (by album) still without a picture, to look for online,
     /// each asked for once.
     pub fn art_wanted(&mut self) -> Vec<ArtQuery> {
-        let now = unix_now();
-        let mut wanted = Vec::new();
-        for song in self.songs.iter().filter(|s| s.thumbnail.is_none()) {
-            let Some(artist) = song.artists.first() else { continue };
-            let key = art_key(song);
-            let tried = self.found.get(&key).is_some_and(|f| f.url.is_some() || now.saturating_sub(f.at) < RETRY_SECS);
-            if tried || !self.asked.insert(key.clone()) {
-                continue;
-            }
-            wanted.push(ArtQuery {
-                key,
-                artist: artist.name.clone(),
-                album: song.album.as_ref().map(|a| a.name.clone()),
-                title: song.title.clone(),
-            });
+        let songs = self.songs.clone();
+        songs.iter().filter(|s| s.thumbnail.is_none()).filter_map(|song| self.ask_art(song)).collect()
+    }
+
+    /// A look online for the picture of a song that has one in its file or
+    /// folder, for Discord, which shows only pictures on the web: once for
+    /// its album.
+    pub fn web_art_wanted(&mut self, track: &Track) -> Option<ArtQuery> {
+        if track.thumbnail.as_deref().is_some_and(|t| t.starts_with("https://")) {
+            return None;
         }
-        wanted
+        self.ask_art(track)
+    }
+
+    /// The picture found online for the song's album, if one was.
+    pub fn found_art(&self, track: &Track) -> Option<&str> {
+        self.found.get(&art_key(track)).and_then(|f| f.url.as_deref())
+    }
+
+    /// What to look the song's album up by, unless it has been looked for.
+    fn ask_art(&mut self, song: &Track) -> Option<ArtQuery> {
+        let artist = song.artists.first()?;
+        let key = art_key(song);
+        let tried = self.found.get(&key).is_some_and(|f| f.url.is_some() || unix_now().saturating_sub(f.at) < RETRY_SECS);
+        if tried || !self.asked.insert(key.clone()) {
+            return None;
+        }
+        Some(ArtQuery {
+            key,
+            artist: artist.name.clone(),
+            album: song.album.as_ref().map(|a| a.name.clone()),
+            title: song.title.clone(),
+        })
     }
 
     /// A picture found online (or not) for the songs under `key`.
@@ -492,7 +508,7 @@ fn albums_of(songs: &[Track]) -> Vec<LocalAlbum> {
 const VARIOUS: &str = "Various artists";
 
 /// Which picture a song shares: its album's, or its own when it has none.
-fn art_key(track: &Track) -> String {
+pub fn art_key(track: &Track) -> String {
     let artist = track.artists.first().map(|a| a.name.to_lowercase()).unwrap_or_default();
     match &track.album {
         Some(album) => format!("{artist}\t{}", album.name.to_lowercase()),
@@ -1137,5 +1153,21 @@ mod tests {
         library.art_found(&wanted[0].key, Some("https://example.com/a.jpg".into()));
         assert!(library.songs().iter().all(|s| s.thumbnail.as_deref() == Some("https://example.com/a.jpg")));
         assert_eq!(library.songs()[0].artists[0].id.as_deref(), Some("artist:XX:me"));
+    }
+
+    #[test]
+    fn a_picture_of_its_own_is_looked_up_for_discord_only() {
+        let mut library = LocalLibrary::new(std::env::temp_dir().join("native-ytm-web-art-test"), Arc::new(|| {}));
+        let meta = Meta { title: "ひとり".into(), artist: "XX:me".into(), album: "Vol.2".into(), art: Some("C:/art/cover.jpg".into()), ..Meta::default() };
+        library.take(build(vec![Entry { path: "c.flac".into(), size: 1, modified: 1, meta: Some(meta) }], HashMap::new()));
+        assert!(library.art_wanted().is_empty(), "it has a picture");
+        let song = library.songs()[0].clone();
+        assert!(library.found_art(&song).is_none());
+        let query = library.web_art_wanted(&song).expect("looked up for Discord");
+        assert!(library.web_art_wanted(&song).is_none(), "asked once");
+        library.art_found(&query.key, Some("https://example.com/b.jpg".into()));
+        assert_eq!(library.found_art(&song), Some("https://example.com/b.jpg"));
+        // The app goes on showing the file's own.
+        assert_eq!(library.songs()[0].thumbnail.as_deref(), Some("file:C:/art/cover.jpg"));
     }
 }

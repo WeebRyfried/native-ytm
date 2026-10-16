@@ -199,6 +199,10 @@ pub struct App {
     failures: u32,
     retried: Option<u64>,
     streams: HashMap<String, (StreamInfo, Instant)>,
+    /// Streams found while the pointer rested on a song: the quick ones, to
+    /// start on. Apart from `streams`, so the account's better one is still
+    /// found when the song plays.
+    warm: HashMap<String, (StreamInfo, Instant)>,
     /// Songs being resolved ahead of time, so a slow resolve (yt-dlp) is
     /// done before they are wanted.
     prefetching: HashSet<String>,
@@ -447,6 +451,7 @@ impl App {
             failures: 0,
             retried: None,
             streams: HashMap::new(),
+            warm: HashMap::new(),
             prefetching: HashSet::new(),
             account_prewarm: None,
             upgrade: None,
@@ -887,6 +892,14 @@ impl App {
             }
             Response::ArtFound { key, url } => {
                 self.art_flight = self.art_flight.saturating_sub(1);
+                // The queue's copies of the album's songs too.
+                if let Some(url) = &url {
+                    for entry in self.queue.entries.iter_mut() {
+                        if entry.track.is_local() && entry.track.thumbnail.is_none() && local::art_key(&entry.track) == key {
+                            entry.track.thumbnail = Some(url.clone());
+                        }
+                    }
+                }
                 self.local.art_found(&key, url);
                 if self.art_flight == 0 && self.art_queue.is_empty() {
                     self.local.save_found();
@@ -1632,6 +1645,7 @@ impl App {
     fn quick_stream(&self, video_id: &str) -> Option<StreamInfo> {
         self.streams
             .get(video_id)
+            .or_else(|| self.warm.get(video_id))
             .filter(|(_, at)| at.elapsed() < STREAM_FRESH)
             .map(|(stream, _)| stream.clone())
     }
@@ -1665,12 +1679,16 @@ impl App {
     /// The song's stream at the quality wanted, if it is at hand: kept on
     /// disk, or resolved within the hour.
     fn best_stream(&mut self, video_id: &str) -> Option<StreamInfo> {
-        let wanted = if self.account_streams() { PREMIUM_KBPS } else { 1 };
+        let account = self.account_streams();
+        let wanted = if account { PREMIUM_KBPS } else { 1 };
         if self.audio_cache.has_at_least(video_id, wanted) {
             return self.audio_cache.lookup(video_id);
         }
+        // One found on pointing is the best there is only without the
+        // account's streams.
         self.streams
             .get(video_id)
+            .or_else(|| if account { None } else { self.warm.get(video_id) })
             .filter(|(_, at)| at.elapsed() < STREAM_FRESH)
             .map(|(stream, _)| stream.clone())
     }
@@ -1741,7 +1759,8 @@ impl App {
             (Purpose::Prefetch, Err(error)) => log::info!("prefetch of {video_id} failed: {error}"),
             (Purpose::Prewarm, Ok((stream, _))) => {
                 self.prefetching.remove(&video_id);
-                self.streams.insert(video_id, (stream, Instant::now()));
+                self.warm.retain(|_, (_, at)| at.elapsed() < STREAM_FRESH);
+                self.warm.insert(video_id, (stream, Instant::now()));
             }
             (Purpose::Prewarm, Err(error)) => {
                 self.prefetching.remove(&video_id);
@@ -2205,6 +2224,7 @@ impl App {
                 }
                 let video_id = self.current().map(|t| t.video_id.clone()).unwrap_or_default();
                 self.streams.remove(&video_id);
+                self.warm.remove(&video_id);
                 // A kept file that would not play is dropped, and the song
                 // found again.
                 let from_disk = self
@@ -3653,6 +3673,39 @@ const PREMIUM_KBPS: u32 = 200;
 /// YouTube's last about six hours.
 const STREAM_FRESH: Duration = Duration::from_secs(3600);
 
+/// A search on YouTube Music for a song on this PC, which has no page
+/// there: as much of its names as fits the 256 characters Discord takes.
+fn search_link(track: &Track) -> String {
+    let mut link = "https://music.youtube.com/search?q=".to_owned();
+    for c in format!("{} {}", track.artist_line(), track.title).chars() {
+        let encoded = crate::api::music::urlencode(c.encode_utf8(&mut [0; 4]));
+        if link.len() + encoded.len() > 256 {
+            break;
+        }
+        link.push_str(&encoded);
+    }
+    link
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+
+    #[test]
+    fn a_search_link_fits_discord() {
+        let track = Track {
+            title: "ダーリン・イン・ザ・フランキス エンディング集 vol.1 ".repeat(4),
+            artists: vec![Link { name: "XX:me".into(), id: None }],
+            ..Track::default()
+        };
+        let link = search_link(&track);
+        assert!(link.starts_with("https://music.youtube.com/search?q=XX%3Ame%20%E3%83%80"));
+        assert!(link.len() <= 256);
+        // Never a character cut in half.
+        assert!(!link.ends_with('%') && link.rsplit('%').next().is_some_and(|last| last.len() >= 2));
+    }
+}
+
 fn client_id_or_default(id: &str) -> String {
     let id = id.trim();
     if id.is_empty() { discord::DEFAULT_CLIENT_ID.to_owned() } else { id.to_owned() }
@@ -3758,6 +3811,15 @@ impl App {
         if self.presence.is_none() {
             return;
         }
+        // Discord shows only pictures on the web: a song on this PC with a
+        // picture in its file or folder has its album's looked up online.
+        if self.playing()
+            && self.online()
+            && let Some(track) = self.queue.current_track().filter(|t| t.is_local())
+            && let Some(query) = self.local.web_art_wanted(track)
+        {
+            self.art_queue.push_front(query);
+        }
         let activity = self.current().filter(|_| self.playing()).map(|track| {
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -3771,9 +3833,15 @@ impl App {
                 art_url: track
                     .thumbnail
                     .as_deref()
+                    .filter(|url| url.starts_with("https://"))
+                    .or_else(|| if track.is_local() { self.local.found_art(track) } else { None })
                     .map(|url| sized_thumbnail(url, 512))
                     .filter(|url| url.starts_with("https://") && url.len() <= 256),
-                url: format!("https://music.youtube.com/watch?v={}", track.video_id),
+                url: if track.is_local() {
+                    search_link(track)
+                } else {
+                    format!("https://music.youtube.com/watch?v={}", track.video_id)
+                },
                 artist_url: track
                     .artists
                     .first()

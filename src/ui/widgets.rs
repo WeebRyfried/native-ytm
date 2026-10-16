@@ -996,23 +996,44 @@ pub fn section_title(ui: &mut Ui, cx: &mut Cx<'_>, section: &Section) {
     if let Some(strapline) = &section.strapline {
         ui.label(RichText::new(strapline.to_uppercase()).font(theme::medium(12.0)).color(theme::TEXT_DIM));
     }
+    // A shelf of songs made for the person (Quick picks, Your daily
+    // discover) plays them all, as YouTube Music's button there does; any
+    // other opens its page.
+    let play_all = match &section.more {
+        Some(Target::Watch { video_id, playlist_id, params }) => Some(Action::PlayWatch {
+            video_id: Some(video_id.clone()),
+            playlist_id: playlist_id.clone(),
+            params: params.clone(),
+            title: Some(section.title.clone()),
+        }),
+        Some(Target::WatchPlaylist { playlist_id, params }) => Some(Action::PlayWatch {
+            video_id: None,
+            playlist_id: Some(playlist_id.clone()),
+            params: params.clone(),
+            title: Some(section.title.clone()),
+        }),
+        _ => None,
+    };
+    let opens = section.more.as_ref().filter(|_| play_all.is_none());
     ui.horizontal(|ui| {
         let title = ui.add(
             egui::Label::new(RichText::new(&section.title).font(theme::bold(22.0)).color(theme::TEXT))
-                .sense(if section.more.is_some() { Sense::click() } else { Sense::hover() }),
+                .sense(if opens.is_some() { Sense::click() } else { Sense::hover() }),
         );
-        if section.more.is_some() {
-            let title = title.on_hover_cursor(CursorIcon::PointingHand);
-            if title.clicked()
-                && let Some(more) = &section.more
-            {
+        if let Some(more) = opens {
+            if title.on_hover_cursor(CursorIcon::PointingHand).clicked() {
                 cx.push(Action::Open(more.clone()));
             }
-        }
-        if let Some(more) = &section.more {
             ui.with_layout(EguiLayout::right_to_left(Align::Center), |ui| {
                 if pill(ui, None, "More", false).clicked() {
                     cx.push(Action::Open(more.clone()));
+                }
+            });
+        }
+        if let Some(action) = play_all {
+            ui.with_layout(EguiLayout::right_to_left(Align::Center), |ui| {
+                if pill(ui, Some(Icon::Play), "Play all", false).clicked() {
+                    cx.push(action);
                 }
             });
         }

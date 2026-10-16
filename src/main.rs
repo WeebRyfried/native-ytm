@@ -186,10 +186,13 @@ fn fnv(s: &str) -> u64 {
 /// Pointer input made up for tests (dev): `NATIVE_YTM_WIGGLE=x,y` moves the
 /// pointer in small circles about that point every frame, as a hand on a
 /// mouse does; `NATIVE_YTM_WHEEL=x,y` rests it there and turns the wheel
-/// down three lines a second.
+/// down three lines a second; `NATIVE_YTM_CLICK=x,y[,seconds]` clicks there
+/// once, ten seconds in unless told.
 enum Simulate {
     Wiggle(egui::Pos2),
     Wheel(egui::Pos2, f64),
+    /// Where, when, and how far along: 0 waiting, 1 pressed, 2 done.
+    Click(egui::Pos2, f64, u8),
 }
 
 impl Simulate {
@@ -199,9 +202,17 @@ impl Simulate {
             let (x, y) = value.split_once(',')?;
             Some(egui::pos2(x.trim().parse().ok()?, y.trim().parse().ok()?))
         };
+        let click = || {
+            let value = std::env::var("NATIVE_YTM_CLICK").ok()?;
+            let mut parts = value.split(',').map(|p| p.trim().parse::<f64>().ok());
+            let (x, y) = (parts.next()??, parts.next()??);
+            let at = parts.next().flatten().unwrap_or(10.0);
+            Some(Simulate::Click(egui::pos2(x as f32, y as f32), at, 0))
+        };
         point("NATIVE_YTM_WIGGLE")
             .map(Simulate::Wiggle)
             .or_else(|| point("NATIVE_YTM_WHEEL").map(|p| Simulate::Wheel(p, 0.0)))
+            .or_else(click)
     }
 }
 
@@ -316,6 +327,26 @@ impl eframe::App for Window {
                     });
                 }
                 ctx.request_repaint_after(std::time::Duration::from_millis(200));
+            }
+            Some(Simulate::Click(at, when, stage)) => {
+                if *stage < 2 && time > *when - 1.0 {
+                    raw_input.events.push(egui::Event::PointerMoved(*at));
+                }
+                if *stage < 2 && time >= *when {
+                    raw_input.events.push(egui::Event::PointerButton {
+                        pos: *at,
+                        button: egui::PointerButton::Primary,
+                        pressed: *stage == 0,
+                        modifiers: egui::Modifiers::NONE,
+                    });
+                    if *stage == 1 {
+                        log::info!("clicked at {:?}", *at);
+                    }
+                    *stage += 1;
+                }
+                if *stage < 2 {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                }
             }
             None => {}
         }
