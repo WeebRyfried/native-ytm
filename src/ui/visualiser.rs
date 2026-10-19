@@ -31,7 +31,7 @@ pub fn paint(app: &mut App, ui: &Ui, painter: &Painter, bar: Rect) {
         Mode::Aurora => (width / 34.0).round().clamp(14.0, 48.0),
     } as usize;
     let dt = ctx.input(|i| i.stable_dt);
-    let moving = app.analyser.update(app.player.scope(), bands, live, dt);
+    let moving = app.analyser.update(app.player.scope(), bands, live, dt, app.settings.visualiser_focus);
     // Thirty frames a second: smooth enough for motion this soft, and each
     // frame redraws the whole window, so half the work of sixty.
     if shown > 0.0 || moving {

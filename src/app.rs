@@ -3160,9 +3160,10 @@ impl App {
                     .set_volume(if self.settings.muted { 0.0 } else { self.settings.volume });
                 self.save_settings();
             }
-            Action::SetVisualiser { on, mode } => {
+            Action::SetVisualiser { on, mode, focus } => {
                 self.settings.visualiser = on;
                 self.settings.visualiser_mode = mode;
+                self.settings.visualiser_focus = focus;
                 self.settings_dirty = Some(Instant::now());
             }
             Action::ToggleShuffle => {

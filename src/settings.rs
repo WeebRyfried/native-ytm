@@ -92,6 +92,8 @@ pub struct Settings {
     /// The visualiser along the top of the player bar, and how it draws.
     pub visualiser: bool,
     pub visualiser_mode: crate::visualiser::Mode,
+    /// What it follows most: the whole mix, the drums or the voice.
+    pub visualiser_focus: crate::visualiser::Focus,
 }
 
 impl Default for Settings {
@@ -133,6 +135,7 @@ impl Default for Settings {
             theme: crate::theme::Theme::Classic,
             visualiser: true,
             visualiser_mode: crate::visualiser::Mode::Wave,
+            visualiser_focus: crate::visualiser::Focus::All,
         }
     }
 }

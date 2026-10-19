@@ -325,28 +325,38 @@ fn extras(app: &mut App, ui: &mut Ui) {
         app.actions.push(Action::ToggleFullView);
     }
     // The visualiser: a click turns it on or off; the right button picks
-    // how it draws.
-    let (on, mode) = (app.settings.visualiser, app.settings.visualiser_mode);
+    // how it draws, and what it follows.
+    let (on, mode, focus) = (app.settings.visualiser, app.settings.visualiser_mode, app.settings.visualiser_focus);
     let tip = if on { "Visualiser is on (right-click for its styles)" } else { "Visualiser" };
     let r = widgets::icon_button(ui, Icon::Visualiser, 20.0, if on { theme::text() } else { theme::text_faint() }, tip);
     if on {
         dot(ui, r.rect);
     }
     if r.clicked() {
-        app.actions.push(Action::SetVisualiser { on: !on, mode });
+        app.actions.push(Action::SetVisualiser { on: !on, mode, focus });
     }
     r.context_menu(|ui| {
         for choice in crate::visualiser::Mode::ALL {
             let picked = on && choice == mode;
             if ui.add(egui::Button::new(choice.name()).selected(picked)).clicked() {
-                app.actions.push(Action::SetVisualiser { on: true, mode: choice });
+                app.actions.push(Action::SetVisualiser { on: true, mode: choice, focus });
                 ui.close();
             }
         }
         ui.separator();
-        if on && ui.button("Turn off").clicked() {
-            app.actions.push(Action::SetVisualiser { on: false, mode });
-            ui.close();
+        ui.label(egui::RichText::new("Reacts to").font(theme::regular(12.0)).color(theme::text_dim()));
+        for choice in crate::visualiser::Focus::ALL {
+            if ui.add(egui::Button::new(choice.name()).selected(choice == focus)).clicked() {
+                app.actions.push(Action::SetVisualiser { on: true, mode, focus: choice });
+                ui.close();
+            }
+        }
+        if on {
+            ui.separator();
+            if ui.button("Turn off").clicked() {
+                app.actions.push(Action::SetVisualiser { on: false, mode, focus });
+                ui.close();
+            }
         }
     });
     let (lyrics_on, queue_on) = if app.full_view {

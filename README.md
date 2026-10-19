@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="../../releases/latest"><img src="https://img.shields.io/badge/download-v0.3.1-ff0033?style=flat-square" alt="Download v0.3.1"></a>
+  <a href="../../releases/latest"><img src="https://img.shields.io/badge/download-v0.3.2-ff0033?style=flat-square" alt="Download v0.3.2"></a>
   <img src="https://img.shields.io/badge/Windows-x64-0078D4?style=flat-square&logo=windows11&logoColor=white" alt="Windows x64">
   <img src="https://img.shields.io/badge/Rust-2024-B7410E?style=flat-square&logo=rust&logoColor=white" alt="Rust 2024">
   <img src="https://img.shields.io/badge/UI-egui%20%2B%20OpenGL-1f1f1f?style=flat-square" alt="egui and OpenGL">
@@ -134,9 +134,11 @@ sounds as good as your account allows.
   Midnight, Sakura and Matcha, picked from little pictures of each in
   Settings, and taken on at once.
 - **A visualiser** rising from the top of the player bar as the music
-  plays, in the theme's colours: Bars, Wave, Mirror or Aurora. A click on
-  its button turns it off; a right-click picks the style. It draws at 30
-  frames a second, and not at all while nothing plays.
+  plays, in the theme's colours: Bars, Wave, Mirror or Aurora. It follows
+  every hit in the music, or mostly the drums, or mostly the voice. A
+  click on its button turns it off; a right-click picks the style and what
+  it reacts to. It draws at 30 frames a second, and not at all while
+  nothing plays.
 - A soft glow follows the pointer over rows and cards.
 - Settings in plain words, the technical ones tucked under Advanced.
 - Light animations throughout, each drawing frames only while it moves.
@@ -225,7 +227,7 @@ cargo build --release
 | --- | --- | --- |
 | Interface | `src/ui/` | egui views; they emit `Action`s, which `src/app.rs` applies after each frame |
 | Themes | `src/theme.rs` | four palettes; the colours are read from the one chosen, so a change shows on the next frame |
-| Visualiser | `src/visualiser.rs`, `src/ui/visualiser.rs` | the audio callback's last moments in a lock-free ring, an FFT into bands by octaves under a scale that follows the music, drawn as meshes |
+| Visualiser | `src/visualiser.rs`, `src/ui/visualiser.rs` | the audio callback's last moments in a lock-free ring (the middle of the stereo picture and its sides), an FFT into bands by octaves under a scale that follows the music, each band's loudness and its hits (how far it jumps above its own recent level), weighted for the drums or the voice, drawn as meshes |
 | App state | `src/app.rs`, `src/queue.rs` | navigation, the queue, what plays next, preloading, the switch to Premium |
 | Network | `src/backend.rs` | a two-thread tokio runtime; the interface never waits on it |
 | API | `src/api/` | InnerTube (`WEB_REMIX`) requests and the parsers that turn renderers into the model; LRCLIB for synced lyrics |

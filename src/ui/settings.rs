@@ -594,6 +594,21 @@ fn appearance(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
                 }
             }
         });
+        divider(ui);
+        let detail = match draft.visualiser_focus {
+            crate::visualiser::Focus::All => "The whole mix, every hit in it leaping out.",
+            crate::visualiser::Focus::Drums => "The beat: kicks, snares and cymbals leap, held notes stay low.",
+            crate::visualiser::Focus::Vocals => "The voice: the middle of the range, and what is mixed in the centre, where singers are.",
+        };
+        row(ui, "Reacts to", detail, 300.0, |ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            for focus in crate::visualiser::Focus::ALL.iter().rev() {
+                if widgets::chip(ui, focus.name(), draft.visualiser_focus == *focus).clicked() {
+                    draft.visualiser_focus = *focus;
+                    draft.visualiser = true;
+                }
+            }
+        });
     });
     card(ui, "Window", |ui| {
         toggle_row(

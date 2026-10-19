@@ -234,10 +234,11 @@ pub enum Action {
     SetVolume(f32),
     ToggleMute,
     ToggleShuffle,
-    /// The visualiser on or off, and how it draws.
+    /// The visualiser on or off, how it draws, and what it follows.
     SetVisualiser {
         on: bool,
         mode: crate::visualiser::Mode,
+        focus: crate::visualiser::Focus,
     },
     SetShuffle(bool),
     CycleRepeat,
