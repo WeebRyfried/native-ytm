@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use crate::api::model::{LyricLine, Word};
+use crate::api::model::{LyricLine, Voice, Word};
 
 /// Lines read from TTML, and who wrote the song when it says.
 #[derive(Debug, Default)]
@@ -50,9 +50,26 @@ pub fn ttml(source: &str) -> Option<Ttml> {
     let root = doc.root_element();
     let named = |name: &'static str| root.descendants().filter(move |n| n.is_element() && n.tag_name().name() == name);
 
-    // The people singing, in the order they are named: lines by any but
-    // the first are the duet's other voice.
-    let people: Vec<&str> = named("agent").filter(|n| attr(*n, "type") == Some("person")).filter_map(|n| attr(n, "id")).collect();
+    // Who sings, by the agents named: each person (or character) a voice of
+    // their own, in the order they are named; a group, or anyone else, all
+    // of them together.
+    let mut voices: HashMap<&str, Voice> = HashMap::new();
+    let mut people = 0;
+    for agent in named("agent") {
+        let Some(id) = attr(agent, "id") else { continue };
+        let voice = match attr(agent, "type") {
+            Some("person" | "character") => {
+                people += 1;
+                match people {
+                    1 => Voice::First,
+                    2 => Voice::Second,
+                    _ => Voice::Third,
+                }
+            }
+            _ => Voice::Together,
+        };
+        voices.insert(id, voice);
+    }
 
     // A translation, English first, by each line's key.
     let translations: Vec<roxmltree::Node> = named("translation").collect();
@@ -87,7 +104,7 @@ pub fn ttml(source: &str) -> Option<Ttml> {
             time: begin,
             end,
             translation: attr(p, "key").and_then(|k| translated.get(k).cloned()),
-            second_voice: attr(p, "agent").is_some_and(|a| people.iter().position(|p| *p == a).is_some_and(|i| i > 0)),
+            voice: attr(p, "agent").and_then(|a| voices.get(a).copied()).unwrap_or_default(),
             ..LyricLine::default()
         };
         if words.is_empty() {
@@ -467,10 +484,18 @@ mod tests {
         assert_eq!(first.backing.iter().map(|w| w.text.as_str()).collect::<String>(), "(oh oh)");
         assert_eq!(first.translation.as_deref(), Some("Hello there"));
         assert_eq!(first.end, Some(29.2));
-        assert!(!first.second_voice);
+        assert_eq!(first.voice, Voice::First);
         assert_eq!(second.text, "無敵の笑顔");
         assert!((second.time - 30.1).abs() < 1e-9);
-        assert!(second.second_voice);
+        assert_eq!(second.voice, Voice::Second);
+    }
+
+    #[test]
+    fn ttml_singers_apart_and_together() {
+        // As Apple Music marks a duet (Shallow): two people, and a group.
+        let source = r#"<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttm="http://www.w3.org/ns/ttml#metadata"><head><metadata><ttm:agent type="person" xml:id="v1"/><ttm:agent type="person" xml:id="v2"/><ttm:agent type="group" xml:id="v3"/><ttm:agent type="other" xml:id="v2000"/></metadata></head><body><div><p begin="1" end="2" ttm:agent="v1">one</p><p begin="3" end="4" ttm:agent="v2">two</p><p begin="5" end="6" ttm:agent="v3">all</p><p begin="7" end="8" ttm:agent="v2000">others</p><p begin="9" end="10">nobody said</p></div></body></tt>"#;
+        let voices: Vec<Voice> = ttml(source).expect("parses").lines.iter().map(|l| l.voice).collect();
+        assert_eq!(voices, [Voice::First, Voice::Second, Voice::Together, Voice::Together, Voice::First]);
     }
 
     #[test]

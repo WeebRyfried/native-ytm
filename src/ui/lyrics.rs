@@ -2,8 +2,10 @@
 //! the line being sung bright and the rest dim, the view gliding to keep
 //! it in place, three dots breathing through instrumental breaks. Lyrics
 //! timed by the word light up as each word is sung, a soft edge sweeping
-//! through it; backing vocals sit small under their line, the duet's other
-//! voice on the right, and a translation under it all when there is one.
+//! through it; backing vocals sit small under their line, and a translation
+//! under it all when there is one. When more than one singer is named, the
+//! first sings on the left, the others on the right and all of them
+//! together in the middle, each in a colour of their own.
 //! Scrolling by hand pauses the following for a moment; a click on a line
 //! plays from there. Lyrics without times are shown as text. A song's
 //! lyrics from another source are a click away, in the corner.
@@ -12,7 +14,7 @@ use std::sync::Arc;
 
 use egui::{Color32, CornerRadius, CursorIcon, Galley, Pos2, Rect, RichText, Sense, Ui, pos2, vec2};
 
-use crate::api::model::{LyricLine, Lyrics, Word};
+use crate::api::model::{LyricLine, Lyrics, Voice, Word};
 use crate::app::App;
 use crate::model::{Action, Loadable};
 use crate::readings::{self, Dictionary, Style};
@@ -39,10 +41,11 @@ struct Ruby {
 type Span = (f64, f64, usize, usize);
 
 /// A synced line laid out: the words, the backing vocals and the
-/// translation under them, each placed from the line's top left, and the
-/// words' spans.
+/// translation under them, each placed from the line's top left, the
+/// words' spans, and who sings it (for its colour).
 #[derive(Clone)]
 struct Laid {
+    voice: Voice,
     main: LaidLine,
     timed: Vec<Span>,
     backing: Option<(Arc<Galley>, f32, Vec<Span>)>,
@@ -147,36 +150,72 @@ fn readings_for(app: &App, ui: &Ui, big: bool, texts: &[&str]) -> Option<(&'stat
     readings::dictionary(move || ctx.request_repaint()).map(|dictionary| (dictionary, app.settings.reading_style))
 }
 
-/// Each row of a galley moved over to end at `width`.
-fn set_right(galley: &mut Galley, width: f32) {
+/// Each row of a galley moved across `width`: none of the way for the
+/// left (0), half for the middle, all of it for the right (1).
+fn place(galley: &mut Galley, width: f32, across: f32) {
     for row in &mut galley.rows {
-        row.pos.x += (width - row.rect().width()).max(0.0);
+        row.pos.x += ((width - row.rect().width()) * across).max(0.0);
     }
     galley.rect = Rect::from_min_max(pos2(0.0, galley.rect.min.y), pos2(width.max(galley.rect.max.x), galley.rect.max.y));
     galley.mesh_bounds = galley.rect;
 }
 
-/// Text laid out to `width`, against the right edge when `right`.
-fn lay_text(painter: &egui::Painter, text: &str, font: egui::FontId, width: f32, right: bool) -> Arc<Galley> {
+/// Text laid out to `width`, its rows `across` it (see [`place`]).
+fn lay_text(painter: &egui::Painter, text: &str, font: egui::FontId, width: f32, across: f32) -> Arc<Galley> {
     let galley = painter.layout(text.to_owned(), font, Color32::WHITE, width);
-    if !right {
+    if across <= 0.0 {
         return galley;
     }
     let mut galley = (*galley).clone();
-    set_right(&mut galley, width);
+    place(&mut galley, width, across);
     Arc::new(galley)
 }
 
+/// Where a singer's lines sit across the lyrics, in a song with more than
+/// one: the first on the left, the others on the right, all of them
+/// together in the middle.
+fn across(voice: Voice) -> f32 {
+    match voice {
+        Voice::First => 0.0,
+        Voice::Second | Voice::Third => 1.0,
+        Voice::Together => 0.5,
+    }
+}
+
+/// More than one singer named, so each is set apart.
+fn duet(lines: &[LyricLine]) -> bool {
+    let mut voices = lines.iter().filter(|l| !l.text.trim().is_empty() || !l.backing.is_empty()).map(LyricLine::singer);
+    voices.next().is_some_and(|first| voices.any(|v| v != first))
+}
+
+/// The colour a singer's lines are drawn in, in a song with more than one:
+/// the first in white, the second in the theme's colour and a third in its
+/// glow (both made light enough to read), all of them together in between
+/// the first two.
+fn voice_colour(voice: Voice) -> Color32 {
+    let toward = |from: Color32, to: Color32, t: f32| {
+        let mix = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
+        Color32::from_rgb(mix(from.r(), to.r()), mix(from.g(), to.g()), mix(from.b(), to.b()))
+    };
+    let second = toward(theme::accent(), Color32::WHITE, 0.4);
+    match voice {
+        Voice::First => Color32::WHITE,
+        Voice::Second => second,
+        Voice::Third => toward(theme::glow(), Color32::WHITE, 0.4),
+        Voice::Together => toward(Color32::WHITE, second, 0.5),
+    }
+}
+
 /// A line of lyrics laid out to `width`, with room above each row for the
-/// readings of its words, and the readings placed; against the right edge
-/// for a duet's other voice.
-fn lay_line(painter: &egui::Painter, text: &str, font: &egui::FontId, width: f32, readings: Option<(&Dictionary, Style)>, right: bool) -> LaidLine {
+/// readings of its words, and the readings placed; its rows `across` the
+/// width (see [`place`]).
+fn lay_line(painter: &egui::Painter, text: &str, font: &egui::FontId, width: f32, readings: Option<(&Dictionary, Style)>, across: f32) -> LaidLine {
     let base = painter.layout(text.to_owned(), font.clone(), Color32::WHITE, width);
     let rubies = readings.map(|(dictionary, style)| readings::readings(dictionary, text, style)).unwrap_or_default();
     if rubies.is_empty() {
-        let galley = if right {
+        let galley = if across > 0.0 {
             let mut galley = (*base).clone();
-            set_right(&mut galley, width);
+            place(&mut galley, width, across);
             Arc::new(galley)
         } else {
             base
@@ -195,8 +234,8 @@ fn lay_line(painter: &egui::Painter, text: &str, font: &egui::FontId, width: f32
     }
     galley.rect.max.y += lift * rows;
     galley.mesh_bounds.max.y += lift * rows;
-    if right {
-        set_right(&mut galley, width);
+    if across > 0.0 {
+        place(&mut galley, width, across);
     }
     let galley = Arc::new(galley);
     let mut placed = Vec::with_capacity(rubies.len());
@@ -319,7 +358,7 @@ fn plain(app: &App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, big: bool) {
                 let source = lyrics.choice();
                 let id = ui.id().with(("plain-readings", video_id, &source, width.round() as i32, readings.1));
                 let laid: Arc<Vec<LaidLine>> = ui.data(|d| d.get_temp(id)).unwrap_or_else(|| {
-                    let laid = Arc::new(texts.iter().map(|t| lay_line(&painter, t, &font, width, Some(readings), false)).collect());
+                    let laid = Arc::new(texts.iter().map(|t| lay_line(&painter, t, &font, width, Some(readings), 0.0)).collect());
                     ui.data_mut(|d| d.insert_temp(id, Arc::clone(&laid)));
                     laid
                 });
@@ -431,6 +470,8 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
         } else {
             Vec::new()
         };
+        // One singer: every line on the left, as ever.
+        let apart = duet(&lines);
         let mut untranslated = Vec::new();
         let mut borrowed_from: Vec<String> = Vec::new();
         let mut by_machine = false;
@@ -440,13 +481,14 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
                 if line.text.is_empty() && line.backing.is_empty() {
                     return None;
                 }
-                let right = line.second_voice;
-                let main = lay_line(&painter, &line.text, &font, width, readings, right);
+                let voice = if apart { line.singer() } else { Voice::First };
+                let at = across(voice);
+                let main = lay_line(&painter, &line.text, &font, width, readings, at);
                 let timed = spans(&line.words, &line.text);
                 let mut height = if line.text.is_empty() { 0.0 } else { main.galley.size().y };
                 let backing = (!line.backing.is_empty()).then(|| {
                     let text: String = line.backing.iter().map(|w| w.text.as_str()).collect();
-                    let galley = lay_text(&painter, &text, backing_font.clone(), width, right);
+                    let galley = lay_text(&painter, &text, backing_font.clone(), width, at);
                     let y = height + if height > 0.0 { size * 0.12 } else { 0.0 };
                     height = y + galley.size().y;
                     let timed = spans(&line.backing, &text);
@@ -466,12 +508,12 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
                         }
                         Said::Machine => by_machine = true,
                     }
-                    let galley = lay_text(&painter, &text, translation_font.clone(), width, right);
+                    let galley = lay_text(&painter, &text, translation_font.clone(), width, at);
                     let y = height + size * 0.18;
                     height = y + galley.size().y;
                     (galley, y)
                 });
-                Some(Laid { main, timed, backing, translation, height })
+                Some(Laid { voice, main, timed, backing, translation, height })
             })
             .collect();
         // Only lyrics that may be in another language, and not already
@@ -570,7 +612,6 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
 
     let pointer = ui.ctx().pointer_hover_pos().filter(|p| rect.contains(*p) && response.contains_pointer());
     let fade = if big { 72.0 } else { 40.0 };
-    let white = |alpha: f32| Color32::from_white_alpha((alpha.clamp(0.0, 1.0) * 255.0) as u8);
     let mut clicked_line = None;
     let mut sweeping = false;
     for (i, line) in lines.iter().enumerate() {
@@ -597,6 +638,9 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
         let reach = 0.25 + 0.75 * edge;
         match &galleys[i] {
             Some(laid) => {
+                // Drawn in its singer's colour (white, with one singer).
+                let base = voice_colour(laid.voice);
+                let ink = |alpha: f32| base.gamma_multiply(alpha.clamp(0.0, 1.0));
                 let hovered = pointer.is_some_and(|p| line_rect.expand2(vec2(pad, gap / 2.0)).contains(p));
                 if hovered {
                     painter.rect_filled(line_rect.expand2(vec2(pad, gap / 3.0)), CornerRadius::same(8), Color32::from_white_alpha(12));
@@ -611,8 +655,8 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
                     // has come, the rest a little brighter than the lines
                     // around it.
                     let upto = sung(&laid.timed, heard);
-                    let dim = white((0.32 + 0.14 * lit) * reach);
-                    let bright = white(reach);
+                    let dim = ink((0.32 + 0.14 * lit) * reach);
+                    let bright = ink(reach);
                     paint_sung(&painter, line_rect.min, &laid.main.galley, upto, dim, bright);
                     for ruby in &laid.main.readings {
                         let color = if upto > ruby.at as f32 { bright } else { dim };
@@ -625,21 +669,21 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
                     let end = line.end.unwrap_or_else(|| line.words.last().map_or(line.time, |w| w.end));
                     sweeping |= heard < end + 0.1;
                 } else if !line.text.is_empty() {
-                    paint_line(&painter, line_rect.min, &laid.main, white(alpha * reach));
+                    paint_line(&painter, line_rect.min, &laid.main, ink(alpha * reach));
                 }
                 if let Some((galley, y, timed)) = &laid.backing {
                     let at = line_rect.min + vec2(0.0, *y);
                     // Swept as sung only when the line is timed by the word.
                     if is_current && !timed.is_empty() && !laid.timed.is_empty() {
                         let upto = sung(timed, heard);
-                        paint_sung(&painter, at, galley, upto, white(0.26 * reach), white(0.78 * reach));
+                        paint_sung(&painter, at, galley, upto, ink(0.26 * reach), ink(0.78 * reach));
                         sweeping |= timed.last().is_some_and(|t| heard < t.1 + 0.1);
                     } else {
-                        painter.galley_with_override_text_color(at, galley.clone(), white(alpha * 0.7 * reach));
+                        painter.galley_with_override_text_color(at, galley.clone(), ink(alpha * 0.7 * reach));
                     }
                 }
                 if let Some((galley, y)) = &laid.translation {
-                    painter.galley_with_override_text_color(line_rect.min + vec2(0.0, *y), galley.clone(), white(alpha * 0.62 * reach));
+                    painter.galley_with_override_text_color(line_rect.min + vec2(0.0, *y), galley.clone(), ink(alpha * 0.62 * reach));
                 }
             }
             None => {
@@ -831,6 +875,23 @@ mod tests {
         assert_eq!(translation_of(&line(20.0, "はい", None), &others, &machine), Some(("Yes".into(), Said::Machine)));
         assert_eq!(translation_of(&line(20.0, "いいえ", None), &others, &machine), None);
         assert_eq!(translation_of(&line(50.0, "さようなら", None), &others, &machine), None);
+    }
+
+    #[test]
+    fn singers_are_set_apart_only_when_there_is_more_than_one() {
+        let line = |voice: Voice, text: &str| LyricLine { time: 1.0, text: text.into(), voice, ..LyricLine::default() };
+        assert!(!duet(&[line(Voice::First, "a"), line(Voice::First, "b")]));
+        // One singer named, whoever: all on the left.
+        assert!(!duet(&[line(Voice::Second, "a"), line(Voice::Second, "b")]));
+        // A break says nothing of who sings.
+        assert!(!duet(&[line(Voice::First, "a"), line(Voice::Second, "")]));
+        assert!(duet(&[line(Voice::First, "a"), line(Voice::Second, "b")]));
+        assert!(duet(&[line(Voice::First, "a"), line(Voice::Together, "b")]));
+        // Lyrics kept by 0.3.5 said only whether a line was the second voice's.
+        let old = LyricLine { time: 2.0, text: "c".into(), second_voice: true, ..LyricLine::default() };
+        assert_eq!(old.singer(), Voice::Second);
+        assert!(duet(&[line(Voice::First, "a"), old]));
+        assert_eq!((across(Voice::First), across(Voice::Second), across(Voice::Third), across(Voice::Together)), (0.0, 1.0, 1.0, 0.5));
     }
 
     #[test]

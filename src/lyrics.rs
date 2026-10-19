@@ -24,9 +24,11 @@ const PROVISIONAL_FOR_SECS: i64 = 30 * 60;
 /// case a source has the song by then; what was found stays.
 const FRESHEN_AFTER_SECS: i64 = 7 * 24 * 60 * 60;
 
-/// The sources asked: lyrics found before Better Lyrics' (0) are looked
-/// for again, from them all.
-const SOURCES: u32 = 1;
+/// The sources asked and what is read from them: lyrics kept before the
+/// sources there are now are looked for again (and kept beside what is
+/// found). 0: LRCLIB's and YouTube's alone; 1: Better Lyrics' sources too;
+/// 2: their singers told apart.
+const SOURCES: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct Kept {

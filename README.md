@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="../../releases/latest"><img src="https://img.shields.io/badge/download-v0.3.5-ff0033?style=flat-square" alt="Download v0.3.5"></a>
+  <a href="../../releases/latest"><img src="https://img.shields.io/badge/download-v0.3.6-ff0033?style=flat-square" alt="Download v0.3.6"></a>
   <img src="https://img.shields.io/badge/Windows-x64-0078D4?style=flat-square&logo=windows11&logoColor=white" alt="Windows x64">
   <img src="https://img.shields.io/badge/Rust-2024-B7410E?style=flat-square&logo=rust&logoColor=white" alt="Rust 2024">
   <img src="https://img.shields.io/badge/UI-egui%20%2B%20OpenGL-1f1f1f?style=flat-square" alt="egui and OpenGL">
@@ -76,9 +76,12 @@ sounds as good as your account allows.
   Musixmatch, QQ Music, KuGou and Unison, then LRCLIB and YouTube's text.
   Each word lights up as it is sung, a soft edge sweeping through it;
   backing vocals sit small under their line (also when a source writes
-  them into it in brackets), a duet's other voice on the right, and a
-  translation under it all: the lyrics' own, another source's for the same
-  line, or else Unison's. Another source is a click away in the corner,
+  them into it in brackets), and a translation under it all: the lyrics'
+  own, another source's for the same line, or else Unison's. When the
+  lyrics name more than one singer, the first sings on the left, the others
+  on the right and all of them together in the middle, each in a colour of
+  their own (the theme's, for the second); with one singer, every line
+  stays on the left. Another source is a click away in the corner,
   and the choice is kept for the song. Better Lyrics' server wants a Cloudflare check passed first: the
   app runs its check page in Edge's WebView2, unseen unless Cloudflare
   asks for a click, about once a day.

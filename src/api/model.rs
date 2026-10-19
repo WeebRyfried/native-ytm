@@ -337,9 +337,39 @@ pub struct LyricLine {
     /// come with that.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub translation: Option<String>,
-    /// Sung by the duet's other voice: set on the right.
+    /// Who sings it, when the lyrics say.
+    #[serde(default, skip_serializing_if = "Voice::is_first")]
+    pub voice: Voice,
+    /// How 0.3.4 and 0.3.5 kept a line sung by a duet's other voice,
+    /// before the voices were told apart: read as the second.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub second_voice: bool,
+}
+
+impl LyricLine {
+    /// Who sings it.
+    pub fn singer(&self) -> Voice {
+        if self.voice == Voice::First && self.second_voice { Voice::Second } else { self.voice }
+    }
+}
+
+/// Who sings a line, in a song with more than one voice: the singers in
+/// the order the lyrics name them, or all of them together.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Voice {
+    #[default]
+    First,
+    Second,
+    /// The third singer, or any after.
+    Third,
+    Together,
+}
+
+impl Voice {
+    pub fn is_first(&self) -> bool {
+        *self == Voice::First
+    }
 }
 
 /// A word, or a syllable, and when it is sung (seconds into the song). Its
