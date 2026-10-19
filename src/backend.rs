@@ -90,6 +90,11 @@ pub enum Request {
         browse_id: Option<String>,
         query: Option<crate::api::lrclib::Query>,
     },
+    /// Lines of the song's lyrics put into English.
+    TranslateLyrics {
+        video_id: String,
+        lines: Vec<String>,
+    },
     Resolve {
         token: u64,
         video_id: String,
@@ -233,6 +238,11 @@ pub enum Response {
         /// Shown while a slower source is still being waited for; the
         /// answer itself follows.
         partial: bool,
+    },
+    LyricsTranslated {
+        video_id: String,
+        lines: Vec<String>,
+        result: Result<crate::api::translate::Translation, String>,
     },
     Resolved {
         token: u64,
@@ -607,59 +617,60 @@ async fn run(
             browse_id,
             query,
         } => {
+            use crate::api::betterlyrics as bl;
+            let local = crate::local::is_local_id(&video_id);
+            // A song on this PC: its twin on YouTube Music, whose id Better
+            // Lyrics' server goes by, and whose lyrics YouTube keeps.
+            let twin = match &query {
+                Some(query) if local => {
+                    let search = format!("{} {}", query.title, query.artist);
+                    find_song(api, &search, Some(&query.artist), Some(&query.title)).await.map(|t| t.video_id)
+                }
+                _ => None,
+            };
+            let better = query.as_ref().and_then(|query| {
+                let id = if local { twin.clone()? } else { video_id.clone() };
+                Some(bl::Query {
+                    video_id: id,
+                    title: query.title.clone(),
+                    artist: query.artist.clone(),
+                    album: query.album.clone(),
+                    duration: query.duration,
+                })
+            });
+            let better = better.map(|query| {
+                let http = api.http.clone();
+                tokio::spawn(async move { bl::find(&http, &query).await })
+            });
             let youtube = async {
-                match &browse_id {
-                    Some(id) => api.lyrics(id).await.map_err(err),
+                let id = match (&browse_id, &twin) {
+                    (Some(id), _) => Some(id.clone()),
+                    (None, Some(twin)) => api.watch(Some(twin), None, None).await.ok().and_then(|w| w.lyrics_id),
+                    _ => None,
+                };
+                match id {
+                    Some(id) => api.lyrics(&id).await.map_err(err),
                     None => Ok(None),
                 }
             };
             let open = async {
                 match &query {
                     Some(query) => match crate::api::lrclib::find(&api.http, query).await {
-                        Ok(found) => (found, true),
-                        Err(error) => {
+                        (found, None) => (found, true),
+                        (found, Some(error)) => {
                             log::info!("LRCLIB: {error:#}");
-                            (None, false)
+                            (found, false)
                         }
                     },
                     None => (None, true),
                 }
             };
-            // Better Lyrics' sources, by the song's YouTube Music id: for a
-            // song on this PC, its twin there.
-            let better = match &query {
-                Some(query) => {
-                    let id = if crate::local::is_local_id(&video_id) {
-                        let search = format!("{} {}", query.title, query.artist);
-                        find_song(api, &search, Some(&query.artist), Some(&query.title)).await.map(|t| t.video_id)
-                    } else {
-                        Some(video_id.clone())
-                    };
-                    id.map(|id| crate::api::betterlyrics::Query {
-                        video_id: id,
-                        title: query.title.clone(),
-                        artist: query.artist.clone(),
-                        album: query.album.clone(),
-                        duration: query.duration,
-                    })
-                }
-                None => None,
-            };
-            let better = better.map(|query| {
-                let http = api.http.clone();
-                tokio::spawn(async move { crate::api::betterlyrics::find(&http, &query).await })
-            });
             let (youtube, (open, answered)) = tokio::join!(youtube, open);
-            // LRCLIB (the app's own look, when Better Lyrics' has none) and
-            // YouTube's text, in their places among Better Lyrics' sources.
-            use crate::api::betterlyrics::{self as bl, Found};
-            let mut found: Vec<Found> = Vec::new();
-            if let Some(open) = open {
-                let rank = if open.lines.is_empty() { bl::LRCLIB_TEXT } else { bl::LRCLIB_SYNCED };
-                found.push(Found { rank, lyrics: open });
-            }
+            // The app's own LRCLIB look and YouTube's text, in their places
+            // among Better Lyrics' sources.
+            let mut found: Vec<Lyrics> = open.into_iter().collect();
             if let Ok(Some(text)) = &youtube {
-                found.push(Found { rank: bl::YOUTUBE_TEXT, lyrics: text.clone() });
+                found.push(text.clone());
             }
             let mut better_answered = true;
             if let Some(better) = better {
@@ -671,13 +682,7 @@ async fn run(
                     early(Response::Lyrics { video_id: video_id.clone(), result: Ok(Some(meanwhile)), complete: false, partial: true });
                 }
                 match better.await {
-                    Ok(Ok(more)) => {
-                        // LRCLIB once: Better Lyrics' look at it, if it made one.
-                        if more.iter().any(|f| f.lyrics.provider.as_deref() == Some("LRCLIB")) {
-                            found.retain(|f| f.lyrics.provider.as_deref() != Some("LRCLIB"));
-                        }
-                        found.extend(more);
-                    }
+                    Ok(Ok(more)) => found.extend(more),
                     Ok(Err(error)) => {
                         log::info!("Better Lyrics: {error:#}");
                         better_answered = false;
@@ -686,15 +691,31 @@ async fn run(
                 }
             }
             let complete = answered && youtube.is_ok() && better_answered;
-            let mut ranked: Vec<&Found> = found.iter().collect();
-            ranked.sort_by_key(|f| f.rank);
-            let names: Vec<String> = ranked.iter().map(|f| format!("{} ({})", f.lyrics.provider.as_deref().unwrap_or("?"), f.lyrics.timing())).collect();
-            log::info!("lyrics found: {}", if names.is_empty() { "none".to_owned() } else { names.join(", ") });
+            let mut names: Vec<(u8, String)> = found.iter().map(|l| (bl::rank(l), format!("{} ({})", l.provider.as_deref().unwrap_or("?"), l.timing()))).collect();
+            names.sort();
+            let names: Vec<String> = names.into_iter().map(|(_, n)| n).collect();
+            log::info!(
+                "lyrics found{}: {}",
+                if complete { "" } else { " (not every source answered)" },
+                if names.is_empty() { "none".to_owned() } else { names.join(", ") }
+            );
             let result = match bl::gather(found) {
                 Some(best) => Ok(Some(best)),
                 None => youtube,
             };
             Response::Lyrics { video_id, result, complete, partial: false }
+        }
+        Request::TranslateLyrics { video_id, lines } => {
+            let id = (!crate::local::is_local_id(&video_id)).then_some(video_id.as_str());
+            let result = crate::api::translate::translate(&api.http, &lines, id).await.map_err(err);
+            match &result {
+                Ok(done) => {
+                    let said = done.lines.iter().filter(|l| l.is_some()).count();
+                    log::info!("lyrics translated: {said} of {} lines, from {}", lines.len(), done.from.as_deref().unwrap_or("?"));
+                }
+                Err(error) => log::info!("lyrics not translated: {error}"),
+            }
+            Response::LyricsTranslated { video_id, lines, result }
         }
         Request::Resolve {
             token,

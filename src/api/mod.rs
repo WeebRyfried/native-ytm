@@ -7,3 +7,4 @@ pub mod lyric_formats;
 pub mod model;
 pub mod music;
 pub mod parse;
+pub mod translate;

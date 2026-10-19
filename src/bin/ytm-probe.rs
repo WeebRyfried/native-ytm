@@ -10,7 +10,7 @@
 //! ytm-probe play dQw4w9WgXcQ [--seek 120]
 //! ytm-probe icon assets/app.ico         (the executable's icon, drawn)
 //! ytm-probe logo docs/logo.png 512      (the logo as a PNG)
-//! ytm-probe lyrics TITLE ARTIST [SECONDS]  (synced lyrics from LRCLIB)
+//! ytm-probe lyrics TITLE ARTIST [SECONDS [ALBUM]]  (synced lyrics from LRCLIB)
 //! ```
 
 use std::sync::Arc;
@@ -204,10 +204,14 @@ fn lyrics(args: &[String]) -> anyhow::Result<()> {
     let query = api::lrclib::Query {
         title: args[0].clone(),
         artist: args[1].clone(),
-        album: None,
+        album: args.get(3).cloned(),
         duration: args.get(2).and_then(|s| s.parse().ok()),
     };
-    match runtime.block_on(api::lrclib::find(&http, &query))? {
+    let (found, trouble) = runtime.block_on(api::lrclib::find(&http, &query));
+    if let Some(trouble) = trouble {
+        println!("trouble on the way: {trouble:#}");
+    }
+    match found {
         Some(lyrics) => {
             println!("{:?}: {} timed lines", lyrics.source, lyrics.lines.len());
             for line in lyrics.lines.iter().take(6) {

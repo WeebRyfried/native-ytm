@@ -37,20 +37,32 @@ pub struct Query {
     pub duration: Option<u32>,
 }
 
-/// One source's lyrics, and how high they rank: lower is better, in the
-/// order the extension tries them (word by word before line by line,
-/// before text alone).
-#[derive(Clone, Debug)]
-pub struct Found {
-    pub rank: u8,
-    pub lyrics: Lyrics,
+/// How high a song's lyrics from a source rank, lower first: in the order
+/// the extension tries them, word by word before line by line, before text
+/// alone. The app's own LRCLIB and YouTube Music's text take their places.
+pub fn rank(lyrics: &Lyrics) -> u8 {
+    let provider = lyrics.provider.as_deref().unwrap_or_default();
+    let (word, line) = (lyrics.by_word(), !lyrics.lines.is_empty());
+    match (provider, word, line) {
+        ("Better Lyrics", true, _) => 0,
+        ("Unison", true, _) => 1,
+        ("BiniLyrics", true, _) => 2,
+        ("QQ Music", true, _) => 4,
+        ("Musixmatch", true, _) => 5,
+        ("Better Lyrics", false, true) => 6,
+        ("Unison", false, true) => 7,
+        ("BiniLyrics", false, true) => 9,
+        ("LRCLIB", false, true) => 10,
+        ("KuGou", false, true) => 11,
+        ("Musixmatch", false, true) => 12,
+        (_, true, _) => 8,
+        (_, false, true) => 12,
+        ("YouTube Music", ..) => 13,
+        ("Unison", ..) => 14,
+        ("LRCLIB", ..) => 15,
+        _ => 16,
+    }
 }
-
-/// Where Better Lyrics' plain LRCLIB and YouTube's text rank, for the
-/// app's own LRCLIB lookup and YouTube's lyrics to take their places.
-pub const LRCLIB_SYNCED: u8 = 10;
-pub const YOUTUBE_TEXT: u8 = 13;
-pub const LRCLIB_TEXT: u8 = 15;
 
 struct State {
     dir: PathBuf,
@@ -75,8 +87,20 @@ pub fn init(dir: PathBuf) {
     });
 }
 
-/// Every source's lyrics of the song.
-pub async fn find(http: &reqwest::Client, query: &Query) -> Result<Vec<Found>> {
+/// Every source's lyrics of the song. When none has any, once more by the
+/// song's title, artist and length alone: an album named otherwise than
+/// the providers name it can keep them from finding it.
+pub async fn find(http: &reqwest::Client, query: &Query) -> Result<Vec<Lyrics>> {
+    let found = find_as(http, query).await?;
+    if !found.is_empty() || query.album.is_none() {
+        return Ok(found);
+    }
+    let bare = Query { album: None, ..query.clone() };
+    log::info!("Better Lyrics had none for {}; asking again without the album", query.title);
+    find_as(http, &bare).await
+}
+
+async fn find_as(http: &reqwest::Client, query: &Query) -> Result<Vec<Lyrics>> {
     let (streamed, unison) = tokio::join!(stream(http, query), unison(http, query));
     let mut found = streamed?;
     match unison {
@@ -86,12 +110,19 @@ pub async fn find(http: &reqwest::Client, query: &Query) -> Result<Vec<Found>> {
     Ok(found)
 }
 
-/// The best of what was found, the rest kept beside it to switch to; the
-/// same source and timing twice is kept once.
-pub fn gather(mut found: Vec<Found>) -> Option<Lyrics> {
-    found.sort_by_key(|f| f.rank);
+/// The best of these lyrics first, the rest kept beside it to switch to;
+/// the same source and timing twice is kept once (the first given).
+pub fn gather(found: Vec<Lyrics>) -> Option<Lyrics> {
+    let mut all: Vec<Lyrics> = Vec::with_capacity(found.len());
+    for mut lyrics in found {
+        let others = std::mem::take(&mut lyrics.others);
+        all.push(lyrics);
+        all.extend(others);
+    }
+    // Stable: of two that rank alike, the one given first leads.
+    all.sort_by_key(rank);
     let mut kept: Vec<Lyrics> = Vec::new();
-    for Found { lyrics, .. } in found {
+    for lyrics in all {
         let same = |k: &Lyrics| k.provider == lyrics.provider && k.timing() == lyrics.timing();
         if !kept.iter().any(same) {
             kept.push(lyrics);
@@ -99,8 +130,27 @@ pub fn gather(mut found: Vec<Found>) -> Option<Lyrics> {
     }
     let mut kept = kept.into_iter();
     let mut best = kept.next()?;
-    best.others = kept.take(8).collect();
+    best.others = kept.take(10).collect();
     Some(best)
+}
+
+/// What was found before and what is found now, together: a source found
+/// now replaces its own earlier lyrics, and sources not found this time are
+/// kept. Never less than before.
+pub fn merge(before: Option<&Lyrics>, now: Option<Lyrics>) -> Option<Lyrics> {
+    let translated = before.map(|b| b.translated.clone()).unwrap_or_default();
+    let mut all: Vec<Lyrics> = now.into_iter().collect();
+    all.extend(before.cloned());
+    let mut merged = gather(all)?;
+    // Translations made for the lines stay with them.
+    if merged.translated.is_empty() {
+        merged.translated = translated;
+    } else {
+        for (line, said) in translated.lines {
+            merged.translated.lines.entry(line).or_insert(said);
+        }
+    }
+    Some(merged)
 }
 
 async fn key(http: &reqwest::Client, renew: bool) -> Result<String> {
@@ -182,7 +232,7 @@ fn base64url(text: &str) -> Option<Vec<u8>> {
 }
 
 /// The server's stream: one event per provider, as each answers.
-async fn stream(http: &reqwest::Client, query: &Query) -> Result<Vec<Found>> {
+async fn stream(http: &reqwest::Client, query: &Query) -> Result<Vec<Lyrics>> {
     let mut renewed = false;
     let mut response = loop {
         let jwt = key(http, renewed).await?;
@@ -242,8 +292,8 @@ fn blank_line(bytes: &[u8]) -> Option<usize> {
 }
 
 /// One event of the stream, its lyrics added to `found`. True once the
-/// stream is over.
-fn event(block: &str, query: &Query, found: &mut Vec<Found>) -> Result<bool> {
+/// stream says it is over.
+fn event(block: &str, query: &Query, found: &mut Vec<Lyrics>) -> Result<bool> {
     let (mut name, mut data) = ("", String::new());
     for line in block.lines() {
         if let Some(value) = line.strip_prefix("event:") {
@@ -260,21 +310,17 @@ fn event(block: &str, query: &Query, found: &mut Vec<Found>) -> Result<bool> {
     }
     let data: Value = serde_json::from_str(&data)?;
     match name {
-        "error" => {
-            // "Invalid Video Id" and the like: nothing to be had.
-            log::info!("Better Lyrics: {}", data["message"].as_str().unwrap_or("an error"));
-            Ok(true)
-        }
-        "provider" => {
-            found.extend(provider(data["provider"].as_str().unwrap_or_default(), &data["results"], query));
-            Ok(false)
-        }
-        _ => Ok(false),
+        // Told, and read on, as the extension does: the server ends the
+        // stream itself when there is nothing more.
+        "error" => log::info!("Better Lyrics: {}", data["message"].as_str().unwrap_or("an error")),
+        "provider" => found.extend(provider(data["provider"].as_str().unwrap_or_default(), &data["results"], query)),
+        _ => {}
     }
+    Ok(false)
 }
 
-/// A provider's results as lyrics, ranked.
-fn provider(name: &str, results: &Value, query: &Query) -> Vec<Found> {
+/// A provider's results as lyrics.
+fn provider(name: &str, results: &Value, query: &Query) -> Vec<Lyrics> {
     let text = |key: &str| results[key].as_str().filter(|t| !t.trim().is_empty());
     // Some results are JSON inside JSON: `{"lyrics": "…"}`.
     let inner = |key: &str, field: &str| {
@@ -284,60 +330,61 @@ fn provider(name: &str, results: &Value, query: &Query) -> Vec<Found> {
             Err(_) => Some(raw.to_owned()),
         }
     };
+    let credits = |lines| lyric_formats::drop_credits(lines, &query.title, &query.artist);
     let mut found = Vec::new();
-    // Ranked by how they turn out to be timed.
-    let mut add = |rank_word: u8, rank_line: u8, provider: &str, lines: Vec<LyricLine>, songwriters: Vec<String>| {
-        if let Some(lyrics) = timed(provider, lines, songwriters) {
-            found.push(Found { rank: if lyrics.by_word() { rank_word } else { rank_line }, lyrics });
-        }
-    };
-    let mut add_text = Vec::new();
     match name {
         // Better Lyrics' own: Apple Music's TTML.
         "golyrics" => {
             if let Some(ttml) = inner("lyrics", "ttml").as_deref().and_then(lyric_formats::ttml) {
-                add(0, 6, "Better Lyrics", ttml.lines, ttml.songwriters);
+                found.extend(timed("Better Lyrics", ttml.lines, ttml.songwriters));
             }
         }
         "binimum" => {
             if let Some(ttml) = text("lyrics").and_then(lyric_formats::ttml) {
-                add(2, 9, "BiniLyrics", ttml.lines, ttml.songwriters);
+                found.extend(timed("BiniLyrics", ttml.lines, ttml.songwriters));
             }
         }
         "qq" => {
             if let Some(qrc) = inner("lyrics", "lyrics") {
-                add(4, 11, "QQ Music", lyric_formats::drop_credits(lyric_formats::qrc(&qrc), &query.title, &query.artist), Vec::new());
+                found.extend(timed("QQ Music", credits(lyric_formats::qrc(&qrc)), Vec::new()));
             }
         }
         "musixmatch" => {
             if let Some(lrc) = text("wordByWord") {
-                add(5, 12, "Musixmatch", lyric_formats::lrc(lrc), Vec::new());
+                found.extend(timed("Musixmatch", lyric_formats::lrc(lrc), Vec::new()));
             }
             if let Some(lrc) = text("synced") {
-                add(12, 12, "Musixmatch", lyric_formats::lrc(lrc), Vec::new());
+                found.extend(timed("Musixmatch", lyric_formats::lrc(lrc), Vec::new()));
             }
         }
         "kugou" => {
             if let Some(lrc) = inner("lyrics", "lyrics") {
-                add(11, 11, "KuGou", lyric_formats::drop_credits(lyric_formats::lrc(&lrc), &query.title, &query.artist), Vec::new());
+                found.extend(timed("KuGou", credits(lyric_formats::lrc(&lrc)), Vec::new()));
             }
         }
         "lrclib" => {
             if let Some(lrc) = text("synced") {
-                add(LRCLIB_SYNCED, LRCLIB_SYNCED, "LRCLIB", lyric_formats::lrc(lrc), Vec::new());
+                found.extend(timed("LRCLIB", lyric_formats::lrc(lrc), Vec::new()));
             } else if let Some(plain) = text("plain") {
-                add_text.push(Found { rank: LRCLIB_TEXT, lyrics: untimed("LRCLIB", plain) });
+                found.push(untimed("LRCLIB", plain));
             }
         }
         _ => {}
     }
-    found.extend(add_text);
     found
 }
 
-/// Lyrics from timed lines; none when there are none worth showing.
-fn timed(provider: &str, lines: Vec<LyricLine>, songwriters: Vec<String>) -> Option<Lyrics> {
-    let lines: Vec<LyricLine> = lines.into_iter().filter(|l| !l.text.trim().is_empty() || !l.backing.is_empty()).collect();
+/// Lyrics from timed lines (backing vocals written into a line taken out of
+/// it); none when there are none worth showing.
+pub fn timed(provider: &str, lines: Vec<LyricLine>, songwriters: Vec<String>) -> Option<Lyrics> {
+    let lines: Vec<LyricLine> = lines
+        .into_iter()
+        .map(|mut line| {
+            lyric_formats::split_backing(&mut line);
+            line
+        })
+        .filter(|l| !l.text.trim().is_empty() || !l.backing.is_empty())
+        .collect();
     if lines.len() < 2 {
         return None;
     }
@@ -348,7 +395,7 @@ fn timed(provider: &str, lines: Vec<LyricLine>, songwriters: Vec<String>) -> Opt
         lines,
         provider: Some(provider.to_owned()),
         songwriters,
-        others: Vec::new(),
+        ..Lyrics::default()
     })
 }
 
@@ -371,7 +418,7 @@ fn said_from(provider: &str) -> String {
 
 /// Unison, Better Lyrics' community lyrics: TTML, LRC (perhaps timed by the
 /// word) or text.
-async fn unison(http: &reqwest::Client, query: &Query) -> Result<Vec<Found>> {
+async fn unison(http: &reqwest::Client, query: &Query) -> Result<Vec<Lyrics>> {
     let mut params = vec![("v", query.video_id.clone()), ("song", query.title.clone()), ("artist", query.artist.clone())];
     params.push(("duration", query.duration.unwrap_or(0).to_string()));
     if let Some(album) = &query.album {
@@ -386,18 +433,13 @@ async fn unison(http: &reqwest::Client, query: &Query) -> Result<Vec<Found>> {
     let Some(text) = data["lyrics"].as_str().filter(|t| !t.trim().is_empty()) else {
         return Ok(Vec::new());
     };
-    let found = match data["format"].as_str().unwrap_or_default() {
+    Ok(match data["format"].as_str().unwrap_or_default() {
         "ttml" => lyric_formats::ttml(text).and_then(|t| timed("Unison", t.lines, t.songwriters)),
         "lrc" => timed("Unison", lyric_formats::lrc(text), Vec::new()),
-        _ => return Ok(vec![Found { rank: 14, lyrics: untimed("Unison", text) }]),
-    };
-    Ok(found
-        .map(|lyrics| {
-            let word_rank = if data["format"] == "ttml" { 1 } else { 3 };
-            Found { rank: if lyrics.by_word() { word_rank } else { 7 }, lyrics }
-        })
-        .into_iter()
-        .collect())
+        _ => Some(untimed("Unison", text)),
+    }
+    .into_iter()
+    .collect())
 }
 
 #[cfg(test)]
@@ -414,16 +456,50 @@ mod tests {
         let kugou = serde_json::json!({ "lyrics": serde_json::json!({ "lyrics": "[00:00.00]アイドル - YOASOBI\n[00:01.00]one\n[00:02.00]two" }).to_string() });
         let block = format!("event: provider\ndata: {}", serde_json::json!({ "provider": "kugou", "results": kugou }));
         assert!(!event(&block, &query(), &mut found).unwrap());
-        let mxm = serde_json::json!({ "wordByWord": "[00:01.00] <00:01.00> one <00:01.50>\n[00:02.00] <00:02.00> two <00:02.50>" });
+        // An error from the server is told, and the stream read on.
+        assert!(!event("event: error\ndata: {\"message\":\"one provider failed\"}", &query(), &mut found).unwrap());
+        let mxm = serde_json::json!({ "wordByWord": "[00:01.00] <00:01.00> one <00:01.50> <00:01.50> (two) <00:01.90>\n[00:02.00] <00:02.00> two <00:02.50>" });
         let block = format!("event: provider\ndata: {}", serde_json::json!({ "provider": "musixmatch", "results": mxm }));
         assert!(!event(&block, &query(), &mut found).unwrap());
         assert!(event("event: done\ndata: {}", &query(), &mut found).unwrap());
         let best = gather(found).expect("some");
         assert_eq!(best.provider.as_deref(), Some("Musixmatch"));
         assert!(best.by_word());
+        // Backing vocals in brackets, under their line.
+        assert_eq!(best.lines[0].text, "one");
+        assert_eq!(best.lines[0].backing.len(), 1);
         assert_eq!(best.others.len(), 1);
         // KuGou's title line is a credit, not a lyric.
         assert_eq!(best.others[0].lines[0].text, "one");
+    }
+
+    fn lyrics(provider: &str, by_word: bool) -> Lyrics {
+        let words = |t: f64| if by_word { vec![super::super::model::Word { start: t, end: t + 0.5, text: "la".into() }] } else { Vec::new() };
+        Lyrics {
+            text: "la\nla".into(),
+            provider: Some(provider.into()),
+            lines: vec![
+                LyricLine { time: 1.0, text: "la".into(), words: words(1.0), ..LyricLine::default() },
+                LyricLine { time: 2.0, text: "la".into(), words: words(2.0), ..LyricLine::default() },
+            ],
+            ..Lyrics::default()
+        }
+    }
+
+    #[test]
+    fn what_was_found_before_is_kept() {
+        let mut before = gather(vec![lyrics("LRCLIB", false), lyrics("Musixmatch", true)]).unwrap();
+        before.translated.lines.insert("la".into(), "the".into());
+        // Found nothing this time: what was there stays.
+        let kept = merge(Some(&before), None).unwrap();
+        assert_eq!(kept.provider.as_deref(), Some("Musixmatch"));
+        assert_eq!(kept.others.len(), 1);
+        // Found something better: it leads, and the rest stay beside it.
+        let kept = merge(Some(&before), Some(lyrics("Better Lyrics", true))).unwrap();
+        assert_eq!(kept.provider.as_deref(), Some("Better Lyrics"));
+        assert_eq!(kept.others.iter().filter_map(|l| l.provider.as_deref()).collect::<Vec<_>>(), ["Musixmatch", "LRCLIB"]);
+        assert_eq!(kept.translated.lines.get("la").map(String::as_str), Some("the"));
+        assert_eq!(merge(None, None), None);
     }
 
     #[test]
@@ -445,5 +521,25 @@ mod tests {
         let left = seconds_left(&format!("x.{encoded}.y"));
         assert!((7100..=7200).contains(&left), "{left}");
         assert_eq!(seconds_left("nonsense"), 0);
+    }
+
+    /// The live stream read by the app's own code (dev): `NATIVE_YTM_BL_DIR`
+    /// is a profile's `lyrics-check` folder, with its key.
+    #[test]
+    #[ignore]
+    fn read_a_live_stream() {
+        let Ok(dir) = std::env::var("NATIVE_YTM_BL_DIR") else { return };
+        init(PathBuf::from(dir));
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let http = reqwest::Client::builder().gzip(true).build().unwrap();
+        let songs = [("4NRXx6U8ABQ", "Blinding Lights", "The Weeknd", None, 202), ("9cLEdCzvlIQ", "トリカゴ", "XX:me", Some("ダーリン・イン・ザ・フランキス エンディング集 vol.1"), 222)];
+        for (id, title, artist, album, duration) in songs {
+            let query = Query { video_id: id.into(), title: title.into(), artist: artist.into(), album: album.map(str::to_owned), duration: Some(duration) };
+            let started = Instant::now();
+            match runtime.block_on(find(&http, &query)) {
+                Ok(found) => println!("{title}: {:?} in {:?}", found.iter().map(|l| (rank(l), l.provider.clone().unwrap_or_default())).collect::<Vec<_>>(), started.elapsed()),
+                Err(error) => println!("{title}: error {error:#}"),
+            }
+        }
     }
 }

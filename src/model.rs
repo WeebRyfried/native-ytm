@@ -297,6 +297,12 @@ pub enum Action {
         video_id: String,
         choice: Option<String>,
     },
+    /// These lines of the song's lyrics wanted in English (they have no
+    /// translation of their own).
+    TranslateLyrics {
+        video_id: String,
+        lines: Vec<String>,
+    },
     SetSearchFilter(Filter),
     Suggest(String),
     ShowSidePanel(SideTab),

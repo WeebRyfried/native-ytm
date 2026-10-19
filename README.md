@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="../../releases/latest"><img src="https://img.shields.io/badge/download-v0.3.4-ff0033?style=flat-square" alt="Download v0.3.4"></a>
+  <a href="../../releases/latest"><img src="https://img.shields.io/badge/download-v0.3.5-ff0033?style=flat-square" alt="Download v0.3.5"></a>
   <img src="https://img.shields.io/badge/Windows-x64-0078D4?style=flat-square&logo=windows11&logoColor=white" alt="Windows x64">
   <img src="https://img.shields.io/badge/Rust-2024-B7410E?style=flat-square&logo=rust&logoColor=white" alt="Rust 2024">
   <img src="https://img.shields.io/badge/UI-egui%20%2B%20OpenGL-1f1f1f?style=flat-square" alt="egui and OpenGL">
@@ -56,7 +56,9 @@ sounds as good as your account allows.
 - **Songs kept on disk.** The last 100 songs you heard (or as many as you
   like) stay on disk too, so they start at once and play offline.
 - **Lyrics kept too**, once found: they show at once the next time, and
-  offline. The next song's are looked up while one plays.
+  offline. The next song's are looked up while one plays. A later look adds
+  any source found since and never takes away what was found, even when a
+  source is down.
 - **What it all takes**, in Settings: one bar of a colour per kind
   (downloads, songs kept, artwork, lyrics…) and the space left on the
   drive.
@@ -73,10 +75,11 @@ sounds as good as your account allows.
   extension uses: Better Lyrics' own (Apple Music's timing), BiniLyrics,
   Musixmatch, QQ Music, KuGou and Unison, then LRCLIB and YouTube's text.
   Each word lights up as it is sung, a soft edge sweeping through it;
-  backing vocals sit small under their line, a duet's other voice on the
-  right, and a translation under it all when the lyrics have one. Another
-  source is a click away in the corner, and the choice is kept for the
-  song. Better Lyrics' server wants a Cloudflare check passed first: the
+  backing vocals sit small under their line (also when a source writes
+  them into it in brackets), a duet's other voice on the right, and a
+  translation under it all: the lyrics' own, another source's for the same
+  line, or else Unison's. Another source is a click away in the corner,
+  and the choice is kept for the song. Better Lyrics' server wants a Cloudflare check passed first: the
   app runs its check page in Edge's WebView2, unseen unless Cloudflare
   asks for a click, about once a day.
 - **Readings over Japanese lyrics** in the full-window player: how each
@@ -246,7 +249,7 @@ cargo build --release
 | App state | `src/app.rs`, `src/queue.rs` | navigation, the queue, what plays next, preloading, the switch to Premium |
 | Deck of artwork | `src/ui/now_playing.rs` | the next song's card out from behind once it is a few seconds off, and the turn timed by the song coming in: where the crossfade has it start and for how long the two overlap, which the player records as it joins them |
 | Network | `src/backend.rs` | a two-thread tokio runtime; the interface never waits on it |
-| API | `src/api/` | InnerTube (`WEB_REMIX`) requests and the parsers that turn renderers into the model; timed lyrics from Better Lyrics' sources (`betterlyrics.rs`: its server's stream of providers, and Unison) and LRCLIB, read from TTML, LRC timed by the word, and QRC (`lyric_formats.rs`) |
+| API | `src/api/` | InnerTube (`WEB_REMIX`) requests and the parsers that turn renderers into the model; timed lyrics from Better Lyrics' sources (`betterlyrics.rs`: its server's stream of providers, and Unison) and LRCLIB, read from TTML, LRC timed by the word, and QRC (`lyric_formats.rs`); translations from Unison (`translate.rs`) |
 | Lyrics check | `src/lyrics_check.rs` | Better Lyrics' Cloudflare check page in WebView2 (through wry, on a plain window), in a process of its own; its token traded for a key that lasts a day |
 | Streams | `src/stream.rs` | finds a stream for a song (below) |
 | Audio | `src/player/` | range downloader (or a file read as it plays), symphonia (MP4, WebM, AAC, and MP3, FLAC, Vorbis, ALAC, WAV for local files), libopus for Opus, rubato resampler, the smart crossfade (`smart.rs`: where the songs go quiet), the equaliser (`eq.rs`, in the audio callback), fastframe-audio output |

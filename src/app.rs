@@ -221,6 +221,8 @@ pub struct App {
     kept_pages: crate::kept_pages::KeptPages,
     /// Songs whose lyrics came back incomplete, and when to ask again.
     lyrics_retry: HashMap<String, Instant>,
+    /// Songs whose lyrics were sent to be translated, and when.
+    lyrics_translating: HashMap<String, Instant>,
     /// How each song on disk stands, for the marks beside their names.
     pub offline: HashMap<String, Mark>,
     offline_gen: u64,
@@ -467,6 +469,7 @@ impl App {
             lyrics_cache: crate::lyrics::LyricsCache::new(paths.lyrics()),
             kept_pages: crate::kept_pages::KeptPages::new(paths.pages()),
             lyrics_retry: HashMap::new(),
+            lyrics_translating: HashMap::new(),
             offline: HashMap::new(),
             offline_gen: 0,
             marks_dirty: true,
@@ -1179,6 +1182,24 @@ impl App {
                 };
                 self.stats.summaries.insert((crate::stats::Source::LastFm, period), (loaded, Instant::now(), 0));
             }
+            Response::LyricsTranslated { video_id, lines, result } => {
+                let Ok(done) = result else {
+                    return;
+                };
+                self.lyrics_translating.remove(&video_id);
+                if let Some(Loadable::Ready(Some(lyrics))) = self.lyrics.get_mut(&video_id) {
+                    let lyrics = Arc::make_mut(lyrics);
+                    if done.from.is_some() {
+                        lyrics.translated.from = done.from;
+                    }
+                    // Every line asked is answered, if only with nothing
+                    // (one in English already), so it is not asked again.
+                    for (line, said) in lines.into_iter().zip(done.lines) {
+                        lyrics.translated.lines.insert(line, said.unwrap_or_default());
+                    }
+                    self.lyrics_cache.update(&video_id, self.settings.synced_lyrics, lyrics);
+                }
+            }
             Response::Lyrics { video_id, partial: true, result, .. } => {
                 // Shown while the rest is waited for: kept only once it comes.
                 if let (Some(Loadable::Loading), Ok(lyrics)) = (self.lyrics.get(&video_id), result) {
@@ -1186,24 +1207,29 @@ impl App {
                 }
             }
             Response::Lyrics { video_id, result, complete, .. } => {
-                if let Ok(lyrics) = &result {
-                    // A stopgap (YouTube's plain text while LRCLIB could not
-                    // answer) is kept as provisional, so it shows at once
-                    // next time too.
-                    self.lyrics_cache.put(&video_id, self.settings.synced_lyrics, lyrics, complete);
-                }
-                if complete && result.is_ok() {
+                // Kept together with what was found before: a look that
+                // finds less (a source down) takes nothing away. A stopgap
+                // is kept as provisional, so it shows at once next time too.
+                let synced = self.settings.synced_lyrics;
+                let kept = match &result {
+                    Ok(found) => self.lyrics_cache.put(&video_id, synced, found, complete),
+                    Err(_) => self.lyrics_cache.get(&video_id, synced).and_then(|k| k.lyrics),
+                };
+                let complete = complete && result.is_ok();
+                if complete {
                     self.lyrics_retry.remove(&video_id);
                 } else {
-                    self.lyrics_retry.insert(video_id.clone(), Instant::now() + LYRICS_RETRY);
+                    // Nothing to show meanwhile: asked again soon.
+                    let wait = if kept.is_some() { LYRICS_RETRY } else { LYRICS_RETRY_SOON };
+                    self.lyrics_retry.insert(video_id.clone(), Instant::now() + wait);
                 }
-                self.lyrics.insert(
-                    video_id,
-                    match result {
-                        Ok(lyrics) => Loadable::Ready(lyrics.map(Arc::new)),
-                        Err(error) => Loadable::Failed(error),
-                    },
-                );
+                let shown = match (kept, result) {
+                    (Some(lyrics), _) => Loadable::Ready(Some(Arc::new(lyrics))),
+                    (None, Err(error)) => Loadable::Failed(error),
+                    (None, Ok(_)) if !complete => Loadable::Failed("not every source answered".into()),
+                    (None, Ok(_)) => Loadable::Ready(None),
+                };
+                self.lyrics.insert(video_id, shown);
             }
             Response::Resolved {
                 token,
@@ -1567,8 +1593,15 @@ impl App {
     }
 
     /// Asks for the current song's lyrics, once its info says whether
-    /// YouTube has them: synced ones from LRCLIB first, then YouTube's.
+    /// YouTube has them: timed ones from Better Lyrics' sources and LRCLIB
+    /// first, then YouTube's.
     pub fn request_lyrics(&mut self) {
+        self.ask_lyrics(false);
+    }
+
+    /// `again`: the sources asked once more, whatever is on disk or on
+    /// screen (which stays until the answer comes).
+    fn ask_lyrics(&mut self, again: bool) {
         let Some(track) = self.current().cloned() else {
             return;
         };
@@ -1576,7 +1609,7 @@ impl App {
         if !self.lyrics.contains_key(&track.video_id)
             && let Some(kept) = self.lyrics_cache.get(&track.video_id, self.settings.synced_lyrics)
         {
-            // Provisional ones show, and LRCLIB is asked again meanwhile.
+            // Provisional ones show, and the sources are asked again meanwhile.
             if kept.recheck {
                 self.lyrics_retry.insert(track.video_id.clone(), Instant::now());
             }
@@ -1588,7 +1621,12 @@ impl App {
             return;
         }
         let video_id = track.video_id.clone();
-        if self.lyrics.contains_key(&video_id) || !self.now.info_ready {
+        let asked = match self.lyrics.get(&video_id) {
+            None => false,
+            Some(Loadable::Loading) => true,
+            Some(_) => !again,
+        };
+        if asked || !self.now.info_ready {
             return;
         }
         let query = self.lyrics_query(&track);
@@ -1597,7 +1635,9 @@ impl App {
             self.lyrics.insert(video_id, Loadable::Ready(None));
             return;
         }
-        self.lyrics.insert(video_id.clone(), Loadable::Loading);
+        if !matches!(self.lyrics.get(&video_id), Some(Loadable::Ready(Some(_)))) {
+            self.lyrics.insert(video_id.clone(), Loadable::Loading);
+        }
         self.backend.send(Request::Lyrics {
             video_id,
             browse_id,
@@ -1669,14 +1709,7 @@ impl App {
         if self.lyrics_retry.get(&video_id).is_some_and(|at| Instant::now() >= *at) && self.lyrics_shown() && self.online() {
             self.lyrics_retry.remove(&video_id);
             // What is shown stays until the new answer comes.
-            if let Some(Loadable::Ready(shown)) = self.lyrics.remove(&video_id) {
-                self.request_lyrics();
-                if let Some(Loadable::Loading) = self.lyrics.get(&video_id) {
-                    self.lyrics.insert(video_id, Loadable::Ready(shown));
-                }
-            } else {
-                self.request_lyrics();
-            }
+            self.ask_lyrics(true);
         }
     }
 
@@ -3444,6 +3477,14 @@ impl App {
                 self.personal.choose_lyrics(&video_id, choice);
                 self.personal_dirty = Some(Instant::now());
             }
+            Action::TranslateLyrics { video_id, lines } => {
+                // Once at a time, and after a failure not again for a while.
+                let asked = self.lyrics_translating.get(&video_id).is_some_and(|at| at.elapsed() < LYRICS_TRANSLATE_AGAIN);
+                if self.settings.lyric_translations && self.online() && !asked && !lines.is_empty() {
+                    self.lyrics_translating.insert(video_id.clone(), Instant::now());
+                    self.backend.send(Request::TranslateLyrics { video_id, lines });
+                }
+            }
             Action::SetSearchFilter(filter) => {
                 let query = self.search.query.clone();
                 if !query.is_empty() {
@@ -3772,6 +3813,10 @@ struct Measured {
 
 /// How long before lyrics that came back incomplete are asked for again.
 const LYRICS_RETRY: Duration = Duration::from_secs(300);
+/// The same, when there are none to show meanwhile.
+const LYRICS_RETRY_SOON: Duration = Duration::from_secs(60);
+/// How long before lyrics whose translation failed are sent again.
+const LYRICS_TRANSLATE_AGAIN: Duration = Duration::from_secs(600);
 
 /// A bitrate at or above this is Premium quality (256 kb/s streams).
 const PREMIUM_KBPS: u32 = 200;

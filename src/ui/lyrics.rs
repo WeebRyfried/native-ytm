@@ -50,6 +50,28 @@ struct Laid {
     height: f32,
 }
 
+/// Synced lyrics laid out: each line (none for a break), the lines still
+/// wanting a translation, and the other sources whose translations show
+/// (and whether any shown was made by machine), to credit.
+struct Layout {
+    lines: Vec<Option<Laid>>,
+    untranslated: Vec<String>,
+    borrowed_from: Vec<String>,
+    by_machine: bool,
+}
+
+/// Where a line's translation comes from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Said<'a> {
+    Own,
+    /// Another source's lyrics, by that source's name.
+    Borrowed(&'a str),
+    Machine,
+}
+
+/// How often lines still wanting a translation are sent for one, at most.
+const TRANSLATE_EVERY: f64 = 15.0;
+
 /// How long after a scroll by hand the view takes over again.
 const HAND_SCROLL: f64 = 3.0;
 /// Lines light up this much before their time, as a line is read just
@@ -97,14 +119,15 @@ pub fn show(app: &mut App, ui: &mut Ui, big: bool) {
             if shown.lines.is_empty() {
                 plain(app, ui, &video_id, shown, big);
             } else {
-                synced(app, ui, &video_id, shown, big);
+                synced(app, ui, &video_id, shown, &all, big);
             }
             if all.len() > 1 {
                 let pointed = ui.ctx().pointer_hover_pos().is_some_and(|p| area.contains(p));
                 sources(app, ui, area, &video_id, &all, chosen, pointed);
             }
         }
-        Some(Loadable::Failed(_) | Loadable::Ready(None)) => message(ui, "Lyrics are not available for this song"),
+        Some(Loadable::Failed(_)) => message(ui, "The lyrics could not be looked up just now. Trying again in a minute"),
+        Some(Loadable::Ready(None)) => message(ui, "Lyrics are not available for this song"),
         Some(Loadable::Loading) | None => widgets::spinner(ui),
     }
 }
@@ -330,7 +353,26 @@ fn footer(lyrics: &Lyrics) -> Option<String> {
     (!said.is_empty()).then_some(said)
 }
 
-fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, big: bool) {
+/// A line's translation: its own; else another source's line sung at the
+/// same moment; else one made by machine. `others` are the other sources'
+/// translated lines: when each is sung, its translation, and the source.
+fn translation_of<'a>(line: &LyricLine, others: &[(f64, &str, &'a str)], machine: &std::collections::BTreeMap<String, String>) -> Option<(String, Said<'a>)> {
+    if let Some(own) = line.translation.as_ref().filter(|t| !t.is_empty()) {
+        return Some((own.clone(), Said::Own));
+    }
+    let near = others
+        .iter()
+        .filter(|(time, ..)| (time - line.time).abs() <= 1.0)
+        .min_by(|a, b| (a.0 - line.time).abs().total_cmp(&(b.0 - line.time).abs()));
+    if let Some((_, said, source)) = near {
+        return Some(((*said).to_owned(), Said::Borrowed(source)));
+    }
+    machine.get(line.text.trim()).filter(|t| !t.is_empty()).map(|t| (t.clone(), Said::Machine))
+}
+
+/// `all`: the song's lyrics from every source (the first the one found
+/// first, which keeps the translations made by machine).
+fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&Lyrics], big: bool) {
     let area = ui.available_rect_before_wrap();
     let (rect, response) = ui.allocate_exact_size(area.size(), Sense::click());
     let painter = ui.painter_at(rect);
@@ -366,49 +408,93 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, big: bool
     let dots_h = size * 0.9;
 
     // Where each line sits, from the top of the lyrics.
-    // Laid out once per song, source, size, width and readings, not every
-    // frame.
-    type Layout = Arc<Vec<Option<Laid>>>;
+    // Laid out once per song, source, size, width, readings and
+    // translations, not every frame.
     let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
     let readings = readings_for(app, ui, big, &texts);
     let scale = (ui.ctx().pixels_per_point() * 100.0).round() as i32;
-    let source = (lyrics.choice(), lines.len(), lyrics.text.len());
+    let machine = &all[0].translated;
+    let source = (lyrics.choice(), lines.len(), lyrics.text.len(), machine.lines.len());
     let layout_id = ui.id().with(("lyrics-layout", video_id, source, width.round() as i32, big, scale, readings.map(|r| r.1), translations));
-    let galleys: Layout = ui.data(|d| d.get_temp(layout_id)).unwrap_or_else(|| {
+    let layout: Arc<Layout> = ui.data(|d| d.get_temp(layout_id)).unwrap_or_else(|| {
         let backing_font = theme::semibold(size * 0.62);
         let translation_font = theme::medium(size * 0.5);
-        let laid: Layout = Arc::new(
-            lines
-                .iter()
-                .map(|line| {
-                    if line.text.is_empty() && line.backing.is_empty() {
-                        return None;
-                    }
-                    let right = line.second_voice;
-                    let main = lay_line(&painter, &line.text, &font, width, readings, right);
-                    let timed = spans(&line.words, &line.text);
-                    let mut height = if line.text.is_empty() { 0.0 } else { main.galley.size().y };
-                    let backing = (!line.backing.is_empty()).then(|| {
-                        let text: String = line.backing.iter().map(|w| w.text.as_str()).collect();
-                        let galley = lay_text(&painter, &text, backing_font.clone(), width, right);
-                        let y = height + if height > 0.0 { size * 0.12 } else { 0.0 };
-                        height = y + galley.size().y;
-                        let timed = spans(&line.backing, &text);
-                        (galley, y, timed)
-                    });
-                    let translation = line.translation.as_ref().filter(|_| translations).map(|text| {
-                        let galley = lay_text(&painter, text, translation_font.clone(), width, right);
-                        let y = height + size * 0.18;
-                        height = y + galley.size().y;
-                        (galley, y)
-                    });
-                    Some(Laid { main, timed, backing, translation, height })
+        // The other sources' translations, to borrow by the moment sung.
+        let others: Vec<(f64, &str, &str)> = if translations {
+            all.iter()
+                .filter(|l| !std::ptr::eq(**l, lyrics))
+                .flat_map(|l| {
+                    let source = l.provider.as_deref().unwrap_or("another source");
+                    l.lines.iter().filter_map(move |line| line.translation.as_deref().filter(|t| !t.is_empty()).map(|t| (line.time, t, source)))
                 })
-                .collect(),
-        );
-        ui.data_mut(|d| d.insert_temp(layout_id, laid.clone()));
-        laid
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut untranslated = Vec::new();
+        let mut borrowed_from: Vec<String> = Vec::new();
+        let mut by_machine = false;
+        let laid: Vec<Option<Laid>> = lines
+            .iter()
+            .map(|line| {
+                if line.text.is_empty() && line.backing.is_empty() {
+                    return None;
+                }
+                let right = line.second_voice;
+                let main = lay_line(&painter, &line.text, &font, width, readings, right);
+                let timed = spans(&line.words, &line.text);
+                let mut height = if line.text.is_empty() { 0.0 } else { main.galley.size().y };
+                let backing = (!line.backing.is_empty()).then(|| {
+                    let text: String = line.backing.iter().map(|w| w.text.as_str()).collect();
+                    let galley = lay_text(&painter, &text, backing_font.clone(), width, right);
+                    let y = height + if height > 0.0 { size * 0.12 } else { 0.0 };
+                    height = y + galley.size().y;
+                    let timed = spans(&line.backing, &text);
+                    (galley, y, timed)
+                });
+                let said = if translations { translation_of(line, &others, &machine.lines) } else { None };
+                if translations && said.is_none() && !line.text.trim().is_empty() && !machine.lines.contains_key(line.text.trim()) {
+                    untranslated.push(line.text.trim().to_owned());
+                }
+                let translation = said.map(|(text, from)| {
+                    match from {
+                        Said::Own => {}
+                        Said::Borrowed(source) => {
+                            if !borrowed_from.iter().any(|s| s == source) {
+                                borrowed_from.push(source.to_owned());
+                            }
+                        }
+                        Said::Machine => by_machine = true,
+                    }
+                    let galley = lay_text(&painter, &text, translation_font.clone(), width, right);
+                    let y = height + size * 0.18;
+                    height = y + galley.size().y;
+                    (galley, y)
+                });
+                Some(Laid { main, timed, backing, translation, height })
+            })
+            .collect();
+        // Only lyrics that may be in another language, and not already
+        // found to be in English.
+        untranslated.sort();
+        untranslated.dedup();
+        if machine.from.as_deref() == Some(crate::api::translate::INTO) || !crate::api::translate::worth_asking(&untranslated) {
+            untranslated.clear();
+        }
+        let layout = Arc::new(Layout { lines: laid, untranslated, borrowed_from, by_machine });
+        ui.data_mut(|d| d.insert_temp(layout_id, layout.clone()));
+        layout
     });
+    if !layout.untranslated.is_empty() {
+        let id = ui.id().with(("lyrics-translate", video_id));
+        let now = ui.input(|i| i.time);
+        let last: f64 = ui.data(|d| d.get_temp(id)).unwrap_or(f64::NEG_INFINITY);
+        if now - last > TRANSLATE_EVERY {
+            ui.data_mut(|d| d.insert_temp(id, now));
+            app.actions.push(Action::TranslateLyrics { video_id: video_id.to_owned(), lines: layout.untranslated.clone() });
+        }
+    }
+    let galleys = &layout.lines;
     let height_of = |i: usize| -> f32 {
         match &galleys[i] {
             Some(laid) => laid.height,
@@ -543,7 +629,8 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, big: bool
                 }
                 if let Some((galley, y, timed)) = &laid.backing {
                     let at = line_rect.min + vec2(0.0, *y);
-                    if is_current && !timed.is_empty() {
+                    // Swept as sung only when the line is timed by the word.
+                    if is_current && !timed.is_empty() && !laid.timed.is_empty() {
                         let upto = sung(timed, heard);
                         paint_sung(&painter, at, galley, upto, white(0.26 * reach), white(0.78 * reach));
                         sweeping |= timed.last().is_some_and(|t| heard < t.1 + 0.1);
@@ -561,7 +648,16 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, big: bool
             }
         }
     }
-    if let Some(source) = footer(lyrics) {
+    let footer = footer(lyrics).map(|mut said| {
+        if !layout.borrowed_from.is_empty() {
+            said.push_str(&format!("\nTranslations from {}", layout.borrowed_from.join(", ")));
+        }
+        if layout.by_machine {
+            said.push_str("\nTranslations from Unison, Better Lyrics' community (made by machine)");
+        }
+        said
+    });
+    if let Some(source) = footer {
         let top = rect.top() + total - view.offset + gap;
         if top < rect.bottom() && top > rect.top() - 40.0 {
             let galley = painter.layout(source, theme::regular(12.5), theme::text_faint(), width);
@@ -718,6 +814,23 @@ mod tests {
 
     fn word(start: f64, end: f64, text: &str) -> Word {
         Word { start, end, text: text.into() }
+    }
+
+    #[test]
+    fn a_translation_from_the_line_another_source_or_a_machine() {
+        let line = |time: f64, text: &str, own: Option<&str>| LyricLine { time, text: text.into(), translation: own.map(str::to_owned), ..LyricLine::default() };
+        let mut machine = std::collections::BTreeMap::new();
+        machine.insert("はい".to_owned(), "Yes".to_owned());
+        machine.insert("いいえ".to_owned(), String::new());
+        let others = [(10.4, "Hello there", "BiniLyrics"), (30.0, "Far off", "BiniLyrics")];
+        // Its own first.
+        assert_eq!(translation_of(&line(10.0, "こんにちは", Some("Hi")), &others, &machine), Some(("Hi".into(), Said::Own)));
+        // Else another source's line sung at the same moment.
+        assert_eq!(translation_of(&line(10.0, "こんにちは", None), &others, &machine), Some(("Hello there".into(), Said::Borrowed("BiniLyrics"))));
+        // Else the machine's, by the line's text; an empty one is none.
+        assert_eq!(translation_of(&line(20.0, "はい", None), &others, &machine), Some(("Yes".into(), Said::Machine)));
+        assert_eq!(translation_of(&line(20.0, "いいえ", None), &others, &machine), None);
+        assert_eq!(translation_of(&line(50.0, "さようなら", None), &others, &machine), None);
     }
 
     #[test]

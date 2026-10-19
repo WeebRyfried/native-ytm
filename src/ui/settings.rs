@@ -140,7 +140,7 @@ fn quality(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
             toggle_row(
                 ui,
                 "Translations",
-                "What each line means, under it, when the lyrics come with a translation (often for Japanese and Korean songs).",
+                "What each line means, under it: the lyrics' own translation, or another source's, or else Unison's (Better Lyrics' community service, made by machine).",
                 &mut draft.lyric_translations,
             );
         }

@@ -36,6 +36,8 @@ pub struct Query {
 #[serde(rename_all = "camelCase")]
 struct Record {
     #[serde(default)]
+    artist_name: Option<String>,
+    #[serde(default)]
     duration: Option<f64>,
     #[serde(default)]
     instrumental: bool,
@@ -45,9 +47,20 @@ struct Record {
     synced_lyrics: Option<String>,
 }
 
-/// The song's lyrics, synced if LRCLIB has them so. `None` when it has
-/// none at all.
-pub async fn find(http: &reqwest::Client, query: &Query) -> Result<Option<Lyrics>> {
+/// The song's lyrics, synced if LRCLIB has them so (`None` when it has none
+/// at all), and the trouble met when a request failed on the way: then
+/// what was found may not be all there is.
+pub async fn find(http: &reqwest::Client, query: &Query) -> (Option<Lyrics>, Option<anyhow::Error>) {
+    // Names as LRCLIB writes them: one plain space between words, where a
+    // tag may have a wide one ("ダーリン・イン・ザ・フランキス　エンディング集").
+    let spaced = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let query = &Query {
+        title: spaced(&query.title),
+        artist: spaced(&query.artist),
+        album: query.album.as_deref().map(spaced),
+        duration: query.duration,
+    };
+    let mut trouble = None;
     // The exact record first: title, artist, album and length.
     let mut params = vec![("track_name", query.title.clone()), ("artist_name", query.artist.clone())];
     if let Some(album) = &query.album {
@@ -57,33 +70,49 @@ pub async fn find(http: &reqwest::Client, query: &Query) -> Result<Option<Lyrics
         params.push(("duration", duration.to_string()));
     }
     let mut best: Option<Record> = None;
-    if let Some(record) = get(http, &format!("{API}/get"), &params).await?.and_then(|v| serde_json::from_value::<Record>(v).ok()) {
-        if record.synced_lyrics.is_some() {
-            return Ok(to_lyrics(record));
+    match get(http, &format!("{API}/get"), &params).await {
+        Ok(found) => {
+            if let Some(record) = found.and_then(|v| serde_json::from_value::<Record>(v).ok()) {
+                if record.synced_lyrics.is_some() {
+                    return (to_lyrics(record), None);
+                }
+                best = Some(record);
+            }
         }
-        best = Some(record);
+        Err(error) => trouble = Some(error),
     }
-    // Then a search, under each form of the title, for the closest length.
-    for title in title_forms(&query.title) {
-        let params = [("track_name", title), ("artist_name", query.artist.clone())];
-        let Some(found) = get(http, &format!("{API}/search"), &params).await? else {
-            continue;
+    // Then a search, under each form of the title, for the closest length;
+    // and last the whole of it as one search, which LRCLIB answers when the
+    // named fields find nothing (by the same artist, then).
+    let fits = |r: &Record| match (query.duration, r.duration) {
+        (Some(want), Some(have)) => (f64::from(want) - have).abs() <= 3.0,
+        _ => true,
+    };
+    let artist = crate::local::loose(&query.artist);
+    let mut searches: Vec<Vec<(&str, String)>> =
+        title_forms(&query.title).into_iter().map(|title| vec![("track_name", title), ("artist_name", query.artist.clone())]).collect();
+    searches.push(vec![("q", format!("{} {}", query.title, query.artist))]);
+    for params in searches {
+        let anywhere = params[0].0 == "q";
+        let records: Vec<Record> = match get(http, &format!("{API}/search"), &params).await {
+            Ok(Some(found)) => serde_json::from_value(found).unwrap_or_default(),
+            Ok(None) => continue,
+            Err(error) => {
+                trouble.get_or_insert(error);
+                continue;
+            }
         };
-        let records: Vec<Record> = serde_json::from_value(found).unwrap_or_default();
-        let fits = |r: &Record| match (query.duration, r.duration) {
-            (Some(want), Some(have)) => (f64::from(want) - have).abs() <= 3.0,
-            _ => true,
-        };
-        if let Some(record) = records.into_iter().filter(fits).max_by_key(|r| (r.synced_lyrics.is_some(), r.plain_lyrics.is_some())) {
+        let theirs = |r: &Record| !anywhere || r.artist_name.as_deref().is_some_and(|a| !artist.is_empty() && crate::local::loose(a).contains(&artist));
+        if let Some(record) = records.into_iter().filter(fits).filter(theirs).max_by_key(|r| (r.synced_lyrics.is_some(), r.plain_lyrics.is_some())) {
             if record.synced_lyrics.is_some() {
-                return Ok(to_lyrics(record));
+                return (to_lyrics(record), None);
             }
             if best.is_none() {
                 best = Some(record);
             }
         }
     }
-    Ok(best.and_then(to_lyrics))
+    (best.and_then(to_lyrics), trouble)
 }
 
 async fn get(http: &reqwest::Client, url: &str, params: &[(&str, String)]) -> Result<Option<serde_json::Value>> {
@@ -101,8 +130,10 @@ async fn get(http: &reqwest::Client, url: &str, params: &[(&str, String)]) -> Re
 
 async fn get_now(http: &reqwest::Client, url: &str, params: &[(&str, String)]) -> Result<Option<serde_json::Value>> {
     // Turned away all the same (429, with a second or so to wait): wait as
-    // asked, a little longer each time.
+    // asked, a little longer each time. A server having trouble (503, as
+    // LRCLIB's does at busy times) is asked twice more, a while apart.
     let mut attempt = 0;
+    let mut troubled = 0;
     let response = loop {
         let response = http
             .get(url)
@@ -111,6 +142,11 @@ async fn get_now(http: &reqwest::Client, url: &str, params: &[(&str, String)]) -
             .timeout(Duration::from_secs(8))
             .send()
             .await?;
+        if response.status().is_server_error() && troubled < 2 {
+            troubled += 1;
+            tokio::time::sleep(Duration::from_millis(1500 * troubled)).await;
+            continue;
+        }
         if response.status() != reqwest::StatusCode::TOO_MANY_REQUESTS || attempt == 5 {
             break response;
         }
@@ -135,7 +171,11 @@ fn to_lyrics(record: Record) -> Option<Lyrics> {
     if record.instrumental {
         return None;
     }
-    let lines = record.synced_lyrics.as_deref().map(parse_lrc).unwrap_or_default();
+    let mut lines = record.synced_lyrics.as_deref().map(parse_lrc).unwrap_or_default();
+    // Backing vocals written into their line, under it.
+    for line in &mut lines {
+        super::lyric_formats::split_backing(line);
+    }
     let text = record
         .plain_lyrics
         .filter(|t| !t.trim().is_empty())

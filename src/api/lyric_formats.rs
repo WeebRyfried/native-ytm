@@ -365,6 +365,61 @@ fn unescape(text: &str) -> String {
     out
 }
 
+/// Backing vocals written into their line in brackets, at its end ("I could
+/// never say it on the phone (say it on the phone)"), as Musixmatch, LRCLIB
+/// and KuGou write them: moved under the line, as TTML marks them. A line
+/// all in brackets is sung as it is, and one with backing vocals of its own
+/// is left alone.
+pub fn split_backing(line: &mut LyricLine) {
+    if !line.backing.is_empty() {
+        return;
+    }
+    let text = line.text.trim_end();
+    let Some(close) = text.chars().last().filter(|c| matches!(c, ')' | '）')) else {
+        return;
+    };
+    let open = if close == ')' { '(' } else { '（' };
+    // Where the bracket closing the line was opened.
+    let mut depth = 0;
+    let mut start = None;
+    for (at, c) in text.char_indices().rev() {
+        if c == close {
+            depth += 1;
+        } else if c == open {
+            depth -= 1;
+            if depth == 0 {
+                start = Some(at);
+                break;
+            }
+        }
+    }
+    let Some(start) = start else { return };
+    let before = text[..start].trim_end();
+    if before.is_empty() {
+        return;
+    }
+    if line.words.is_empty() {
+        let group = text[start..].to_owned();
+        line.text = before.to_owned();
+        line.backing = vec![Word { start: line.time, end: line.end.unwrap_or(line.time), text: group }];
+        return;
+    }
+    // Timed by the word: the words from the one the bracket opens.
+    let mut at = 0;
+    let Some(first) = line.words.iter().position(|w| {
+        let here = at;
+        at += w.text.len();
+        here + (w.text.len() - w.text.trim_start().len()) == start
+    }) else {
+        return;
+    };
+    if first == 0 {
+        return;
+    }
+    line.backing = line.words.split_off(first);
+    finish(line);
+}
+
 /// The credits some services put before the words ("词：Ayase", "作曲 :
 /// …", the song's name and singer), taken out.
 pub fn drop_credits(mut lines: Vec<LyricLine>, title: &str, artist: &str) -> Vec<LyricLine> {
@@ -441,6 +496,33 @@ mod tests {
         assert_eq!(lines[1].text, "Plain line");
         assert!(lines[1].words.is_empty());
         assert_eq!(lines[2].text, "無敵");
+    }
+
+    #[test]
+    fn backing_vocals_in_brackets_go_under_their_line() {
+        // Timed by the word, as Musixmatch writes it.
+        let mut lines = lrc("[02:20.00] <02:20.00> say <02:20.50> <02:20.50> it <02:21.00> <02:21.20> (say <02:21.60> <02:21.60> it) <02:22.00>");
+        split_backing(&mut lines[0]);
+        assert_eq!(lines[0].text, "say it");
+        assert_eq!(lines[0].words.len(), 2);
+        assert_eq!(lines[0].backing.iter().map(|w| w.text.as_str()).collect::<String>(), "(say it)");
+        assert_eq!(lines[0].end, Some(142.0));
+        // Timed by the line.
+        let mut line = LyricLine { time: 5.0, text: "I could never (say it on the phone)".into(), ..LyricLine::default() };
+        split_backing(&mut line);
+        assert_eq!(line.text, "I could never");
+        assert_eq!(line.backing[0].text, "(say it on the phone)");
+        // Full-width brackets, as Japanese lyrics write them.
+        let mut line = LyricLine { time: 1.0, text: "君の名前（名前）".into(), ..LyricLine::default() };
+        split_backing(&mut line);
+        assert_eq!((line.text.as_str(), line.backing[0].text.as_str()), ("君の名前", "（名前）"));
+        // A line all in brackets, or with them in its middle, stays as it is.
+        for text in ["(Ooh, ooh)", "Oh (yeah) I know", "Na (na (na))"] {
+            let mut line = LyricLine { time: 1.0, text: text.into(), ..LyricLine::default() };
+            split_backing(&mut line);
+            let expected_backing = usize::from(text == "Na (na (na))");
+            assert_eq!(line.backing.len(), expected_backing, "{text}");
+        }
     }
 
     #[test]

@@ -271,6 +271,27 @@ pub struct Lyrics {
     /// to switch to.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub others: Vec<Lyrics>,
+    /// The lines translated by machine, for lyrics that come without a
+    /// translation of their own.
+    #[serde(default, skip_serializing_if = "Translated::is_empty")]
+    pub translated: Translated,
+}
+
+/// Lines translated by machine (into English), by their text, and the
+/// language the lyrics were found to be in: once that is English, there is
+/// nothing to translate.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Translated {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub lines: std::collections::BTreeMap<String, String>,
+}
+
+impl Translated {
+    pub fn is_empty(&self) -> bool {
+        self.from.is_none() && self.lines.is_empty()
+    }
 }
 
 impl Lyrics {
