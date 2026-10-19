@@ -30,16 +30,16 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         );
         ui.add_space(2.0);
         // The name, and the version small and grey on its baseline.
-        let name = ui.painter().layout_no_wrap("YTMusic".to_owned(), theme::bold(19.0), theme::TEXT);
-        let version = ui.painter().layout_no_wrap(concat!("v", env!("CARGO_PKG_VERSION")).to_owned(), theme::medium(10.5), theme::TEXT_FAINT);
+        let name = ui.painter().layout_no_wrap("YTMusic".to_owned(), theme::bold(19.0), theme::text());
+        let version = ui.painter().layout_no_wrap(concat!("v", env!("CARGO_PKG_VERSION")).to_owned(), theme::medium(10.5), theme::text_faint());
         let size = vec2(name.size().x + 5.0 + version.size().x, name.size().y);
         let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
         let top = rect.center().y - name.size().y / 2.0;
         // Inter's baseline sits about four fifths down its line.
         let baseline = top + name.size().y * 0.8;
         let name_w = name.size().x;
-        ui.painter().galley(pos2(rect.left(), top), name, theme::TEXT);
-        ui.painter().galley(pos2(rect.left() + name_w + 5.0, baseline - version.size().y * 0.8), version, theme::TEXT_FAINT);
+        ui.painter().galley(pos2(rect.left(), top), name, theme::text());
+        ui.painter().galley(pos2(rect.left() + name_w + 5.0, baseline - version.size().y * 0.8), version, theme::text_faint());
         response.on_hover_text(concat!("Native YTM ", env!("CARGO_PKG_VERSION")));
     });
     ui.add_space(16.0);
@@ -61,7 +61,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     ui.painter().hline(
         divider.left() + 8.0..=divider.right() - 8.0,
         divider.top(),
-        egui::Stroke::new(1.0, theme::DIVIDER),
+        egui::Stroke::new(1.0, theme::divider()),
     );
     ui.add_space(12.0);
     if !app.signed_in {
@@ -72,7 +72,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 ui.set_width(theme::SIDEBAR_WIDTH - 40.0);
                 ui.label(
                     RichText::new("Sign in to like songs, save music to your library and see your playlists.")
-                        .color(theme::TEXT_DIM)
+                        .color(theme::text_dim())
                         .font(theme::regular(13.0)),
                 );
                 ui.add_space(10.0);
@@ -134,14 +134,17 @@ fn nav(ui: &mut Ui, icon: Icon, label: &str, selected: bool) -> bool {
         Color32::TRANSPARENT
     };
     ui.painter().rect_filled(rect, CornerRadius::same(8), fill);
-    icon.image(theme::TEXT, 22.0)
+    if response.hovered() {
+        crate::ui::widgets::hover_glow(ui, rect, 8.0, 1.0);
+    }
+    icon.image(theme::text(), 22.0)
         .paint_at(ui, Rect::from_min_size(pos2(rect.left() + 14.0, rect.center().y - 11.0), Vec2::splat(22.0)));
     ui.painter().text(
         pos2(rect.left() + 52.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
         label,
         if selected { theme::semibold(15.0) } else { theme::medium(15.0) },
-        theme::TEXT,
+        theme::text(),
     );
     response.clicked()
 }
@@ -168,6 +171,9 @@ fn playlist_row(
         Color32::TRANSPARENT
     };
     ui.painter().rect_filled(rect, CornerRadius::same(8), fill);
+    if response.hovered() {
+        crate::ui::widgets::hover_glow(ui, rect, 8.0, 1.0);
+    }
     let art = Rect::from_min_size(pos2(rect.left() + 6.0, rect.center().y - 18.0), Vec2::splat(36.0));
     if liked {
         ui.painter().rect_filled(art, CornerRadius::same(4), Color32::from_rgb(0x6a, 0x3d, 0xe8));
@@ -183,7 +189,7 @@ fn playlist_row(
             .layout(Layout::top_down(Align::Min)),
     );
     child.spacing_mut().item_spacing.y = 1.0;
-    widgets::clipped_label(&mut child, title, theme::medium(14.0), theme::TEXT, w, Sense::hover());
-    widgets::clipped_label(&mut child, subtitle, theme::regular(12.5), theme::TEXT_DIM, w, Sense::hover());
+    widgets::clipped_label(&mut child, title, theme::medium(14.0), theme::text(), w, Sense::hover());
+    widgets::clipped_label(&mut child, subtitle, theme::regular(12.5), theme::text_dim(), w, Sense::hover());
     response.clicked()
 }

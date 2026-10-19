@@ -14,6 +14,7 @@ mod side_panel;
 mod sidebar;
 mod stats;
 mod topbar;
+mod visualiser;
 pub mod widgets;
 
 use egui::{Align2, Color32, CornerRadius, CursorIcon, Frame, Margin, Rect, pos2, vec2};
@@ -55,7 +56,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             .exact_size(theme::PLAYER_HEIGHT)
             .resizable(false)
             .show_separator_line(false)
-            .frame(Frame::new().fill(theme::PLAYER))
+            .frame(Frame::new().fill(theme::player()))
             .show(ui, |ui| player_bar::show(app, ui));
     }
     // The full view fades in over the window and rises into place, and
@@ -147,7 +148,7 @@ fn floating_bar(app: &mut App, ctx: &egui::Context, screen: Rect, shown: f32) {
             mesh.add_triangle(0, 1, 2);
             mesh.add_triangle(1, 2, 3);
             bar.painter().add(egui::Shape::mesh(mesh));
-            bar.painter().rect_filled(rect, CornerRadius::ZERO, theme::PLAYER.gamma_multiply(0.92));
+            bar.painter().rect_filled(rect, CornerRadius::ZERO, theme::player().gamma_multiply(0.92));
             player_bar::show(app, &mut bar);
         });
 }
@@ -159,7 +160,7 @@ fn windowed(app: &mut App, ui: &mut egui::Ui) {
             .exact_size(theme::SIDEBAR_WIDTH)
             .resizable(false)
             .show_separator_line(false)
-            .frame(Frame::new().fill(theme::SIDEBAR).inner_margin(Margin::symmetric(12, 0)))
+            .frame(Frame::new().fill(theme::sidebar()).inner_margin(Margin::symmetric(12, 0)))
             .show(ui, |ui| sidebar::show(app, ui));
     }
     if app.settings.side_panel {
@@ -170,7 +171,7 @@ fn windowed(app: &mut App, ui: &mut egui::Ui) {
             .show_separator_line(false)
             .frame(
                 Frame::new()
-                    .fill(theme::SIDEBAR)
+                    .fill(theme::sidebar())
                     .inner_margin(Margin::symmetric(12, 12)),
             )
             .show(ui, |ui| side_panel::show(app, ui));
@@ -196,7 +197,7 @@ fn toasts(app: &App, ctx: &egui::Context) {
             f.layout(
                 toast.text.clone(),
                 theme::regular(14.0),
-                theme::TEXT,
+                theme::text(),
                 520.0,
             )
         });
@@ -216,12 +217,12 @@ fn toasts(app: &App, ctx: &egui::Context) {
         );
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("toasts")));
         let fill = match toast.kind {
-            ToastKind::Info => Color32::from_rgb(0x2b, 0x2b, 0x2b),
+            ToastKind::Info => theme::surface_hover(),
             ToastKind::Error => Color32::from_rgb(0x5c, 0x1a, 0x1f),
         };
         painter.rect_filled(rect.translate(vec2(0.0, 3.0)), CornerRadius::same(8), Color32::from_black_alpha(90).gamma_multiply(presence));
         painter.rect_filled(rect, CornerRadius::same(8), fill.gamma_multiply(presence));
-        painter.galley_with_override_text_color(rect.center() - galley.size() / 2.0, galley, theme::TEXT.gamma_multiply(presence));
+        painter.galley_with_override_text_color(rect.center() - galley.size() / 2.0, galley, theme::text().gamma_multiply(presence));
         y -= size.y + 8.0;
         let _ = Align2::CENTER_CENTER;
     }

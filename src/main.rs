@@ -102,7 +102,7 @@ fn main() {
                     if let Ok(handle) = cc.window_handle()
                         && let RawWindowHandle::Win32(window) = handle.as_raw()
                     {
-                        platform::style_title_bar(window.hwnd.get(), theme::SIDEBAR);
+                        platform::style_title_bar(window.hwnd.get(), theme::sidebar());
                         platform::set_main_window(window.hwnd.get());
                     }
                 }
@@ -500,7 +500,7 @@ impl eframe::App for Window {
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        theme::BG.to_normalized_gamma_f32()
+        theme::bg().to_normalized_gamma_f32()
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

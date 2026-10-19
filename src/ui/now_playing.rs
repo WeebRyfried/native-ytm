@@ -21,7 +21,7 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect, rise: f32, foot: f32, chrome
         let close = Rect::from_min_size(rect.min + vec2(20.0, 16.0 + rise), vec2(40.0, 40.0));
         let mut bar = ui.new_child(UiBuilder::new().max_rect(close).layout(Layout::left_to_right(Align::Center)));
         bar.multiply_opacity(chrome);
-        if widgets::icon_button(&mut bar, Icon::ChevronDown, 26.0, theme::TEXT, "Close the player (Esc)").clicked() {
+        if widgets::icon_button(&mut bar, Icon::ChevronDown, 26.0, theme::text(), "Close the player (Esc)").clicked() {
             app.actions.push(Action::ToggleFullView);
         }
         let corner = Rect::from_min_size(pos2(rect.right() - 60.0, rect.top() + 16.0 + rise), vec2(40.0, 40.0));
@@ -32,7 +32,7 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect, rise: f32, foot: f32, chrome
         } else {
             (Icon::Fullscreen, "Full screen (F11)")
         };
-        if widgets::icon_button(&mut bar, icon, 22.0, theme::TEXT, tip).clicked() {
+        if widgets::icon_button(&mut bar, icon, 22.0, theme::text(), tip).clicked() {
             app.actions.push(Action::ToggleFullscreen);
         }
     }
@@ -41,7 +41,7 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect, rise: f32, foot: f32, chrome
         let mut child = ui.new_child(UiBuilder::new().max_rect(rect));
         child.add_space(rect.height() * 0.4);
         child.vertical_centered(|ui| {
-            ui.label(RichText::new("Nothing is playing").font(theme::semibold(20.0)).color(theme::TEXT_DIM));
+            ui.label(RichText::new("Nothing is playing").font(theme::semibold(20.0)).color(theme::text_dim()));
         });
         return;
     };
@@ -100,14 +100,14 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect, rise: f32, foot: f32, chrome
     let shown = app.shown_title(&track).to_owned();
     // The year it came out, small and grey, just after the title.
     let year = track.year.or_else(|| (app.now.video_id == track.video_id).then_some(app.now.year).flatten());
-    let year = year.map(|y| text.painter().layout_no_wrap(y.to_string(), theme::medium(if big { 16.0 } else { 14.0 }), theme::TEXT_DIM));
+    let year = year.map(|y| text.painter().layout_no_wrap(y.to_string(), theme::medium(if big { 16.0 } else { 14.0 }), theme::text_dim()));
     let year_w = year.as_ref().map_or(0.0, |g| g.size().x + 12.0);
-    let response = widgets::clipped_label(&mut text, &shown, title_font, theme::TEXT, width - year_w, Sense::hover());
+    let response = widgets::clipped_label(&mut text, &shown, title_font, theme::text(), width - year_w, Sense::hover());
     if let Some(year) = year {
         // On the title's baseline, four fifths down each line.
         let title = response.rect;
         let at = pos2(title.right() + 12.0, title.top() + title.height() * 0.8 - year.size().y * 0.8);
-        text.painter().galley(at, year, theme::TEXT_DIM.gamma_multiply(0.9));
+        text.painter().galley(at, year, theme::text_dim().gamma_multiply(0.9));
     }
     if shown != track.title {
         response.on_hover_text(&track.title);
@@ -120,9 +120,9 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect, rise: f32, foot: f32, chrome
     let upgrade = app.upgrade.clone().filter(|u| u.token == app.current_token());
     let mut cx = app.cx();
     if links.is_empty() {
-        widgets::clipped_label(&mut text, track.extra.as_deref().unwrap_or(""), theme::medium(17.0), theme::TEXT_DIM, width, Sense::hover());
+        widgets::clipped_label(&mut text, track.extra.as_deref().unwrap_or(""), theme::medium(17.0), theme::text_dim(), width, Sense::hover());
     } else {
-        widgets::links(&mut text, &mut cx, &links, theme::medium(17.0), theme::TEXT_DIM, width);
+        widgets::links(&mut text, &mut cx, &links, theme::medium(17.0), theme::text_dim(), width);
     }
     if quality.is_some() || upgrade.is_some() {
         text.add_space(6.0);
@@ -178,8 +178,8 @@ fn quality_chip(ui: &mut Ui, quality: Option<&str>, upgrade: Option<&Upgrade>) {
     let premium = upgrade.is_some_and(|u| matches!(u.phase, UpgradePhase::Done(_)) && u.to.is_some());
     let painter = ui.painter().clone();
     let mark = codec_mark(&label);
-    let galley = painter.layout_no_wrap(label, font.clone(), theme::TEXT_DIM);
-    let note_galley = note.map(|n| painter.layout_no_wrap(n, font.clone(), theme::TEXT));
+    let galley = painter.layout_no_wrap(label, font.clone(), theme::text_dim());
+    let note_galley = note.map(|n| painter.layout_no_wrap(n, font.clone(), theme::text()));
     let sparkle = if premium { 15.0 } else { 0.0 };
     let mark_h = 11.0;
     let mark_w = mark.map_or(0.0, |(_, _, aspect)| mark_h * aspect + 5.0);
@@ -216,7 +216,7 @@ fn quality_chip(ui: &mut Ui, quality: Option<&str>, upgrade: Option<&Upgrade>) {
         let scale = ease_out_back(t);
         let size = 11.0 * scale;
         Icon::Mix
-            .image(theme::ACCENT_TEXT, size.max(1.0))
+            .image(theme::accent_text(), size.max(1.0))
             .paint_at(ui, Rect::from_center_size(pos2(x + 5.5, rect.center().y), vec2(size, size)));
         x += sparkle;
     }
@@ -232,12 +232,12 @@ fn quality_chip(ui: &mut Ui, quality: Option<&str>, upgrade: Option<&Upgrade>) {
         }
         x += mark_w;
     }
-    let label_color = theme::TEXT_DIM.gamma_multiply(fade_in);
+    let label_color = theme::text_dim().gamma_multiply(fade_in);
     clip.galley_with_override_text_color(pos2(x, rect.center().y - galley.size().y / 2.0), galley.clone(), label_color);
     if let Some(note) = note_galley {
         let pulse = 0.55 + 0.45 * ((now * 2.6).sin() as f32 * 0.5 + 0.5);
         let at = pos2(x + galley.size().x + 10.0, rect.center().y - note.size().y / 2.0);
-        clip.galley_with_override_text_color(at, note, theme::TEXT.gamma_multiply(pulse));
+        clip.galley_with_override_text_color(at, note, theme::text().gamma_multiply(pulse));
     }
     if let Some(since) = done_for
         && since < 1.6
@@ -249,7 +249,7 @@ fn quality_chip(ui: &mut Ui, quality: Option<&str>, upgrade: Option<&Upgrade>) {
         painter.rect_stroke(
             rect.expand(grow),
             CornerRadius::same(6),
-            egui::Stroke::new(1.5, theme::ACCENT.gamma_multiply(alpha)),
+            egui::Stroke::new(1.5, theme::accent().gamma_multiply(alpha)),
             egui::StrokeKind::Outside,
         );
         theme::next_frame(ui.ctx());
@@ -339,7 +339,7 @@ fn backdrop(app: &mut App, ui: &Ui, rect: Rect, url: Option<&str>) {
                 match old {
                     Some(old) => paint(old, 1.0),
                     None => {
-                        painter.rect_filled(rect, CornerRadius::ZERO, theme::BG);
+                        painter.rect_filled(rect, CornerRadius::ZERO, theme::bg());
                     }
                 }
             }
@@ -347,7 +347,7 @@ fn backdrop(app: &mut App, ui: &Ui, rect: Rect, url: Option<&str>) {
         }
         (None, Some(old)) => paint(old, 1.0),
         (None, None) => {
-            painter.rect_filled(rect, CornerRadius::ZERO, theme::BG);
+            painter.rect_filled(rect, CornerRadius::ZERO, theme::bg());
         }
     }
 }

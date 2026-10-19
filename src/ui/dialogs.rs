@@ -93,7 +93,7 @@ fn delete_playlist(app: &mut App, ctx: &egui::Context) {
             ui.add(
                 egui::Label::new(
                     RichText::new(format!("\u{201c}{title}\u{201d} goes from your YouTube Music account, on every device. This cannot be undone."))
-                        .color(theme::TEXT_DIM),
+                        .color(theme::text_dim()),
                 )
                 .wrap(),
             );
@@ -117,10 +117,10 @@ fn delete_playlist(app: &mut App, ctx: &egui::Context) {
 
 fn frame() -> egui::Frame {
     egui::Frame::new()
-        .fill(theme::POPUP)
+        .fill(theme::popup())
         .corner_radius(CornerRadius::same(12))
         .inner_margin(Margin::same(24))
-        .stroke(egui::Stroke::new(1.0, theme::DIVIDER))
+        .stroke(egui::Stroke::new(1.0, theme::divider()))
 }
 
 fn sign_in(app: &mut App, ctx: &egui::Context) {
@@ -135,7 +135,7 @@ fn sign_in(app: &mut App, ctx: &egui::Context) {
             ui.add_space(10.0);
             ui.label(RichText::new(
                 "This app signs in with your browser's YouTube Music cookie, the way ytmusicapi does. Nothing leaves this computer except to YouTube.",
-            ).color(theme::TEXT_DIM));
+            ).color(theme::text_dim()));
             ui.add_space(12.0);
             for (n, step) in [
                 "Open music.youtube.com in your browser, signed in.",
@@ -165,12 +165,12 @@ fn sign_in(app: &mut App, ctx: &egui::Context) {
             });
             if let Some(error) = &dialog.error {
                 ui.add_space(8.0);
-                ui.label(RichText::new(error).color(theme::ACCENT_TEXT));
+                ui.label(RichText::new(error).color(theme::accent_text()));
             }
             ui.add_space(8.0);
             ui.label(
                 RichText::new("The cookie is kept encrypted with Windows (DPAPI) for your account only. Signing out of YouTube in that browser ends this sign-in too.")
-                    .color(theme::TEXT_FAINT)
+                    .color(theme::text_faint())
                     .font(theme::regular(12.5)),
             );
             ui.add_space(16.0);
@@ -178,7 +178,7 @@ fn sign_in(app: &mut App, ctx: &egui::Context) {
                 ui.spacing_mut().item_spacing.x = 10.0;
                 let busy = dialog.busy;
                 if busy {
-                    widgets::spinner_of(ui, 20.0, theme::TEXT);
+                    widgets::spinner_of(ui, 20.0, theme::text());
                 } else if widgets::pill(ui, None, "Sign in", true).clicked() {
                     submit = Some(dialog.text.clone());
                 }
@@ -218,7 +218,7 @@ fn picker(app: &mut App, ctx: &egui::Context) {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Save to playlist").font(theme::bold(20.0)));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if widgets::icon_button(ui, Icon::Close, 18.0, theme::TEXT_DIM, "Close").clicked() {
+                    if widgets::icon_button(ui, Icon::Close, 18.0, theme::text_dim(), "Close").clicked() {
                         close = true;
                     }
                 });
@@ -231,7 +231,7 @@ fn picker(app: &mut App, ctx: &egui::Context) {
             ui.add_space(8.0);
             egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
                 if playlists.is_empty() {
-                    widgets::spinner_of(ui, 20.0, theme::TEXT_DIM);
+                    widgets::spinner_of(ui, 20.0, theme::text_dim());
                 }
                 for item in playlists.iter() {
                     let Some(Target::Browse { browse_id, .. }) = &item.target else {
@@ -244,14 +244,15 @@ fn picker(app: &mut App, ctx: &egui::Context) {
                     let response = response.on_hover_cursor(CursorIcon::PointingHand);
                     if response.hovered() {
                         ui.painter().rect_filled(rect, CornerRadius::same(6), Color32::from_white_alpha(16));
+                        widgets::hover_glow(ui, rect, 6.0, 1.0);
                     }
                     let art = Rect::from_min_size(pos2(rect.left() + 6.0, rect.center().y - 20.0), Vec2::splat(40.0));
                     widgets::paint_art(ui, &mut app.images, item.thumbnail.as_deref(), art, 4.0, false);
                     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(art.right() + 12.0, rect.top() + 8.0), rect.max)));
                     child.spacing_mut().item_spacing.y = 1.0;
                     let w = rect.right() - art.right() - 20.0;
-                    widgets::clipped_label(&mut child, &item.title, theme::medium(14.5), theme::TEXT, w, Sense::hover());
-                    widgets::clipped_label(&mut child, &item.subtitle, theme::regular(12.5), theme::TEXT_DIM, w, Sense::hover());
+                    widgets::clipped_label(&mut child, &item.title, theme::medium(14.5), theme::text(), w, Sense::hover());
+                    widgets::clipped_label(&mut child, &item.subtitle, theme::regular(12.5), theme::text_dim(), w, Sense::hover());
                     if response.clicked() {
                         app.actions.push(Action::AddToPlaylist {
                             playlist_id: browse_id.clone(),
@@ -288,7 +289,7 @@ fn new_playlist(app: &mut App, ctx: &egui::Context) {
                 edit.request_focus();
             }
             ui.add_space(6.0);
-            ui.label(RichText::new("Private: only you can see it.").color(theme::TEXT_FAINT).font(theme::regular(12.5)));
+            ui.label(RichText::new("Private: only you can see it.").color(theme::text_faint()).font(theme::regular(12.5)));
             ui.add_space(16.0);
             let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {

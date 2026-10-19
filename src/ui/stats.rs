@@ -30,7 +30,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         }
         // A thin rule between the two choices.
         let (rule, _) = ui.allocate_exact_size(vec2(14.0, 28.0), Sense::hover());
-        ui.painter().vline(rule.center().x, rule.y_range().shrink(4.0), egui::Stroke::new(1.0, theme::DIVIDER));
+        ui.painter().vline(rule.center().x, rule.y_range().shrink(4.0), egui::Stroke::new(1.0, theme::divider()));
         for p in Period::ALL {
             if widgets::chip(ui, p.label(), period == p).clicked() && period != p {
                 app.actions.push(Action::ShowStats { source, period: p });
@@ -50,8 +50,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 10.0;
                 let (rect, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
-                Icon::LastFm.image(theme::TEXT_DIM, 18.0).paint_at(ui, rect);
-                ui.label(RichText::new(error).color(theme::TEXT_DIM));
+                Icon::LastFm.image(theme::text_dim(), 18.0).paint_at(ui, rect);
+                ui.label(RichText::new(error).color(theme::text_dim()));
             });
             if !connected(app) {
                 ui.add_space(12.0);
@@ -83,7 +83,7 @@ fn body(app: &mut App, ui: &mut Ui, summary: &Summary, source: Source, period: P
             }
             _ => format!("No plays in the last {} yet.", period.label().to_lowercase()),
         };
-        ui.label(RichText::new(text).color(theme::TEXT_DIM));
+        ui.label(RichText::new(text).color(theme::text_dim()));
         return;
     }
     let locals = app.local.album_list();
@@ -110,9 +110,9 @@ fn body(app: &mut App, ui: &mut Ui, summary: &Summary, source: Source, period: P
         ui.spacing_mut().item_spacing = vec2(gap, gap);
         for (value, label) in &tiles {
             let (rect, _) = ui.allocate_exact_size(vec2(tile_w, 84.0), Sense::hover());
-            ui.painter().rect_filled(rect, CornerRadius::same(12), theme::SURFACE);
-            ui.painter().text(pos2(rect.left() + 18.0, rect.top() + 16.0), egui::Align2::LEFT_TOP, value, theme::bold(26.0), theme::TEXT);
-            ui.painter().text(pos2(rect.left() + 18.0, rect.bottom() - 16.0), egui::Align2::LEFT_BOTTOM, *label, theme::regular(13.5), theme::TEXT_DIM);
+            ui.painter().rect_filled(rect, CornerRadius::same(12), theme::surface());
+            ui.painter().text(pos2(rect.left() + 18.0, rect.top() + 16.0), egui::Align2::LEFT_TOP, value, theme::bold(26.0), theme::text());
+            ui.painter().text(pos2(rect.left() + 18.0, rect.bottom() - 16.0), egui::Align2::LEFT_BOTTOM, *label, theme::regular(13.5), theme::text_dim());
         }
     });
 
@@ -124,7 +124,7 @@ fn body(app: &mut App, ui: &mut Ui, summary: &Summary, source: Source, period: P
             Bins::Weeks => "Each week",
             Bins::Months => "Each month",
         };
-        ui.label(RichText::new(title).font(theme::semibold(15.0)).color(theme::TEXT_DIM));
+        ui.label(RichText::new(title).font(theme::semibold(15.0)).color(theme::text_dim()));
         ui.add_space(10.0);
         activity(ui, summary);
     }
@@ -226,7 +226,7 @@ fn body(app: &mut App, ui: &mut Ui, summary: &Summary, source: Source, period: P
             Source::LastFm => format!("Scrobbling since {}", month_year(since)),
             Source::App => format!("Counting plays since {}", month_year(since)),
         };
-        ui.label(RichText::new(text).color(theme::TEXT_FAINT).font(theme::regular(12.5)));
+        ui.label(RichText::new(text).color(theme::text_faint()).font(theme::regular(12.5)));
     }
 }
 
@@ -240,12 +240,13 @@ fn ranked_row(ui: &mut Ui, cx: &mut Cx<'_>, rank: usize, ranked: &Ranked, most: 
     }
     let share = ranked.plays as f32 / most as f32;
     let bar = Rect::from_min_size(rect.min, vec2(rect.width() * share, rect.height()));
-    ui.painter().rect_filled(bar, CornerRadius::same(8), theme::ACCENT.gamma_multiply(0.09));
+    ui.painter().rect_filled(bar, CornerRadius::same(8), theme::accent().gamma_multiply(0.09));
     if response.hovered() {
         ui.painter().rect_filled(rect, CornerRadius::same(8), Color32::from_white_alpha(12));
+        widgets::hover_glow(ui, rect, 8.0, 1.0);
     }
     let center = rect.center().y;
-    ui.painter().text(pos2(rect.left() + 18.0, center), egui::Align2::CENTER_CENTER, rank.to_string(), theme::semibold(14.0), theme::TEXT_DIM);
+    ui.painter().text(pos2(rect.left() + 18.0, center), egui::Align2::CENTER_CENTER, rank.to_string(), theme::semibold(14.0), theme::text_dim());
     let mut x = rect.left() + 38.0;
     if ranked.art.is_some() || round {
         let art = Rect::from_min_size(pos2(x, center - 20.0), Vec2::splat(40.0));
@@ -253,19 +254,19 @@ fn ranked_row(ui: &mut Ui, cx: &mut Cx<'_>, rank: usize, ranked: &Ranked, most: 
         x = art.right() + 12.0;
     }
     let plays = if ranked.plays == 1 { "1 play".to_owned() } else { format!("{} plays", widgets::thousands(ranked.plays)) };
-    let plays_g = ui.painter().layout_no_wrap(plays, theme::regular(13.0), theme::TEXT_DIM);
+    let plays_g = ui.painter().layout_no_wrap(plays, theme::regular(13.0), theme::text_dim());
     let text_w = (rect.right() - 12.0 - plays_g.size().x - 12.0 - x).max(40.0);
-    let name = ui.painter().layout(ranked.name.clone(), theme::medium(14.5), theme::TEXT, f32::INFINITY);
+    let name = ui.painter().layout(ranked.name.clone(), theme::medium(14.5), theme::text(), f32::INFINITY);
     let clip = Rect::from_min_max(pos2(x, rect.top()), pos2(x + text_w, rect.bottom()));
     let painter = ui.painter().with_clip_rect(clip);
     match &ranked.by {
         Some(by) => {
-            painter.galley(pos2(x, center - name.size().y - 1.0), name, theme::TEXT);
-            painter.text(pos2(x, center + 1.0), egui::Align2::LEFT_TOP, by, theme::regular(12.5), theme::TEXT_DIM);
+            painter.galley(pos2(x, center - name.size().y - 1.0), name, theme::text());
+            painter.text(pos2(x, center + 1.0), egui::Align2::LEFT_TOP, by, theme::regular(12.5), theme::text_dim());
         }
-        None => painter.galley(pos2(x, center - name.size().y / 2.0), name, theme::TEXT),
+        None => painter.galley(pos2(x, center - name.size().y / 2.0), name, theme::text()),
     }
-    ui.painter().galley(pos2(rect.right() - 12.0 - plays_g.size().x, center - plays_g.size().y / 2.0), plays_g, theme::TEXT_DIM);
+    ui.painter().galley(pos2(rect.right() - 12.0 - plays_g.size().x, center - plays_g.size().y / 2.0), plays_g, theme::text_dim());
     response
 }
 
@@ -291,11 +292,11 @@ fn activity(ui: &mut Ui, summary: &Summary) {
             pointed = Some((i, n));
         }
         let color = if n == 0 {
-            theme::SURFACE_ACTIVE
+            theme::surface_active()
         } else if hovered {
-            theme::ACCENT_TEXT
+            theme::accent_text()
         } else {
-            theme::ACCENT.gamma_multiply(0.8)
+            theme::accent().gamma_multiply(0.8)
         };
         ui.painter().rect_filled(bar, CornerRadius::same(3), color);
     }
@@ -305,8 +306,8 @@ fn activity(ui: &mut Ui, summary: &Summary) {
         Bins::Months => "months",
     };
     let label_y = chart.bottom() + 4.0;
-    ui.painter().text(pos2(chart.left(), label_y), egui::Align2::LEFT_TOP, format!("{} {unit} ago", bins.len()), theme::regular(11.5), theme::TEXT_FAINT);
-    ui.painter().text(pos2(chart.right(), label_y), egui::Align2::RIGHT_TOP, "now", theme::regular(11.5), theme::TEXT_FAINT);
+    ui.painter().text(pos2(chart.left(), label_y), egui::Align2::LEFT_TOP, format!("{} {unit} ago", bins.len()), theme::regular(11.5), theme::text_faint());
+    ui.painter().text(pos2(chart.right(), label_y), egui::Align2::RIGHT_TOP, "now", theme::regular(11.5), theme::text_faint());
     if let Some((i, n)) = pointed {
         let back = bins.len() - 1 - i;
         let when = match (summary.bin, back) {

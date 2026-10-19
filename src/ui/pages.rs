@@ -136,7 +136,7 @@ fn browse(app: &mut App, ui: &mut Ui, route: &Route, key: &str) {
                     if let Some(text) = about.and_then(|i| page.sections[i].text.as_ref()) {
                         let width = ui.available_width().min(760.0);
                         ui.allocate_ui_with_layout(vec2(width, 0.0), Layout::top_down(Align::Min), |ui| {
-                            widgets::read_more(ui, egui::Id::new(("artist-about", browse_id)), text, theme::regular(14.5), theme::TEXT_DIM, width, 3);
+                            widgets::read_more(ui, egui::Id::new(("artist-about", browse_id)), text, theme::regular(14.5), theme::text_dim(), width, 3);
                         });
                         ui.add_space(28.0);
                     }
@@ -168,7 +168,7 @@ fn browse(app: &mut App, ui: &mut Ui, route: &Route, key: &str) {
             if page.sections.is_empty() && page.tracks.is_empty() && page.header.is_none() {
                 ui.add_space(40.0);
                 ui.vertical_centered(|ui| {
-                    ui.label(RichText::new("Nothing here yet").color(theme::TEXT_DIM));
+                    ui.label(RichText::new("Nothing here yet").color(theme::text_dim()));
                 });
             }
             for (index, section) in page.sections.iter().enumerate().filter(|(i, _)| Some(*i) != about) {
@@ -186,7 +186,7 @@ fn browse(app: &mut App, ui: &mut Ui, route: &Route, key: &str) {
 fn offline_note(ui: &mut Ui, cx: &mut Cx<'_>) {
     ui.add_space(56.0);
     ui.vertical_centered(|ui| {
-        Icon::Offline.image(theme::TEXT_DIM, 40.0).paint_at(
+        Icon::Offline.image(theme::text_dim(), 40.0).paint_at(
             ui,
             Rect::from_center_size(ui.cursor().center_top() + vec2(0.0, 20.0), Vec2::splat(40.0)),
         );
@@ -195,7 +195,7 @@ fn offline_note(ui: &mut Ui, cx: &mut Cx<'_>) {
         ui.add_space(6.0);
         ui.label(
             RichText::new("This page loads when the connection is back. Your downloads play now.")
-                .color(theme::TEXT_DIM),
+                .color(theme::text_dim()),
         );
         ui.add_space(16.0);
         if widgets::pill(ui, Some(Icon::CircleCheck), "Go to your downloads", true).clicked() {
@@ -249,19 +249,19 @@ fn collection_header(ui: &mut Ui, cx: &mut Cx<'_>, header: &Header, page: &Page,
             }
             if let Some(author) = &header.author {
                 ui.horizontal(|ui| {
-                    widgets::links(ui, cx, std::slice::from_ref(author), theme::medium(15.0), theme::TEXT, text_w);
+                    widgets::links(ui, cx, std::slice::from_ref(author), theme::medium(15.0), theme::text(), text_w);
                 });
             }
             if !line.is_empty() {
-                ui.label(RichText::new(line.join(" \u{2022} ")).color(theme::TEXT_DIM).font(theme::regular(14.0)));
+                ui.label(RichText::new(line.join(" \u{2022} ")).color(theme::text_dim()).font(theme::regular(14.0)));
             }
             if let Some(s) = &header.second_subtitle {
-                ui.label(RichText::new(s).color(theme::TEXT_DIM).font(theme::regular(14.0)));
+                ui.label(RichText::new(s).color(theme::text_dim()).font(theme::regular(14.0)));
             }
             if let Some(description) = &header.description {
                 ui.add_space(8.0);
                 let id = egui::Id::new(("description", browse_id));
-                widgets::read_more(ui, id, description, theme::regular(14.0), theme::TEXT_DIM, text_w, 3);
+                widgets::read_more(ui, id, description, theme::regular(14.0), theme::text_dim(), text_w, 3);
             }
             ui.add_space(16.0);
             ui.horizontal(|ui| {
@@ -296,11 +296,11 @@ fn collection_header(ui: &mut Ui, cx: &mut Cx<'_>, header: &Header, page: &Page,
                     }
                 }
                 download_pill(ui, cx, &tracks, &playlist_id, page.tracks_continuation.is_some(), &header.title);
-                let more = widgets::icon_button(ui, Icon::More, 20.0, theme::TEXT, "More");
+                let more = widgets::icon_button(ui, Icon::More, 20.0, theme::text(), "More");
                 egui::Popup::menu(&more).show(|ui| {
                     ui.set_min_width(220.0);
                     let entry = |ui: &mut Ui, icon: Icon, text: &str| {
-                        ui.add(egui::Button::image_and_text(icon.image(theme::TEXT, 18.0), text).frame_when_inactive(false)).clicked()
+                        ui.add(egui::Button::image_and_text(icon.image(theme::text(), 18.0), text).frame_when_inactive(false)).clicked()
                     };
                     if !tracks.is_empty() {
                         if entry(ui, Icon::PlayNext, "Play next") {
@@ -443,7 +443,7 @@ fn artist_header(ui: &mut Ui, cx: &mut Cx<'_>, header: &Header, stats: Option<cr
     let stops = [(0.0f32, 0.0f32), (0.45, 0.55), (0.8, 0.9), (1.0, 1.0)];
     for (i, (t, alpha)) in stops.iter().enumerate() {
         let y = fade_top + (rect.bottom() - fade_top) * t;
-        let color = theme::BG.gamma_multiply(*alpha);
+        let color = theme::bg().gamma_multiply(*alpha);
         mesh.colored_vertex(pos2(rect.left(), y), color);
         mesh.colored_vertex(pos2(rect.right(), y), color);
         if i > 0 {
@@ -465,7 +465,7 @@ fn artist_header(ui: &mut Ui, cx: &mut Cx<'_>, header: &Header, stats: Option<cr
     );
     child.add(egui::Label::new(RichText::new(&header.title).font(theme::bold(46.0)).color(Color32::WHITE)).truncate());
     if let Some(subtitle) = &header.subtitle {
-        child.label(RichText::new(subtitle).color(theme::TEXT_DIM).font(theme::regular(14.0)));
+        child.label(RichText::new(subtitle).color(theme::text_dim()).font(theme::regular(14.0)));
     }
     if let Some(stats) = stats {
         lastfm_line(&mut child, stats);
@@ -506,15 +506,15 @@ fn lastfm_line(ui: &mut Ui, stats: crate::lastfm::ArtistStats) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
-        Icon::LastFm.image(theme::ACCENT_TEXT, 16.0).paint_at(ui, rect);
+        Icon::LastFm.image(theme::accent_text(), 16.0).paint_at(ui, rect);
         let mine = match stats.plays.unwrap_or(0) {
             0 => "Not in your scrobbles yet".to_owned(),
             1 => "You've scrobbled them once".to_owned(),
             n => format!("You've scrobbled them {} times", widgets::thousands(n)),
         };
-        ui.label(RichText::new(mine).font(theme::medium(14.0)).color(theme::ACCENT_TEXT));
+        ui.label(RichText::new(mine).font(theme::medium(14.0)).color(theme::accent_text()));
         if let Some(n) = stats.listeners {
-            ui.label(RichText::new(format!("\u{00b7} {} listeners on Last.fm", widgets::thousands(n))).color(theme::TEXT_DIM).font(theme::regular(14.0)));
+            ui.label(RichText::new(format!("\u{00b7} {} listeners on Last.fm", widgets::thousands(n))).color(theme::text_dim()).font(theme::regular(14.0)));
         }
     })
     .response
@@ -550,7 +550,7 @@ fn library(app: &mut App, ui: &mut Ui, tab: LibraryTab, key: &str) {
     }
     if !app.signed_in {
         ui.add_space(4.0);
-        ui.label(RichText::new("Sign in to see your playlists, liked songs, albums and history.").color(theme::TEXT_DIM));
+        ui.label(RichText::new("Sign in to see your playlists, liked songs, albums and history.").color(theme::text_dim()));
         ui.add_space(12.0);
         if widgets::pill(ui, Some(Icon::SignIn), "Sign in", true).clicked() {
             app.actions.push(Action::OpenSignIn);
@@ -585,15 +585,15 @@ fn cached(app: &mut App, ui: &mut Ui) {
     // What is downloading, while anything is.
     if let Some((title, done)) = downloading {
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width().min(640.0), 64.0), Sense::hover());
-        ui.painter().rect_filled(rect, CornerRadius::same(10), theme::SURFACE);
+        ui.painter().rect_filled(rect, CornerRadius::same(10), theme::surface());
         let mut row = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(16.0, 0.0))).layout(Layout::left_to_right(Align::Center)));
         row.spacing_mut().item_spacing.x = 12.0;
         widgets::offline_mark(&mut row, Mark::Saving(done));
         row.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             let line = if waiting > 0 { format!("Downloading \u{201c}{title}\u{201d} \u{00b7} {waiting} more to go") } else { format!("Downloading \u{201c}{title}\u{201d}") };
-            widgets::clipped_label(ui, &line, theme::medium(14.0), theme::TEXT, rect.width() - 160.0, Sense::hover());
-            ui.label(RichText::new(format!("{:.0}%", done * 100.0)).font(theme::regular(12.5)).color(theme::TEXT_DIM));
+            widgets::clipped_label(ui, &line, theme::medium(14.0), theme::text(), rect.width() - 160.0, Sense::hover());
+            ui.label(RichText::new(format!("{:.0}%", done * 100.0)).font(theme::regular(12.5)).color(theme::text_dim()));
         });
         row.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if widgets::pill(ui, None, "Stop", false).clicked() {
@@ -602,7 +602,7 @@ fn cached(app: &mut App, ui: &mut Ui) {
         });
         ui.add_space(20.0);
     } else if waiting > 0 && !online {
-        ui.label(RichText::new(format!("{} wait for the connection to download.", widgets::songs(waiting))).color(theme::TEXT_DIM));
+        ui.label(RichText::new(format!("{} wait for the connection to download.", widgets::songs(waiting))).color(theme::text_dim()));
         ui.add_space(16.0);
     }
 
@@ -612,7 +612,7 @@ fn cached(app: &mut App, ui: &mut Ui) {
         if usage.saved > 0 {
             ui.label(
                 RichText::new(format!("{} \u{00b7} {:.0} MB", widgets::songs(usage.saved), usage.saved_bytes as f64 / 1_048_576.0))
-                    .color(theme::TEXT_DIM),
+                    .color(theme::text_dim()),
             );
         }
     });
@@ -620,7 +620,7 @@ fn cached(app: &mut App, ui: &mut Ui) {
     if saved.is_empty() {
         ui.label(
             RichText::new("Nothing downloaded yet. Choose Download on an album or a playlist, or in a song's menu, and it plays here without the network.")
-                .color(theme::TEXT_DIM),
+                .color(theme::text_dim()),
         );
     } else {
         let source = Source {
@@ -637,11 +637,11 @@ fn cached(app: &mut App, ui: &mut Ui) {
                 cx.push(Action::SetShuffle(true));
                 cx.push(Action::PlayTracks { tracks: saved.to_vec(), start: fastrand::usize(..saved.len()), source: source.clone() });
             }
-            let more = widgets::icon_button(ui, Icon::More, 20.0, theme::TEXT, "More");
+            let more = widgets::icon_button(ui, Icon::More, 20.0, theme::text(), "More");
             egui::Popup::menu(&more).show(|ui| {
                 ui.set_min_width(220.0);
                 if ui
-                    .add(egui::Button::image_and_text(Icon::Trash.image(theme::TEXT, 18.0), "Remove every download").frame_when_inactive(false))
+                    .add(egui::Button::image_and_text(Icon::Trash.image(theme::text(), 18.0), "Remove every download").frame_when_inactive(false))
                     .clicked()
                 {
                     cx.push(Action::ClearDownloads);
@@ -659,7 +659,7 @@ fn cached(app: &mut App, ui: &mut Ui) {
         ui.add_space(4.0);
         ui.label(
             RichText::new("Kept on this PC from your recent plays, so they play offline too, until newer songs take their place. Download one to keep it.")
-                .color(theme::TEXT_DIM),
+                .color(theme::text_dim()),
         );
         ui.add_space(10.0);
         let source = Source {
@@ -710,9 +710,9 @@ fn device(app: &mut App, ui: &mut Ui) {
             Some(_) => format!("{} \u{00b7} {albums} \u{00b7} looking for changes", widgets::songs(songs.len())),
             None => format!("{} \u{00b7} {albums}", widgets::songs(songs.len())),
         };
-        ui.label(RichText::new(line).color(theme::TEXT_DIM));
+        ui.label(RichText::new(line).color(theme::text_dim()));
         if scanning.is_some() {
-            widgets::spinner_of(ui, 14.0, theme::TEXT_DIM);
+            widgets::spinner_of(ui, 14.0, theme::text_dim());
         }
     });
     ui.add_space(12.0);
@@ -738,14 +738,14 @@ fn device(app: &mut App, ui: &mut Ui) {
         {
             cx.push(Action::AddLocalFolder);
         }
-        if widgets::icon_button(ui, Icon::Refresh, 18.0, theme::TEXT_DIM, "Look through the folders again").clicked() {
+        if widgets::icon_button(ui, Icon::Refresh, 18.0, theme::text_dim(), "Look through the folders again").clicked() {
             cx.push(Action::RescanLocal);
         }
         if !songs.is_empty() {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let field = ui.add(
                     egui::TextEdit::singleline(&mut filter)
-                        .hint_text(RichText::new("Filter by title, artist or album").color(theme::TEXT_FAINT))
+                        .hint_text(RichText::new("Filter by title, artist or album").color(theme::text_faint()))
                         .desired_width(240.0)
                         .margin(egui::Margin::symmetric(10, 6)),
                 );
@@ -761,7 +761,7 @@ fn device(app: &mut App, ui: &mut Ui) {
             ui.add_space(20.0);
             ui.label(
                 RichText::new("No music found in these folders yet. MP3, FLAC, M4A, Ogg, Opus, WAV and AIFF files play; add the folder that holds them.")
-                    .color(theme::TEXT_DIM),
+                    .color(theme::text_dim()),
             );
         } else {
             widgets::spinner(ui);
@@ -857,7 +857,7 @@ fn device(app: &mut App, ui: &mut Ui) {
 
 fn nothing_matches(ui: &mut Ui, filter: &str) {
     ui.add_space(12.0);
-    ui.label(RichText::new(format!("Nothing matches \u{201c}{}\u{201d}", filter.trim())).color(theme::TEXT_DIM));
+    ui.label(RichText::new(format!("Nothing matches \u{201c}{}\u{201d}", filter.trim())).color(theme::text_dim()));
 }
 
 /// An album of the music on this PC, made from its files: its cover, its
@@ -868,7 +868,7 @@ fn local_album(app: &mut App, ui: &mut Ui, key: &str) {
     let Some(album) = albums.iter().find(|a| a.key == key).cloned() else {
         ui.add_space(40.0);
         if app.local.scanned {
-            ui.vertical_centered(|ui| ui.label(RichText::new("This album is no longer on this PC").color(theme::TEXT_DIM)));
+            ui.vertical_centered(|ui| ui.label(RichText::new("This album is no longer on this PC").color(theme::text_dim())));
         } else {
             widgets::spinner(ui);
         }
@@ -906,7 +906,7 @@ fn local_album(app: &mut App, ui: &mut Ui, key: &str) {
             let text_w = (width - art - 28.0).max(200.0);
             ui.set_width(text_w);
             ui.add_space(8.0);
-            ui.label(RichText::new("ALBUM \u{00b7} ON THIS PC").font(theme::semibold(12.0)).color(theme::TEXT_DIM));
+            ui.label(RichText::new("ALBUM \u{00b7} ON THIS PC").font(theme::semibold(12.0)).color(theme::text_dim()));
             ui.add_space(4.0);
             ui.add(egui::Label::new(RichText::new(&album.title).font(theme::bold(32.0))).wrap());
             ui.add_space(6.0);
@@ -916,7 +916,7 @@ fn local_album(app: &mut App, ui: &mut Ui, key: &str) {
             } else {
                 crate::api::model::Link::new(album.artist.clone(), Some(format!("{}{}", crate::local::ARTIST, album.artist)))
             };
-            ui.horizontal(|ui| widgets::links(ui, &mut cx, std::slice::from_ref(&by), theme::medium(15.0), theme::TEXT, text_w));
+            ui.horizontal(|ui| widgets::links(ui, &mut cx, std::slice::from_ref(&by), theme::medium(15.0), theme::text(), text_w));
             let minutes = (album.seconds + 30) / 60;
             let length = if minutes >= 60 {
                 format!("{} h {} min", minutes / 60, minutes % 60)
@@ -931,9 +931,9 @@ fn local_album(app: &mut App, ui: &mut Ui, key: &str) {
             }
             line.push(widgets::songs(album.songs));
             line.push(length);
-            ui.label(RichText::new(line.join(" \u{2022} ")).color(theme::TEXT_DIM).font(theme::regular(14.0)));
+            ui.label(RichText::new(line.join(" \u{2022} ")).color(theme::text_dim()).font(theme::regular(14.0)));
             if let Some(quality) = &quality {
-                ui.label(RichText::new(quality).color(theme::TEXT_FAINT).font(theme::regular(13.0)));
+                ui.label(RichText::new(quality).color(theme::text_faint()).font(theme::regular(13.0)));
             }
             ui.add_space(16.0);
             ui.horizontal(|ui| {
@@ -954,7 +954,7 @@ fn local_album(app: &mut App, ui: &mut Ui, key: &str) {
                     cx.push(Action::StartRadio(first.clone()));
                 }
                 if let Some(folder) = album.folder.clone()
-                    && widgets::icon_button(ui, Icon::Folder, 20.0, theme::TEXT_DIM, "Show in folder").clicked()
+                    && widgets::icon_button(ui, Icon::Folder, 20.0, theme::text_dim(), "Show in folder").clicked()
                 {
                     cx.push(Action::ShowInFolder(folder));
                 }
@@ -993,14 +993,14 @@ fn device_welcome(ui: &mut Ui, cx: &mut Cx<'_>, picking: bool) {
     ui.vertical_centered(|ui| {
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(72.0), Sense::hover());
         ui.painter().circle_filled(rect.center(), 36.0, Color32::from_white_alpha(14));
-        Icon::Folder.image(theme::TEXT, 32.0).paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(32.0)));
+        Icon::Folder.image(theme::text(), 32.0).paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(32.0)));
         ui.add_space(18.0);
         ui.label(RichText::new("Play the music on this PC").font(theme::semibold(20.0)));
         ui.add_space(8.0);
         ui.set_max_width(460.0);
         ui.label(
             RichText::new("Add the folders where you keep MP3, FLAC, M4A, Ogg or WAV files. Their songs show here and come first when you search, beside YouTube Music. Nothing leaves this PC.")
-                .color(theme::TEXT_DIM),
+                .color(theme::text_dim()),
         );
         ui.add_space(18.0);
         if widgets::pill(ui, Some(Icon::FolderPlus), if picking { "Choosing\u{2026}" } else { "Add a folder" }, true).clicked() {
@@ -1078,7 +1078,7 @@ fn artist(app: &mut App, ui: &mut Ui, name: &str) {
         ui.add_space(28.0);
         ui.vertical(|ui| {
             ui.add_space(26.0);
-            ui.label(RichText::new("ARTIST").font(theme::semibold(12.0)).color(theme::TEXT_DIM));
+            ui.label(RichText::new("ARTIST").font(theme::semibold(12.0)).color(theme::text_dim()));
             ui.add(egui::Label::new(RichText::new(&shown_name).font(theme::bold(44.0)).color(Color32::WHITE)).truncate());
             let mut stats = Vec::new();
             if let Some(info) = info {
@@ -1093,11 +1093,11 @@ fn artist(app: &mut App, ui: &mut Ui, name: &str) {
                 stats.push(format!("{} on this PC", widgets::songs(songs.len())));
             }
             if !stats.is_empty() {
-                ui.label(RichText::new(stats.join(" \u{00b7} ")).color(theme::TEXT_DIM));
+                ui.label(RichText::new(stats.join(" \u{00b7} ")).color(theme::text_dim()));
             }
             if let Some(plays) = info.and_then(|i| i.plays).filter(|n| *n > 0) {
                 let times = if plays == 1 { "once".to_owned() } else { format!("{} times", widgets::thousands(plays)) };
-                ui.label(RichText::new(format!("You've played them {times}")).color(theme::ACCENT_TEXT));
+                ui.label(RichText::new(format!("You've played them {times}")).color(theme::accent_text()));
             }
             ui.add_space(14.0);
             ui.horizontal(|ui| {
@@ -1139,7 +1139,7 @@ fn artist(app: &mut App, ui: &mut Ui, name: &str) {
         ui.allocate_ui_with_layout(vec2(width, 0.0), Layout::top_down(Align::Min), |ui| {
             if !info.bio.is_empty() {
                 let id = egui::Id::new(("artist-bio", &key));
-                widgets::read_more(ui, id, &info.bio, theme::regular(14.5), theme::TEXT_DIM, width, 3);
+                widgets::read_more(ui, id, &info.bio, theme::regular(14.5), theme::text_dim(), width, 3);
                 ui.add_space(14.0);
             }
             if !info.tags.is_empty() {
@@ -1179,9 +1179,9 @@ fn artist(app: &mut App, ui: &mut Ui, name: &str) {
         };
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
-            Icon::LastFm.image(theme::TEXT_DIM, 18.0).paint_at(ui, Rect::from_min_size(ui.cursor().min + vec2(0.0, 1.0), Vec2::splat(18.0)));
+            Icon::LastFm.image(theme::text_dim(), 18.0).paint_at(ui, Rect::from_min_size(ui.cursor().min + vec2(0.0, 1.0), Vec2::splat(18.0)));
             ui.add_space(26.0);
-            ui.label(RichText::new(text).color(theme::TEXT_DIM));
+            ui.label(RichText::new(text).color(theme::text_dim()));
         });
         if !connected {
             ui.add_space(10.0);
@@ -1204,19 +1204,20 @@ fn artist(app: &mut App, ui: &mut Ui, name: &str) {
             let here = songs.iter().position(|s| crate::local::loose(&s.title) == crate::local::loose(title));
             if response.hovered() {
                 ui.painter().rect_filled(rect, CornerRadius::same(6), Color32::from_white_alpha(14));
+                widgets::hover_glow(ui, rect, 6.0, 1.0);
             }
             let center = rect.center().y;
             if response.hovered() {
-                Icon::Play.image(theme::TEXT, 16.0).paint_at(ui, Rect::from_center_size(pos2(rect.left() + 22.0, center), Vec2::splat(16.0)));
+                Icon::Play.image(theme::text(), 16.0).paint_at(ui, Rect::from_center_size(pos2(rect.left() + 22.0, center), Vec2::splat(16.0)));
             } else {
-                ui.painter().text(pos2(rect.left() + 22.0, center), egui::Align2::CENTER_CENTER, (i + 1).to_string(), theme::regular(14.0), theme::TEXT_DIM);
+                ui.painter().text(pos2(rect.left() + 22.0, center), egui::Align2::CENTER_CENTER, (i + 1).to_string(), theme::regular(14.0), theme::text_dim());
             }
-            let title_g = ui.painter().layout_no_wrap(title.clone(), theme::medium(14.5), theme::TEXT);
+            let title_g = ui.painter().layout_no_wrap(title.clone(), theme::medium(14.5), theme::text());
             let title_w = title_g.size().x;
-            ui.painter().galley(pos2(rect.left() + 52.0, center - title_g.size().y / 2.0), title_g, theme::TEXT);
+            ui.painter().galley(pos2(rect.left() + 52.0, center - title_g.size().y / 2.0), title_g, theme::text());
             if here.is_some() {
                 Icon::Computer
-                    .image(theme::TEXT_DIM, 14.0)
+                    .image(theme::text_dim(), 14.0)
                     .paint_at(ui, Rect::from_center_size(pos2(rect.left() + 52.0 + title_w + 16.0, center), Vec2::splat(14.0)));
             }
             if let Some(n) = listeners {
@@ -1225,7 +1226,7 @@ fn artist(app: &mut App, ui: &mut Ui, name: &str) {
                     egui::Align2::RIGHT_CENTER,
                     format!("{} listeners", widgets::thousands(*n)),
                     theme::regular(13.0),
-                    theme::TEXT_DIM,
+                    theme::text_dim(),
                 );
             }
             let response = response.on_hover_text(if here.is_some() { "On this PC" } else { "Plays from YouTube Music" });
@@ -1291,9 +1292,9 @@ fn from_device(ui: &mut Ui, cx: &mut Cx<'_>, hits: &[Track], query: &str) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 10.0;
         let (rect, _) = ui.allocate_exact_size(Vec2::splat(22.0), Sense::hover());
-        Icon::Computer.image(theme::TEXT, 20.0).paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(20.0)));
+        Icon::Computer.image(theme::text(), 20.0).paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(20.0)));
         ui.label(RichText::new("From your device").font(theme::bold(22.0)));
-        ui.label(RichText::new(widgets::songs(hits.len())).color(theme::TEXT_DIM));
+        ui.label(RichText::new(widgets::songs(hits.len())).color(theme::text_dim()));
         if hits.len() > FEW {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let label = if open { "Show fewer".to_owned() } else { format!("Show all {}", hits.len()) };
@@ -1370,7 +1371,7 @@ fn search(app: &mut App, ui: &mut Ui) {
             if sections.is_empty() && local.is_empty() {
                 ui.add_space(32.0);
                 ui.vertical_centered(|ui| {
-                    ui.label(RichText::new(format!("No results for \u{201c}{}\u{201d}", search.query)).color(theme::TEXT_DIM));
+                    ui.label(RichText::new(format!("No results for \u{201c}{}\u{201d}", search.query)).color(theme::text_dim()));
                 });
             }
             for (index, section) in sections.iter().enumerate() {

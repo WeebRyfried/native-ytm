@@ -179,6 +179,7 @@ pub struct Player {
     volume: Arc<AtomicU32>,
     knob: f32,
     eq: Arc<eq::EqControl>,
+    scope: Arc<crate::visualiser::Scope>,
 }
 
 impl Player {
@@ -199,8 +200,10 @@ impl Player {
         let report = Arc::new(Report::default());
         let volume = Arc::new(AtomicU32::new(curve(0.8).to_bits()));
         let eq = Arc::new(eq::EqControl::default());
+        let scope = Arc::new(crate::visualiser::Scope::default());
         let engine = Engine {
             eq: eq.clone(),
+            scope: scope.clone(),
             rx,
             pending: VecDeque::new(),
             events,
@@ -239,7 +242,13 @@ impl Player {
             volume,
             knob: 0.8,
             eq,
+            scope,
         }
+    }
+
+    /// What is being heard, for the visualiser.
+    pub fn scope(&self) -> &Arc<crate::visualiser::Scope> {
+        &self.scope
     }
 
     /// The equaliser: on or off, and its bands in dB.
@@ -466,6 +475,7 @@ struct Engine {
     report: Arc<Report>,
     volume: Arc<AtomicU32>,
     eq: Arc<eq::EqControl>,
+    scope: Arc<crate::visualiser::Scope>,
     queue: Arc<Mutex<Queue>>,
     output: Option<Output<Renderer>>,
     output_retry: Option<Instant>,
@@ -576,7 +586,7 @@ impl Engine {
         if self.output_retry.is_some_and(|at| Instant::now() < at) {
             return false;
         }
-        let renderer = Renderer::new(self.queue.clone(), self.report.clone(), self.volume.clone(), self.eq.clone());
+        let renderer = Renderer::new(self.queue.clone(), self.report.clone(), self.volume.clone(), self.eq.clone(), self.scope.clone());
         let options = OutputOptions {
             buffer: Buffer::FixedOnWindows(BufferSize::Duration(Duration::from_millis(100))),
             ..OutputOptions::default()

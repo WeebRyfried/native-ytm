@@ -19,15 +19,15 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     );
     bar.spacing_mut().item_spacing.x = 4.0;
     if !app.settings.sidebar
-        && widgets::icon_button(&mut bar, Icon::Sidebar, 20.0, theme::TEXT, "Show the sidebar").clicked()
+        && widgets::icon_button(&mut bar, Icon::Sidebar, 20.0, theme::text(), "Show the sidebar").clicked()
     {
         app.actions.push(Action::ToggleSidebar);
     }
-    let back_tint = if app.can_go_back() { theme::TEXT } else { theme::TEXT_FAINT };
+    let back_tint = if app.can_go_back() { theme::text() } else { theme::text_faint() };
     if widgets::icon_button(&mut bar, Icon::Back, 20.0, back_tint, "Back (Alt+Left)").clicked() {
         app.actions.push(Action::Back);
     }
-    let forward_tint = if app.can_go_forward() { theme::TEXT } else { theme::TEXT_FAINT };
+    let forward_tint = if app.can_go_forward() { theme::text() } else { theme::text_faint() };
     if widgets::icon_button(&mut bar, Icon::Forward, 20.0, forward_tint, "Forward (Alt+Right)").clicked() {
         app.actions.push(Action::Forward);
     }
@@ -38,7 +38,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         ui.spacing_mut().item_spacing.x = 4.0;
         account(app, ui);
         let settings_on = app.route == Route::Settings;
-        if widgets::icon_button(ui, Icon::Settings, 20.0, if settings_on { theme::TEXT } else { theme::TEXT_DIM }, "Settings").clicked() {
+        if widgets::icon_button(ui, Icon::Settings, 20.0, if settings_on { theme::text() } else { theme::text_dim() }, "Settings").clicked() {
             app.actions.push(Action::Navigate(Route::Settings));
         }
         if !app.online() {
@@ -69,27 +69,27 @@ fn update_chip(app: &mut App, ui: &mut Ui) {
         _ => return,
     };
     ui.add_space(6.0);
-    let galley = ui.painter().layout_no_wrap(label, theme::medium(13.0), theme::TEXT);
+    let galley = ui.painter().layout_no_wrap(label, theme::medium(13.0), theme::text());
     let size = vec2(galley.size().x + 44.0, 30.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let response = response.on_hover_text(tip);
     let response = if done.is_none() { response.on_hover_cursor(CursorIcon::PointingHand) } else { response };
     let shown = theme::appear(ui.ctx(), egui::Id::new("update-chip"), 1, 0.3);
     let radius = CornerRadius::same(15);
-    let fill = if response.hovered() && done.is_none() { theme::ACCENT.gamma_multiply(0.34) } else { theme::ACCENT.gamma_multiply(0.2) };
+    let fill = if response.hovered() && done.is_none() { theme::accent().gamma_multiply(0.34) } else { theme::accent().gamma_multiply(0.2) };
     ui.painter().rect_filled(rect, radius, fill.gamma_multiply(shown));
     if let Some(done) = done {
         let filled = Rect::from_min_size(rect.min, vec2(rect.width() * done.clamp(0.0, 1.0), rect.height()));
-        ui.painter().with_clip_rect(filled).rect_filled(rect, radius, theme::ACCENT.gamma_multiply(0.35 * shown));
+        ui.painter().with_clip_rect(filled).rect_filled(rect, radius, theme::accent().gamma_multiply(0.35 * shown));
         theme::repaint_in(ui.ctx(), std::time::Duration::from_millis(120));
     }
     Icon::Update
-        .image(theme::ACCENT_TEXT.gamma_multiply(shown), 16.0)
+        .image(theme::accent_text().gamma_multiply(shown), 16.0)
         .paint_at(ui, Rect::from_center_size(pos2(rect.left() + 20.0, rect.center().y), Vec2::splat(16.0)));
     ui.painter().galley_with_override_text_color(
         pos2(rect.left() + 34.0, rect.center().y - galley.size().y / 2.0),
         galley,
-        theme::TEXT.gamma_multiply(shown),
+        theme::text().gamma_multiply(shown),
     );
     if response.clicked() && done.is_none() {
         app.actions.push(Action::InstallUpdate);
@@ -98,7 +98,7 @@ fn update_chip(app: &mut App, ui: &mut Ui) {
 
 /// "Offline", while there is no connection; it leads to the downloads.
 fn offline_chip(app: &mut App, ui: &mut Ui) {
-    let galley = ui.painter().layout_no_wrap("Offline".to_owned(), theme::medium(13.0), theme::TEXT);
+    let galley = ui.painter().layout_no_wrap("Offline".to_owned(), theme::medium(13.0), theme::text());
     let size = vec2(galley.size().x + 44.0, 30.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let response = response
@@ -108,12 +108,12 @@ fn offline_chip(app: &mut App, ui: &mut Ui) {
     let fill = if response.hovered() { Color32::from_white_alpha(30) } else { Color32::from_white_alpha(16) };
     ui.painter().rect_filled(rect, CornerRadius::same(15), fill.gamma_multiply(shown));
     Icon::Offline
-        .image(theme::TEXT.gamma_multiply(shown), 16.0)
+        .image(theme::text().gamma_multiply(shown), 16.0)
         .paint_at(ui, Rect::from_center_size(pos2(rect.left() + 20.0, rect.center().y), Vec2::splat(16.0)));
     ui.painter().galley_with_override_text_color(
         pos2(rect.left() + 34.0, rect.center().y - galley.size().y / 2.0),
         galley,
-        theme::TEXT.gamma_multiply(shown),
+        theme::text().gamma_multiply(shown),
     );
     if response.clicked() {
         app.actions.push(Action::Navigate(Route::Library(crate::model::LibraryTab::Cached)));
@@ -124,11 +124,11 @@ fn search_field(app: &mut App, ui: &mut Ui, width: f32) {
     let id = egui::Id::new("search-field");
     let (rect, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
     let focused = ui.memory(|m| m.has_focus(id));
-    let fill = if focused { Color32::from_rgb(0x21, 0x21, 0x21) } else { Color32::from_white_alpha(16) };
+    let fill = if focused { theme::popup() } else { Color32::from_white_alpha(16) };
     let stroke = if focused { Stroke::new(1.0, Color32::from_white_alpha(60)) } else { Stroke::NONE };
     ui.painter().rect(rect, CornerRadius::same(8), fill, stroke, StrokeKind::Inside);
     Icon::Search
-        .image(theme::TEXT_DIM, 20.0)
+        .image(theme::text_dim(), 20.0)
         .paint_at(ui, Rect::from_min_size(pos2(rect.left() + 14.0, rect.center().y - 10.0), Vec2::splat(20.0)));
     let text_rect = Rect::from_min_max(pos2(rect.left() + 46.0, rect.top()), pos2(rect.right() - 36.0, rect.bottom()));
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(text_rect).layout(Layout::left_to_right(Align::Center)));
@@ -139,9 +139,9 @@ fn search_field(app: &mut App, ui: &mut Ui, width: f32) {
     let edit = egui::TextEdit::singleline(&mut app.search.input)
         .id(id)
         .frame(egui::Frame::NONE)
-        .hint_text(RichText::new("Search songs, albums, artists, podcasts").color(theme::TEXT_FAINT))
+        .hint_text(RichText::new("Search songs, albums, artists, podcasts").color(theme::text_faint()))
         .font(theme::regular(15.0))
-        .text_color(theme::TEXT)
+        .text_color(theme::text())
         .desired_width(text_rect.width())
         .margin(egui::Margin::ZERO);
     let response = child.add(edit);
@@ -156,7 +156,7 @@ fn search_field(app: &mut App, ui: &mut Ui, width: f32) {
         let clear = Rect::from_center_size(pos2(rect.right() - 20.0, rect.center().y), Vec2::splat(28.0));
         let r = ui.interact(clear, id.with("clear"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
         Icon::Close
-            .image(if r.hovered() { theme::TEXT } else { theme::TEXT_DIM }, 18.0)
+            .image(if r.hovered() { theme::text() } else { theme::text_dim() }, 18.0)
             .paint_at(ui, Rect::from_center_size(clear.center(), Vec2::splat(18.0)));
         if r.clicked() {
             app.search.input.clear();
@@ -190,7 +190,7 @@ fn search_field(app: &mut App, ui: &mut Ui, width: f32) {
         .fixed_pos(pos2(rect.left(), rect.bottom() + 4.0));
     let inner = area.show(ui.ctx(), |ui| {
         egui::Frame::popup(ui.style())
-            .fill(theme::POPUP)
+            .fill(theme::popup())
             .inner_margin(egui::Margin::same(6))
             .show(ui, |ui| {
                 ui.set_width(width - 12.0);
@@ -199,9 +199,10 @@ fn search_field(app: &mut App, ui: &mut Ui, width: f32) {
                     let response = response.on_hover_cursor(CursorIcon::PointingHand);
                     if response.hovered() {
                         ui.painter().rect_filled(row, CornerRadius::same(6), Color32::from_white_alpha(16));
+                        crate::ui::widgets::hover_glow(ui, row, 6.0, 1.0);
                     }
-                    Icon::Search.image(theme::TEXT_DIM, 18.0).paint_at(ui, Rect::from_min_size(pos2(row.left() + 10.0, row.center().y - 9.0), Vec2::splat(18.0)));
-                    ui.painter().text(pos2(row.left() + 40.0, row.center().y), egui::Align2::LEFT_CENTER, query, theme::regular(14.5), theme::TEXT);
+                    Icon::Search.image(theme::text_dim(), 18.0).paint_at(ui, Rect::from_min_size(pos2(row.left() + 10.0, row.center().y - 9.0), Vec2::splat(18.0)));
+                    ui.painter().text(pos2(row.left() + 40.0, row.center().y), egui::Align2::LEFT_CENTER, query, theme::regular(14.5), theme::text());
                     if response.clicked() {
                         app.search.input = query.clone();
                         app.actions.push(Action::Search(query.clone()));
@@ -242,18 +243,18 @@ fn recent_searches(app: &mut App, ui: &mut Ui, field: Rect, width: f32, id: egui
         .fixed_pos(pos2(field.left(), field.bottom() + 4.0));
     let inner = area.show(ui.ctx(), |ui| {
         egui::Frame::popup(ui.style())
-            .fill(theme::POPUP)
+            .fill(theme::popup())
             .inner_margin(egui::Margin::same(6))
             .show(ui, |ui| {
                 let w = width - 12.0;
                 ui.set_width(w);
                 ui.horizontal(|ui| {
                     ui.add_space(10.0);
-                    ui.label(RichText::new("Recent searches").font(theme::semibold(13.0)).color(theme::TEXT_DIM));
+                    ui.label(RichText::new("Recent searches").font(theme::semibold(13.0)).color(theme::text_dim()));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.add_space(6.0);
                         let clear = ui
-                            .add(egui::Label::new(RichText::new("Clear").font(theme::medium(13.0)).color(theme::TEXT_DIM)).sense(Sense::click()))
+                            .add(egui::Label::new(RichText::new("Clear").font(theme::medium(13.0)).color(theme::text_dim())).sense(Sense::click()))
                             .on_hover_cursor(CursorIcon::PointingHand)
                             .on_hover_text("Forget every recent search");
                         if clear.clicked() {
@@ -269,13 +270,14 @@ fn recent_searches(app: &mut App, ui: &mut Ui, field: Rect, width: f32, id: egui
                     let forget_response = ui.interact(forget, id.with(("forget", query)), Sense::click()).on_hover_text("Forget this search");
                     if response.hovered() || forget_response.hovered() {
                         ui.painter().rect_filled(row, CornerRadius::same(6), Color32::from_white_alpha(16));
-                        let tint = if forget_response.hovered() { theme::TEXT } else { theme::TEXT_DIM };
+                        crate::ui::widgets::hover_glow(ui, row, 6.0, 1.0);
+                        let tint = if forget_response.hovered() { theme::text() } else { theme::text_dim() };
                         Icon::Close.image(tint, 16.0).paint_at(ui, Rect::from_center_size(forget.center(), Vec2::splat(16.0)));
                     }
-                    Icon::Clock.image(theme::TEXT_DIM, 18.0).paint_at(ui, Rect::from_min_size(pos2(row.left() + 10.0, row.center().y - 9.0), Vec2::splat(18.0)));
-                    let text = ui.painter().layout_no_wrap(query.clone(), theme::regular(14.5), theme::TEXT);
+                    Icon::Clock.image(theme::text_dim(), 18.0).paint_at(ui, Rect::from_min_size(pos2(row.left() + 10.0, row.center().y - 9.0), Vec2::splat(18.0)));
+                    let text = ui.painter().layout_no_wrap(query.clone(), theme::regular(14.5), theme::text());
                     let clip = Rect::from_min_max(pos2(row.left() + 40.0, row.top()), pos2(forget.left() - 4.0, row.bottom()));
-                    ui.painter().with_clip_rect(clip).galley(pos2(clip.left(), row.center().y - text.size().y / 2.0), text, theme::TEXT);
+                    ui.painter().with_clip_rect(clip).galley(pos2(clip.left(), row.center().y - text.size().y / 2.0), text, theme::text());
                     if forget_response.clicked() {
                         app.actions.push(Action::ForgetSearch(query.clone()));
                     } else if response.clicked() {
@@ -306,19 +308,19 @@ fn account(app: &mut App, ui: &mut Ui) {
         if response.hovered() {
             ui.painter().circle_filled(rect.center(), 18.0, Color32::from_white_alpha(22));
         }
-        Icon::Account.image(theme::TEXT, 24.0).paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(24.0)));
+        Icon::Account.image(theme::text(), 24.0).paint_at(ui, Rect::from_center_size(rect.center(), Vec2::splat(24.0)));
     }
     egui::Popup::menu(&response).show(|ui| {
         ui.set_min_width(220.0);
         if let Some(account) = &app.account {
             ui.label(RichText::new(&account.name).font(theme::semibold(15.0)));
             if let Some(handle) = &account.handle {
-                ui.label(RichText::new(handle).color(theme::TEXT_DIM));
+                ui.label(RichText::new(handle).color(theme::text_dim()));
             }
             ui.separator();
         }
         let entry = |ui: &mut Ui, icon: Icon, text: &str| {
-            ui.add(egui::Button::image_and_text(icon.image(theme::TEXT, 18.0), text).frame_when_inactive(false)).clicked()
+            ui.add(egui::Button::image_and_text(icon.image(theme::text(), 18.0), text).frame_when_inactive(false)).clicked()
         };
         if app.signed_in {
             if entry(ui, Icon::History, "History") {

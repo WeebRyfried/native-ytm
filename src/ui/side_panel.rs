@@ -27,19 +27,19 @@ pub fn queue(app: &mut App, ui: &mut Ui) {
     if app.queue.entries.is_empty() {
         ui.add_space(40.0);
         ui.vertical_centered(|ui| {
-            ui.label(RichText::new("Nothing in the queue").color(theme::TEXT_DIM));
-            ui.label(RichText::new("Play something and it shows up here.").color(theme::TEXT_FAINT).font(theme::regular(13.0)));
+            ui.label(RichText::new("Nothing in the queue").color(theme::text_dim()));
+            ui.label(RichText::new("Play something and it shows up here.").color(theme::text_faint()).font(theme::regular(13.0)));
         });
         return;
     }
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
-            ui.label(RichText::new("Playing from").color(theme::TEXT_DIM).font(theme::regular(12.0)));
+            ui.label(RichText::new("Playing from").color(theme::text_dim()).font(theme::regular(12.0)));
             let title = app.queue.source.title.clone().unwrap_or_else(|| "Your queue".into());
-            widgets::clipped_label(ui, &title, theme::semibold(15.0), theme::TEXT, ui.available_width() - 60.0, Sense::hover());
+            widgets::clipped_label(ui, &title, theme::semibold(15.0), theme::text(), ui.available_width() - 60.0, Sense::hover());
         });
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if widgets::icon_button(ui, Icon::ClearQueue, 18.0, theme::TEXT_DIM, "Clear what comes next").clicked() {
+            if widgets::icon_button(ui, Icon::ClearQueue, 18.0, theme::text_dim(), "Clear what comes next").clicked() {
                 app.actions.push(Action::ClearQueue);
             }
         });
@@ -88,12 +88,12 @@ pub fn queue(app: &mut App, ui: &mut Ui) {
                     && response.rect.contains(pointer)
                 {
                     let y = if pointer.y < response.rect.center().y { response.rect.top() } else { response.rect.bottom() };
-                    ui.painter().hline(response.rect.x_range(), y, Stroke::new(2.0, theme::ACCENT));
+                    ui.painter().hline(response.rect.x_range(), y, Stroke::new(2.0, theme::accent()));
                     drop_at = Some(if pointer.y < response.rect.center().y { index } else { index + 1 });
                 }
                 if current_index.is_some_and(|c| index == c) {
                     let bar = Rect::from_min_size(response.rect.left_top(), vec2(3.0, response.rect.height()));
-                    ui.painter().rect_filled(bar, CornerRadius::same(1), theme::ACCENT);
+                    ui.painter().rect_filled(bar, CornerRadius::same(1), theme::accent());
                 }
             }
         });

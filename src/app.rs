@@ -337,6 +337,10 @@ pub struct App {
     pub personal: crate::personal::Personal,
     personal_dirty: Option<Instant>,
     pub window_styled: bool,
+    /// The visualiser's spectrum, from frame to frame.
+    pub analyser: crate::visualiser::Analyser,
+    /// Home's parts still to fetch at once while Quick picks is not in.
+    home_quick_left: u8,
     pub drag_from: Option<usize>,
     /// A scroll position to jump the page to once (screenshots).
     pub scroll_to: Option<f32>,
@@ -346,6 +350,7 @@ impl App {
     pub fn new(waker: fastframe_shell::Waker) -> Self {
         let paths = Paths::new();
         let settings: Settings = settings::load(&paths.settings());
+        crate::theme::set(settings.theme);
         let wake: Arc<dyn Fn() + Send + Sync> = {
             let waker = waker.clone();
             Arc::new(move || waker.wake())
@@ -536,6 +541,8 @@ impl App {
             personal: settings::load(&paths.personal()),
             personal_dirty: None,
             window_styled: false,
+            analyser: crate::visualiser::Analyser::default(),
+            home_quick_left: 0,
             drag_from: None,
             scroll_to: None,
             paths,
@@ -592,6 +599,28 @@ impl App {
         crate::theme::install(ctx);
         ctx.set_zoom_factor(self.settings.zoom.clamp(0.7, 2.0));
         self.window_styled = false;
+    }
+
+    /// Home as it came: with Quick picks in it, that moves up to second.
+    /// Without (YouTube Music sends it further down, in a later part),
+    /// the one from last time stands in near the top, and the token of the
+    /// next part comes back, to be fetched at once until it turns up.
+    fn home_quick_picks(&mut self, page: &mut Page) -> Option<String> {
+        self.home_quick_left = 0;
+        if lift_quick_picks(page) {
+            return None;
+        }
+        let last = self
+            .pages
+            .get("home")
+            .and_then(|s| s.data.ready())
+            .and_then(|p| p.sections.iter().find(|s| is_quick_picks(s)).cloned());
+        if let Some(last) = last {
+            page.sections.insert(1.min(page.sections.len()), last);
+        }
+        let token = page.continuation.clone()?;
+        self.home_quick_left = 3;
+        Some(token)
     }
 
     fn next_seq(&mut self) -> u64 {
@@ -948,16 +977,21 @@ impl App {
                     }
                 }
             }
-            Response::Page { key, result } => {
+            Response::Page { key, mut result } => {
                 if let Err(error) = &result
                     && net::unreachable(error)
                 {
                     self.network.check_now();
                 }
+                let home = key == "home";
+                let mut find_quick = None;
+                if home && let Ok(page) = &mut result {
+                    find_quick = self.home_quick_picks(page);
+                }
                 if let Ok(page) = &result {
                     self.kept_pages.put(&key, &self.page_context(), page);
                 }
-                let state = self.pages.entry(key).or_insert_with(PageState::loading);
+                let state = self.pages.entry(key.clone()).or_insert_with(PageState::loading);
                 // A page kept from last time stays when the fresh one fails.
                 match (result, &state.data) {
                     (Ok(page), _) => state.data = Loadable::Ready(page),
@@ -966,6 +1000,10 @@ impl App {
                 }
                 state.loading_more = false;
                 state.loading_tracks = false;
+                if let Some(token) = find_quick {
+                    state.loading_more = true;
+                    self.backend.send(Request::More { key, token, tracks: false });
+                }
             }
             Response::More {
                 key,
@@ -1005,8 +1043,40 @@ impl App {
                     }));
                     page.tracks_continuation = token;
                 } else if !sections.is_empty() {
-                    page.sections.extend(sections);
+                    let home = key == "home";
+                    let mut found = false;
+                    for section in sections {
+                        // Quick picks, come at last: it takes the place of
+                        // the one kept from last time, near the top.
+                        match page.sections.iter().position(is_quick_picks).filter(|_| is_quick_picks(&section)) {
+                            Some(at) if home => {
+                                page.sections[at] = section;
+                                found = true;
+                            }
+                            _ => {
+                                found |= home && is_quick_picks(&section);
+                                page.sections.push(section);
+                            }
+                        }
+                    }
                     page.continuation = token;
+                    if home {
+                        lift_quick_picks(page);
+                        if found {
+                            self.home_quick_left = 0;
+                            let page = page.clone();
+                            self.kept_pages.put(&key, &self.page_context(), &page);
+                        } else if self.home_quick_left > 0
+                            && let Some(token) = page.continuation.clone()
+                        {
+                            // Not yet: the next part at once, a few times.
+                            self.home_quick_left -= 1;
+                            if let Some(state) = self.pages.get_mut(&key) {
+                                state.loading_more = true;
+                            }
+                            self.backend.send(Request::More { key, token, tracks: false });
+                        }
+                    }
                 } else if !items.is_empty() {
                     // More items for the page's last shelf (a library grid).
                     if let Some(last) = page.sections.last_mut() {
@@ -3090,6 +3160,11 @@ impl App {
                     .set_volume(if self.settings.muted { 0.0 } else { self.settings.volume });
                 self.save_settings();
             }
+            Action::SetVisualiser { on, mode } => {
+                self.settings.visualiser = on;
+                self.settings.visualiser_mode = mode;
+                self.settings_dirty = Some(Instant::now());
+            }
             Action::ToggleShuffle => {
                 let on = !self.queue.shuffle;
                 self.queue.set_shuffle(on);
@@ -3563,6 +3638,11 @@ impl App {
                 if new.check_updates && !self.settings.check_updates {
                     self.update_due = Some(Instant::now());
                 }
+                if new.theme != self.settings.theme {
+                    crate::theme::set(new.theme);
+                    crate::theme::apply(&self.ctx);
+                    crate::platform::restyle_main_window(crate::theme::sidebar());
+                }
                 self.settings = new;
                 self.settings_dirty = Some(Instant::now());
             }
@@ -3673,6 +3753,25 @@ const PREMIUM_KBPS: u32 = 200;
 /// YouTube's last about six hours.
 const STREAM_FRESH: Duration = Duration::from_secs(3600);
 
+/// Quick picks, by its name (the app asks YouTube Music in English unless
+/// told otherwise).
+fn is_quick_picks(section: &Section) -> bool {
+    section.title.eq_ignore_ascii_case("Quick picks")
+}
+
+/// Quick picks second on Home, after Listen again, wherever it came;
+/// false when it is not there.
+fn lift_quick_picks(page: &mut Page) -> bool {
+    let Some(at) = page.sections.iter().position(is_quick_picks) else {
+        return false;
+    };
+    if at > 1 {
+        let section = page.sections.remove(at);
+        page.sections.insert(1, section);
+    }
+    true
+}
+
 /// A search on YouTube Music for a song on this PC, which has no page
 /// there: as much of its names as fits the 256 characters Discord takes.
 fn search_link(track: &Track) -> String {
@@ -3688,7 +3787,7 @@ fn search_link(track: &Track) -> String {
 }
 
 #[cfg(test)]
-mod link_tests {
+mod tests {
     use super::*;
 
     #[test]
@@ -3703,6 +3802,30 @@ mod link_tests {
         assert!(link.len() <= 256);
         // Never a character cut in half.
         assert!(!link.ends_with('%') && link.rsplit('%').next().is_some_and(|last| last.len() >= 2));
+    }
+
+    #[test]
+    fn quick_picks_comes_second() {
+        let shelf = |title: &str| Section {
+            title: title.into(),
+            strapline: None,
+            layout: Layout::Carousel,
+            items: Vec::new(),
+            more: None,
+            text: None,
+            continuation: None,
+        };
+        let mut page = Page::default();
+        page.sections = ["Listen again", "Forgotten favorites", "Your daily discover", "Mixed for you", "Quick picks"].map(shelf).to_vec();
+        assert!(lift_quick_picks(&mut page));
+        let titles: Vec<&str> = page.sections.iter().map(|s| s.title.as_str()).collect();
+        assert_eq!(titles, ["Listen again", "Quick picks", "Forgotten favorites", "Your daily discover", "Mixed for you"]);
+        // First already, it stays first.
+        page.sections = ["Quick picks", "Listen again"].map(shelf).to_vec();
+        assert!(lift_quick_picks(&mut page));
+        assert_eq!(page.sections[0].title, "Quick picks");
+        page.sections = vec![shelf("Listen again")];
+        assert!(!lift_quick_picks(&mut page));
     }
 }
 

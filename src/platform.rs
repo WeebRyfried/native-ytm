@@ -216,6 +216,14 @@ pub fn set_main_window(hwnd: isize) {
     MAIN_WINDOW.store(hwnd, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// The main window's title bar in `caption`, after a change of theme.
+pub fn restyle_main_window(caption: egui::Color32) {
+    let hwnd = MAIN_WINDOW.load(std::sync::atomic::Ordering::Relaxed);
+    if hwnd != 0 {
+        style_title_bar(hwnd, caption);
+    }
+}
+
 /// Windows' folder picker, over the main window. Blocks until it closes,
 /// so call it from a thread of its own.
 #[cfg(windows)]

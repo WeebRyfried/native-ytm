@@ -87,6 +87,11 @@ pub struct Settings {
     pub local_folders: Vec<String>,
     /// Look for a newer version now and then.
     pub check_updates: bool,
+    /// The look: one of four dark themes.
+    pub theme: crate::theme::Theme,
+    /// The visualiser along the top of the player bar, and how it draws.
+    pub visualiser: bool,
+    pub visualiser_mode: crate::visualiser::Mode,
 }
 
 impl Default for Settings {
@@ -125,6 +130,9 @@ impl Default for Settings {
             zoom: 1.0,
             local_folders: Vec::new(),
             check_updates: true,
+            theme: crate::theme::Theme::Classic,
+            visualiser: true,
+            visualiser_mode: crate::visualiser::Mode::Wave,
         }
     }
 }

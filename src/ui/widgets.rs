@@ -72,11 +72,11 @@ pub fn paint_art_faded(ui: &Ui, images: &mut Images, url: Option<&str>, rect: Re
             painter.add(mesh);
         }
         None => {
-            painter.rect_filled(rect, corner, theme::SURFACE.gamma_multiply(opacity));
+            painter.rect_filled(rect, corner, theme::surface().gamma_multiply(opacity));
             let icon = (rect.width() * 0.36).clamp(14.0, 64.0);
             let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(icon));
             Icon::Music
-                .image(theme::TEXT_FAINT.gamma_multiply(opacity), icon)
+                .image(theme::text_faint().gamma_multiply(opacity), icon)
                 .paint_at(ui, icon_rect);
         }
     }
@@ -149,7 +149,7 @@ pub fn pill(ui: &mut Ui, icon: Option<Icon>, text: &str, primary: bool) -> Respo
         } else {
             (
                 if hovered { Color32::from_white_alpha(26) } else { Color32::from_white_alpha(10) },
-                theme::TEXT,
+                theme::text(),
                 Stroke::new(1.0, Color32::from_white_alpha(40)),
             )
         };
@@ -205,11 +205,11 @@ pub fn read_more(ui: &mut Ui, id: Id, text: &str, font: egui::FontId, color: Col
         ui.add_space(6.0);
         let label = if open { "Show less" } else { "Read more" };
         let link = ui
-            .add(egui::Label::new(RichText::new(label).font(theme::semibold(13.5)).color(theme::TEXT)).sense(Sense::click()))
+            .add(egui::Label::new(RichText::new(label).font(theme::semibold(13.5)).color(theme::text())).sense(Sense::click()))
             .on_hover_cursor(CursorIcon::PointingHand);
         if link.hovered() {
             let r = link.rect;
-            ui.painter().hline(r.x_range(), r.bottom(), Stroke::new(1.0, theme::TEXT_DIM));
+            ui.painter().hline(r.x_range(), r.bottom(), Stroke::new(1.0, theme::text_dim()));
         }
         toggle |= link.clicked();
     }
@@ -219,9 +219,68 @@ pub fn read_more(ui: &mut Ui, id: Id, text: &str, font: egui::FontId, color: Col
     }
 }
 
+/// A soft light under the pointer, inside a box being pointed at: the
+/// theme's glow, brightest where the pointer is and gone a hand's width
+/// off, kept within the box's rounded corners. `amount` fades it.
+pub fn hover_glow(ui: &Ui, rect: Rect, radius: f32, amount: f32) {
+    glow_in(ui, rect, radius, amount, theme::glow());
+}
+
+/// `hover_glow` in another colour (a theme's own, on its picture).
+pub fn glow_in(ui: &Ui, rect: Rect, radius: f32, amount: f32, tint: Color32) {
+    const BRIGHTEST: f32 = 0.16;
+    const CELL: f32 = 8.0;
+    let Some(pointer) = ui.ctx().pointer_hover_pos().filter(|p| rect.contains(*p)) else {
+        return;
+    };
+    if amount <= 0.0 {
+        return;
+    }
+    let reach = (rect.height() * 1.8).clamp(70.0, 220.0);
+    let area = rect.intersect(Rect::from_center_size(pointer, Vec2::splat(reach * 2.0))).intersect(ui.clip_rect());
+    if area.width() <= 0.0 || area.height() <= 0.0 {
+        return;
+    }
+    let light = |c: u8| (f32::from(c) + (255.0 - f32::from(c)) * 0.35).round() as u8;
+    let (r, g, b) = (light(tint.r()), light(tint.g()), light(tint.b()));
+    // How far inside the rounded box a point is, 0 outside to 1 within.
+    let r_in = radius.min(rect.width() / 2.0).min(rect.height() / 2.0);
+    let inside = |p: Pos2| {
+        let c = rect.center();
+        let qx = (p.x - c.x).abs() - (rect.width() / 2.0 - r_in);
+        let qy = (p.y - c.y).abs() - (rect.height() / 2.0 - r_in);
+        let outside = vec2(qx.max(0.0), qy.max(0.0)).length();
+        let distance = outside + qx.max(qy).min(0.0) - r_in;
+        (0.5 - distance).clamp(0.0, 1.0)
+    };
+    let cols = ((area.width() / CELL).ceil() as usize).clamp(1, 64);
+    let rows = ((area.height() / CELL).ceil() as usize).clamp(1, 64);
+    let mut mesh = egui::Mesh::default();
+    for j in 0..=rows {
+        for i in 0..=cols {
+            let p = pos2(
+                area.left() + area.width() * i as f32 / cols as f32,
+                area.top() + area.height() * j as f32 / rows as f32,
+            );
+            let near = (1.0 - p.distance(pointer) / reach).max(0.0);
+            let alpha = BRIGHTEST * near * near * inside(p) * amount;
+            mesh.colored_vertex(p, Color32::from_rgba_unmultiplied(r, g, b, (alpha * 255.0).round() as u8));
+        }
+    }
+    let width = cols as u32 + 1;
+    for j in 0..rows as u32 {
+        for i in 0..cols as u32 {
+            let a = j * width + i;
+            mesh.add_triangle(a, a + 1, a + width + 1);
+            mesh.add_triangle(a, a + width + 1, a + width);
+        }
+    }
+    ui.painter().add(egui::Shape::mesh(mesh));
+}
+
 pub fn chip(ui: &mut Ui, text: &str, selected: bool) -> Response {
     let font = theme::regular(13.5);
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, theme::TEXT);
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), font, theme::text());
     let size = vec2(galley.size().x + 24.0, 32.0);
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let response = response.on_hover_cursor(CursorIcon::PointingHand);
@@ -229,9 +288,9 @@ pub fn chip(ui: &mut Ui, text: &str, selected: bool) -> Response {
         let (fill, fg) = if selected {
             (Color32::WHITE, Color32::BLACK)
         } else if response.hovered() {
-            (Color32::from_white_alpha(38), theme::TEXT)
+            (Color32::from_white_alpha(38), theme::text())
         } else {
-            (Color32::from_white_alpha(20), theme::TEXT)
+            (Color32::from_white_alpha(20), theme::text())
         };
         ui.painter().rect_filled(rect, CornerRadius::same(8), fill);
         ui.painter().galley_with_override_text_color(
@@ -246,7 +305,7 @@ pub fn chip(ui: &mut Ui, text: &str, selected: bool) -> Response {
 pub fn spinner(ui: &mut Ui) {
     ui.add_space(48.0);
     ui.vertical_centered(|ui| {
-        spinner_of(ui, 28.0, theme::TEXT_DIM);
+        spinner_of(ui, 28.0, theme::text_dim());
     });
 }
 
@@ -273,12 +332,12 @@ pub fn spinner_of(ui: &mut Ui, size: f32, color: Color32) {
 pub fn failed(ui: &mut Ui, message: &str, retry: Option<Action>, cx: &mut Cx<'_>) {
     ui.add_space(48.0);
     ui.vertical_centered(|ui| {
-        Icon::Alert.image(theme::TEXT_DIM, 32.0).paint_at(
+        Icon::Alert.image(theme::text_dim(), 32.0).paint_at(
             ui,
             Rect::from_center_size(ui.cursor().center_top() + vec2(0.0, 16.0), Vec2::splat(32.0)),
         );
         ui.add_space(40.0);
-        ui.label(RichText::new(message).color(theme::TEXT_DIM));
+        ui.label(RichText::new(message).color(theme::text_dim()));
         ui.add_space(12.0);
         if let Some(retry) = retry
             && pill(ui, Some(Icon::Refresh), "Try again", false).clicked()
@@ -408,6 +467,7 @@ pub fn track_row(
     if shade > 0.0 {
         ui.painter()
             .rect_filled(rect, CornerRadius::same(6), Color32::from_white_alpha((14.0 * shade) as u8));
+        hover_glow(ui, rect, 6.0, shade);
     } else if current && matches!(place, RowPlace::Queue(_)) {
         ui.painter()
             .rect_filled(rect, CornerRadius::same(6), Color32::from_white_alpha(10));
@@ -419,7 +479,7 @@ pub fn track_row(
         let label = number.map(|n| n.to_string()).unwrap_or_default();
         if hovered {
             Icon::Play
-                .image(theme::TEXT, 18.0)
+                .image(theme::text(), 18.0)
                 .paint_at(ui, Rect::from_center_size(lead.center(), Vec2::splat(18.0)));
         } else if current {
             equalizer(ui, lead.center(), cx.playing);
@@ -429,7 +489,7 @@ pub fn track_row(
                 Align2::CENTER_CENTER,
                 label,
                 theme::regular(14.0),
-                theme::TEXT_DIM,
+                theme::text_dim(),
             );
         }
     } else {
@@ -461,7 +521,7 @@ pub fn track_row(
         0.0
     };
     let text_w = (right - x - album_w - 16.0).max(40.0);
-    let title_color = if current { theme::ACCENT_TEXT } else { theme::TEXT };
+    let title_color = if current { theme::accent_text() } else { theme::text() };
     // The title and the artists as one block, centred in the row. (In a
     // horizontal layout the title line took a button's height, which
     // pushed the artists down against the row's bottom edge.)
@@ -496,9 +556,9 @@ pub fn track_row(
     }
     let line_w = line.available_width();
     if track.artists.is_empty() {
-        clipped_label(&mut line, track.extra.as_deref().unwrap_or(""), line_font, theme::TEXT_DIM, line_w, Sense::hover());
+        clipped_label(&mut line, track.extra.as_deref().unwrap_or(""), line_font, theme::text_dim(), line_w, Sense::hover());
     } else {
-        links(&mut line, cx, &track.artists, line_font, theme::TEXT_DIM, line_w);
+        links(&mut line, cx, &track.artists, line_font, theme::text_dim(), line_w);
     }
     if album_w > 0.0
         && let Some(album) = &track.album
@@ -508,7 +568,7 @@ pub fn track_row(
             vec2(album_w, 20.0),
         );
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(album_rect));
-        links(&mut child, cx, std::slice::from_ref(album), theme::regular(13.5), theme::TEXT_DIM, album_w);
+        links(&mut child, cx, std::slice::from_ref(album), theme::regular(13.5), theme::text_dim(), album_w);
     }
     if let Some(d) = track.duration {
         ui.painter().text(
@@ -516,7 +576,7 @@ pub fn track_row(
             Align2::RIGHT_CENTER,
             format_duration(d),
             theme::regular(13.5),
-            theme::TEXT_DIM,
+            theme::text_dim(),
         );
     }
     let menu_rect = Rect::from_center_size(pos2(rect.right() - menu_w / 2.0, rect.center().y), Vec2::splat(32.0));
@@ -527,7 +587,7 @@ pub fn track_row(
                 .circle_filled(menu_rect.center(), 16.0, Color32::from_white_alpha(24));
         }
         Icon::More
-            .image(theme::TEXT, 20.0)
+            .image(theme::text(), 20.0)
             .paint_at(ui, Rect::from_center_size(menu_rect.center(), Vec2::splat(20.0)));
     }
     egui::Popup::menu(&menu_response).show(|ui| track_menu(ui, cx, track, place));
@@ -597,13 +657,13 @@ pub fn offline_mark(ui: &mut Ui, mark: Mark) {
     };
     let tip = match mark {
         Mark::Saved => {
-            painter.circle_filled(c, r, theme::TEXT_DIM);
-            tick(theme::BG);
+            painter.circle_filled(c, r, theme::text_dim());
+            tick(theme::bg());
             "Downloaded: plays offline"
         }
         Mark::Kept => {
-            painter.circle_stroke(c, r - 0.6, Stroke::new(1.2, theme::TEXT_FAINT));
-            tick(theme::TEXT_FAINT);
+            painter.circle_stroke(c, r - 0.6, Stroke::new(1.2, theme::text_faint()));
+            tick(theme::text_faint());
             "On this PC from a recent play: plays offline for now"
         }
         Mark::Saving(done) => {
@@ -616,7 +676,7 @@ pub fn offline_mark(ui: &mut Ui, mark: Mark) {
                         c + vec2(a.cos(), a.sin()) * (r - 0.8)
                     })
                     .collect();
-                painter.add(egui::Shape::line(points, Stroke::new(1.6, theme::TEXT_DIM)));
+                painter.add(egui::Shape::line(points, Stroke::new(1.6, theme::text_dim())));
             }
             "Downloading"
         }
@@ -657,7 +717,7 @@ fn equalizer(ui: &Ui, center: Pos2, playing: bool) {
         ui.painter().rect_filled(
             Rect::from_min_max(pos2(x, center.y + 7.0 - h), pos2(x + 4.0, center.y + 7.0)),
             CornerRadius::same(1),
-            theme::ACCENT,
+            theme::accent(),
         );
     }
 }
@@ -665,7 +725,7 @@ fn equalizer(ui: &Ui, center: Pos2, playing: bool) {
 pub fn track_menu(ui: &mut Ui, cx: &mut Cx<'_>, track: &Track, place: RowPlace<'_>) {
     ui.set_min_width(220.0);
     let item = |ui: &mut Ui, icon: Icon, text: &str| -> bool {
-        ui.add(egui::Button::image_and_text(icon.image(theme::TEXT, 18.0), text).frame_when_inactive(false))
+        ui.add(egui::Button::image_and_text(icon.image(theme::text(), 18.0), text).frame_when_inactive(false))
             .clicked()
     };
     // A song on this PC: a radio from YouTube Music, the queue, and its
@@ -862,6 +922,7 @@ pub fn card(ui: &mut Ui, cx: &mut Cx<'_>, item: &Item, width: f32) -> Response {
             CornerRadius::same(6),
             Color32::from_black_alpha((90.0 * shown) as u8),
         );
+        hover_glow(ui, art, 6.0, shown);
     }
     if shown > 0.0 && playable {
         let c = art.right_bottom() - vec2(28.0, 28.0 - 6.0 * (1.0 - shown));
@@ -882,9 +943,9 @@ pub fn card(ui: &mut Ui, cx: &mut Cx<'_>, item: &Item, width: f32) -> Response {
     }));
     child.spacing_mut().item_spacing.y = 2.0;
     let title = if item.track.is_some() { cx.title(&item.title) } else { &item.title };
-    clipped_label(&mut child, title, theme::medium(14.5), theme::TEXT, width, Sense::hover());
+    clipped_label(&mut child, title, theme::medium(14.5), theme::text(), width, Sense::hover());
     let subtitle = if item.subtitle.is_empty() { item.kind.label().to_owned() } else { item.subtitle.clone() };
-    clipped_label(&mut child, &subtitle, theme::regular(13.0), theme::TEXT_DIM, width, Sense::hover());
+    clipped_label(&mut child, &subtitle, theme::regular(13.0), theme::text_dim(), width, Sense::hover());
     if play_clicked {
         play_item(cx, item);
     } else if response.clicked() {
@@ -901,7 +962,7 @@ pub fn item_menu(ui: &mut Ui, cx: &mut Cx<'_>, item: &Item) {
     }
     ui.set_min_width(200.0);
     let entry = |ui: &mut Ui, icon: Icon, text: &str| -> bool {
-        ui.add(egui::Button::image_and_text(icon.image(theme::TEXT, 18.0), text).frame_when_inactive(false))
+        ui.add(egui::Button::image_and_text(icon.image(theme::text(), 18.0), text).frame_when_inactive(false))
             .clicked()
     };
     if let Some(playlist_id) = &item.play_playlist {
@@ -960,6 +1021,7 @@ pub fn item_row(ui: &mut Ui, cx: &mut Cx<'_>, item: &Item) -> Response {
     if response.hovered() {
         ui.painter()
             .rect_filled(rect, CornerRadius::same(6), Color32::from_white_alpha(14));
+        hover_glow(ui, rect, 6.0, 1.0);
     }
     let art = theme::ROW_HEIGHT - 16.0;
     let lead = Rect::from_min_size(pos2(rect.left() + 8.0, rect.center().y - art / 2.0), Vec2::splat(art));
@@ -969,7 +1031,7 @@ pub fn item_row(ui: &mut Ui, cx: &mut Cx<'_>, item: &Item) -> Response {
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(x, rect.top()), rect.max)));
     child.add_space((theme::ROW_HEIGHT - 38.0) / 2.0);
     child.spacing_mut().item_spacing.y = 2.0;
-    clipped_label(&mut child, &item.title, theme::medium(14.5), theme::TEXT, w, Sense::hover());
+    clipped_label(&mut child, &item.title, theme::medium(14.5), theme::text(), w, Sense::hover());
     let subtitle = if item.subtitle.is_empty() {
         item.kind.label().to_owned()
     } else if matches!(item.kind, Kind::Artist | Kind::Playlist | Kind::Profile | Kind::Podcast)
@@ -979,7 +1041,7 @@ pub fn item_row(ui: &mut Ui, cx: &mut Cx<'_>, item: &Item) -> Response {
     } else {
         item.subtitle.clone()
     };
-    clipped_label(&mut child, &subtitle, theme::regular(13.0), theme::TEXT_DIM, w, Sense::hover());
+    clipped_label(&mut child, &subtitle, theme::regular(13.0), theme::text_dim(), w, Sense::hover());
     if response.clicked() {
         open_item(cx, item);
     }
@@ -994,7 +1056,7 @@ pub fn section_title(ui: &mut Ui, cx: &mut Cx<'_>, section: &Section) {
         return;
     }
     if let Some(strapline) = &section.strapline {
-        ui.label(RichText::new(strapline.to_uppercase()).font(theme::medium(12.0)).color(theme::TEXT_DIM));
+        ui.label(RichText::new(strapline.to_uppercase()).font(theme::medium(12.0)).color(theme::text_dim()));
     }
     // A shelf of songs made for the person (Quick picks, Your daily
     // discover) plays them all, as YouTube Music's button there does; any
@@ -1017,7 +1079,7 @@ pub fn section_title(ui: &mut Ui, cx: &mut Cx<'_>, section: &Section) {
     let opens = section.more.as_ref().filter(|_| play_all.is_none());
     ui.horizontal(|ui| {
         let title = ui.add(
-            egui::Label::new(RichText::new(&section.title).font(theme::bold(22.0)).color(theme::TEXT))
+            egui::Label::new(RichText::new(&section.title).font(theme::bold(22.0)).color(theme::text()))
                 .sense(if opens.is_some() { Sense::click() } else { Sense::hover() }),
         );
         if let Some(more) = opens {
@@ -1056,7 +1118,7 @@ pub fn section(ui: &mut Ui, cx: &mut Cx<'_>, section: &Section, key: &str, index
                 } else {
                     format!("{}\u{2026}", text.chars().take(560).collect::<String>())
                 };
-                ui.label(RichText::new(shown).color(theme::TEXT_DIM).font(theme::regular(14.5)));
+                ui.label(RichText::new(shown).color(theme::text_dim()).font(theme::regular(14.5)));
                 if text.len() >= 600
                     && ui
                         .add(egui::Label::new(RichText::new(if expanded { "Show less" } else { "Show more" }).font(theme::medium(14.0))).sense(Sense::click()))
@@ -1113,15 +1175,18 @@ fn top_result(ui: &mut Ui, cx: &mut Cx<'_>, item: &Item) {
     let width = ui.available_width().min(560.0);
     let (rect, response) = ui.allocate_exact_size(vec2(width, 124.0), Sense::click());
     let response = response.on_hover_cursor(CursorIcon::PointingHand);
-    let fill = if response.hovered() { theme::SURFACE_HOVER } else { theme::SURFACE };
+    let fill = if response.hovered() { theme::surface_hover() } else { theme::surface() };
     ui.painter().rect_filled(rect, CornerRadius::same(10), fill);
+    if response.hovered() {
+        hover_glow(ui, rect, 10.0, 1.0);
+    }
     let art = Rect::from_min_size(rect.min + vec2(16.0, 16.0), Vec2::splat(92.0));
     paint_art(ui, cx.images, item.thumbnail.as_deref(), art, 6.0, item.kind.round());
     let x = art.right() + 20.0;
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(pos2(x, rect.top() + 24.0), rect.max - vec2(16.0, 0.0))));
     child.spacing_mut().item_spacing.y = 4.0;
-    clipped_label(&mut child, &item.title, theme::bold(22.0), theme::TEXT, rect.right() - x - 16.0, Sense::hover());
-    clipped_label(&mut child, &item.subtitle, theme::regular(14.0), theme::TEXT_DIM, rect.right() - x - 16.0, Sense::hover());
+    clipped_label(&mut child, &item.title, theme::bold(22.0), theme::text(), rect.right() - x - 16.0, Sense::hover());
+    clipped_label(&mut child, &item.subtitle, theme::regular(14.0), theme::text_dim(), rect.right() - x - 16.0, Sense::hover());
     child.add_space(4.0);
     let mut play_clicked = false;
     child.horizontal(|ui| {
@@ -1248,9 +1313,12 @@ fn category_grid(ui: &mut Ui, cx: &mut Cx<'_>, items: &[Item]) {
             for item in row {
                 let (rect, response) = ui.allocate_exact_size(vec2(w, 48.0), Sense::click());
                 let response = response.on_hover_cursor(CursorIcon::PointingHand);
-                let fill = if response.hovered() { theme::SURFACE_HOVER } else { theme::SURFACE };
+                let fill = if response.hovered() { theme::surface_hover() } else { theme::surface() };
                 ui.painter().rect_filled(rect, CornerRadius::same(6), fill);
-                let stripe = item.color.map_or(theme::ACCENT, |c| {
+                if response.hovered() {
+                    hover_glow(ui, rect, 6.0, 1.0);
+                }
+                let stripe = item.color.map_or(theme::accent(), |c| {
                     Color32::from_rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)
                 });
                 ui.painter().rect_filled(
@@ -1259,7 +1327,7 @@ fn category_grid(ui: &mut Ui, cx: &mut Cx<'_>, items: &[Item]) {
                     stripe,
                 );
                 let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(18.0, 0.0))).layout(EguiLayout::left_to_right(Align::Center)));
-                clipped_label(&mut child, &item.title, theme::medium(14.5), theme::TEXT, w - 30.0, Sense::hover());
+                clipped_label(&mut child, &item.title, theme::medium(14.5), theme::text(), w - 30.0, Sense::hover());
                 if response.clicked() {
                     open_item(cx, item);
                 }
@@ -1276,7 +1344,7 @@ pub fn tab_header(ui: &mut Ui, current: crate::model::SideTab, close: bool) -> (
     use crate::model::SideTab;
     let row = ui.available_rect_before_wrap();
     let height = 40.0;
-    ui.painter().hline(row.x_range(), row.top() + height - 1.0, Stroke::new(1.0, theme::DIVIDER));
+    ui.painter().hline(row.x_range(), row.top() + height - 1.0, Stroke::new(1.0, theme::divider()));
     let mut picked = None;
     let mut closed = false;
     ui.horizontal(|ui| {
@@ -1286,10 +1354,10 @@ pub fn tab_header(ui: &mut Ui, current: crate::model::SideTab, close: bool) -> (
             let selected = current == tab;
             let (rect, response) = ui.allocate_exact_size(vec2((tabs_w / 2.0).max(80.0), height), Sense::click());
             let response = response.on_hover_cursor(CursorIcon::PointingHand);
-            let color = if selected || response.hovered() { theme::TEXT } else { theme::TEXT_DIM };
+            let color = if selected || response.hovered() { theme::text() } else { theme::text_dim() };
             ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, theme::semibold(13.5), color);
             if selected {
-                ui.painter().hline(rect.x_range(), rect.bottom() - 1.0, Stroke::new(2.0, theme::TEXT));
+                ui.painter().hline(rect.x_range(), rect.bottom() - 1.0, Stroke::new(2.0, theme::text()));
             }
             if response.clicked() && !selected {
                 picked = Some(tab);
@@ -1297,7 +1365,7 @@ pub fn tab_header(ui: &mut Ui, current: crate::model::SideTab, close: bool) -> (
         }
         if close {
             ui.allocate_ui_with_layout(vec2(40.0, height), EguiLayout::right_to_left(Align::Center), |ui| {
-                closed = icon_button(ui, Icon::Close, 18.0, theme::TEXT_DIM, "Close").clicked();
+                closed = icon_button(ui, Icon::Close, 18.0, theme::text_dim(), "Close").clicked();
             });
         }
     });

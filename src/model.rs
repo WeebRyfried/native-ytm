@@ -234,6 +234,11 @@ pub enum Action {
     SetVolume(f32),
     ToggleMute,
     ToggleShuffle,
+    /// The visualiser on or off, and how it draws.
+    SetVisualiser {
+        on: bool,
+        mode: crate::visualiser::Mode,
+    },
     SetShuffle(bool),
     CycleRepeat,
     Rate(String, Rating),

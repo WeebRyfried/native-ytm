@@ -68,7 +68,7 @@ pub fn show(app: &mut App, ui: &mut Ui, big: bool) {
 
 fn message(ui: &mut Ui, text: &str) {
     ui.add_space(40.0);
-    ui.vertical_centered(|ui| ui.label(RichText::new(text).color(theme::TEXT_DIM)));
+    ui.vertical_centered(|ui| ui.label(RichText::new(text).color(theme::text_dim())));
 }
 
 /// Readings for these lyrics, when they are wanted and Japanese: the
@@ -162,15 +162,15 @@ fn plain(app: &App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, big: bool) {
                 for line in laid.iter() {
                     let (rect, _) = ui.allocate_exact_size(vec2(width, line.0.size().y.max(size * 0.6)), Sense::hover());
                     if ui.is_rect_visible(rect) {
-                        paint_line(ui.painter(), rect.min, line, theme::TEXT);
+                        paint_line(ui.painter(), rect.min, line, theme::text());
                     }
                 }
             } else {
-                ui.add(egui::Label::new(RichText::new(&lyrics.text).font(theme::semibold(size)).color(theme::TEXT)).wrap());
+                ui.add(egui::Label::new(RichText::new(&lyrics.text).font(theme::semibold(size)).color(theme::text())).wrap());
             }
             if let Some(source) = &lyrics.source {
                 ui.add_space(20.0);
-                ui.label(RichText::new(source).color(theme::TEXT_FAINT).font(theme::regular(12.5)));
+                ui.label(RichText::new(source).color(theme::text_faint()).font(theme::regular(12.5)));
             }
             ui.add_space(32.0);
         });
@@ -324,6 +324,7 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, big: bool
                 let hovered = pointer.is_some_and(|p| line_rect.expand2(vec2(pad, gap / 2.0)).contains(p));
                 if hovered {
                     painter.rect_filled(line_rect.expand2(vec2(pad, gap / 3.0)), CornerRadius::same(8), Color32::from_white_alpha(12));
+                    crate::ui::widgets::hover_glow(ui, line_rect.expand2(vec2(pad, gap / 3.0)), 8.0, 1.0);
                     ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
                     if response.clicked() {
                         clicked_line = Some(line.time);
@@ -346,7 +347,7 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, big: bool
                 egui::Align2::LEFT_TOP,
                 source,
                 theme::regular(12.5),
-                theme::TEXT_FAINT,
+                theme::text_faint(),
             );
         }
     }
@@ -388,12 +389,12 @@ fn nudge(app: &mut App, ui: &mut Ui, area: Rect, video_id: &str, offset: f64, po
         "In time".to_owned()
     };
     let painter = ui.painter().clone();
-    let galley = painter.layout_no_wrap(label, theme::medium(12.5), theme::TEXT);
+    let galley = painter.layout_no_wrap(label, theme::medium(12.5), theme::text());
     let (h, button) = (30.0, 32.0);
     let w = button * 2.0 + galley.size().x + 16.0;
     let bar = Rect::from_min_size(pos2(area.right() - w - 10.0, area.bottom() - h - 10.0), vec2(w, h));
-    painter.rect_filled(bar, CornerRadius::same(15), theme::POPUP.gamma_multiply(shown));
-    painter.rect_stroke(bar, CornerRadius::same(15), egui::Stroke::new(1.0, theme::DIVIDER.gamma_multiply(shown)), egui::StrokeKind::Inside);
+    painter.rect_filled(bar, CornerRadius::same(15), theme::popup().gamma_multiply(shown));
+    painter.rect_stroke(bar, CornerRadius::same(15), egui::Stroke::new(1.0, theme::divider().gamma_multiply(shown)), egui::StrokeKind::Inside);
     let earlier = Rect::from_min_size(bar.min, vec2(button, h));
     let later = Rect::from_min_size(pos2(bar.right() - button, bar.top()), vec2(button, h));
     let middle = Rect::from_min_max(pos2(earlier.right(), bar.top()), pos2(later.left(), bar.bottom()));
@@ -402,14 +403,14 @@ fn nudge(app: &mut App, ui: &mut Ui, area: Rect, video_id: &str, offset: f64, po
     let middle_r = ui.interact(middle, id.with("reset"), Sense::click());
     let middle_r = if offset != 0.0 { middle_r.on_hover_text("Back to the lyrics' own timing") } else { middle_r.on_hover_text("Lyrics early or late? Move them here; it is kept for this song") };
     for (r, rect, icon) in [(&earlier_r, earlier, Icon::Minus), (&later_r, later, Icon::Plus)] {
-        let tint = if r.hovered() { theme::TEXT } else { theme::TEXT_DIM };
+        let tint = if r.hovered() { theme::text() } else { theme::text_dim() };
         if r.hovered() {
             painter.circle_filled(rect.center(), 12.0, Color32::from_white_alpha((24.0 * shown) as u8));
             ui.ctx().set_cursor_icon(CursorIcon::PointingHand);
         }
         icon.image(tint.gamma_multiply(shown), 16.0).paint_at(ui, Rect::from_center_size(rect.center(), egui::Vec2::splat(16.0)));
     }
-    let text_color = if offset != 0.0 { theme::ACCENT_TEXT } else { theme::TEXT_DIM };
+    let text_color = if offset != 0.0 { theme::accent_text() } else { theme::text_dim() };
     painter.galley_with_override_text_color(middle.center() - galley.size() / 2.0, galley, text_color.gamma_multiply(shown));
     if offset != 0.0 && middle_r.hovered() {
         ui.ctx().set_cursor_icon(CursorIcon::PointingHand);

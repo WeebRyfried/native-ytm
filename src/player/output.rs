@@ -203,10 +203,17 @@ pub struct Renderer {
     silent: bool,
     eq_control: Arc<super::eq::EqControl>,
     eq: super::eq::Equalizer,
+    scope: Arc<crate::visualiser::Scope>,
 }
 
 impl Renderer {
-    pub fn new(queue: Arc<Mutex<Queue>>, report: Arc<Report>, volume: Arc<AtomicU32>, eq_control: Arc<super::eq::EqControl>) -> Self {
+    pub fn new(
+        queue: Arc<Mutex<Queue>>,
+        report: Arc<Report>,
+        volume: Arc<AtomicU32>,
+        eq_control: Arc<super::eq::EqControl>,
+        scope: Arc<crate::visualiser::Scope>,
+    ) -> Self {
         Self {
             queue,
             report,
@@ -217,6 +224,7 @@ impl Renderer {
             silent: false,
             eq_control,
             eq: super::eq::Equalizer::default(),
+            scope,
         }
     }
 }
@@ -289,6 +297,9 @@ impl fastframe_audio::Render for Renderer {
         out[written * channels..].fill(0.0);
         // The equaliser, on what is heard now: a change is heard at once.
         self.eq.process(&self.eq_control, &mut out[..written * channels], self.rate, channels);
+        // The visualiser sees it as the equaliser leaves it, whatever the
+        // volume.
+        self.scope.write(out, channels, self.rate);
         if hold {
             // From where the volume was down to silence.
             let n = written.max(1) as f32;
@@ -372,7 +383,7 @@ mod tests {
         let queue = Arc::new(Mutex::new(Queue::default()));
         let report = Arc::new(Report::default());
         let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
-        let mut renderer = Renderer::new(queue.clone(), report.clone(), volume, Arc::default());
+        let mut renderer = Renderer::new(queue.clone(), report.clone(), volume, Arc::default(), Arc::default());
         // Ten frames of fade at 1 kHz.
         renderer.configure(1000, 1);
         queue.lock().push(1, Duration::ZERO, &[1.0; 100], 1, 1000);

@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="../../releases/latest"><img src="https://img.shields.io/badge/download-v0.3.0-ff0033?style=flat-square" alt="Download v0.3.0"></a>
+  <a href="../../releases/latest"><img src="https://img.shields.io/badge/download-v0.3.1-ff0033?style=flat-square" alt="Download v0.3.1"></a>
   <img src="https://img.shields.io/badge/Windows-x64-0078D4?style=flat-square&logo=windows11&logoColor=white" alt="Windows x64">
   <img src="https://img.shields.io/badge/Rust-2024-B7410E?style=flat-square&logo=rust&logoColor=white" alt="Rust 2024">
   <img src="https://img.shields.io/badge/UI-egui%20%2B%20OpenGL-1f1f1f?style=flat-square" alt="egui and OpenGL">
@@ -100,7 +100,8 @@ sounds as good as your account allows.
 
 **Your music**
 - Home, Explore, moods and charts, search with suggestions and your recent
-  searches, albums, artists, playlists, all with infinite scrolling.
+  searches, albums, artists, playlists, all with infinite scrolling. Quick
+  picks sits near the top of Home, wherever YouTube Music sends it.
 - **Quick.** Home, Explore and the library open at once as they were last
   time, while the fresh copy loads; artwork comes in YouTube Music's own
   sizes, which arrive in about a tenth of a second; and a song you point
@@ -129,6 +130,14 @@ sounds as good as your account allows.
 - **Updates in one click.** A new version shows in the top bar: one click
   downloads it, checks it against the digest GitHub publishes, and restarts
   into it, the music carrying on where it was.
+- **Four themes**, all dark: Classic (YouTube Music's black and red),
+  Midnight, Sakura and Matcha, picked from little pictures of each in
+  Settings, and taken on at once.
+- **A visualiser** rising from the top of the player bar as the music
+  plays, in the theme's colours: Bars, Wave, Mirror or Aurora. A click on
+  its button turns it off; a right-click picks the style. It draws at 30
+  frames a second, and not at all while nothing plays.
+- A soft glow follows the pointer over rows and cards.
 - Settings in plain words, the technical ones tucked under Advanced.
 - Light animations throughout, each drawing frames only while it moves.
 
@@ -215,6 +224,8 @@ cargo build --release
 | Part | Where | What |
 | --- | --- | --- |
 | Interface | `src/ui/` | egui views; they emit `Action`s, which `src/app.rs` applies after each frame |
+| Themes | `src/theme.rs` | four palettes; the colours are read from the one chosen, so a change shows on the next frame |
+| Visualiser | `src/visualiser.rs`, `src/ui/visualiser.rs` | the audio callback's last moments in a lock-free ring, an FFT into bands by octaves under a scale that follows the music, drawn as meshes |
 | App state | `src/app.rs`, `src/queue.rs` | navigation, the queue, what plays next, preloading, the switch to Premium |
 | Network | `src/backend.rs` | a two-thread tokio runtime; the interface never waits on it |
 | API | `src/api/` | InnerTube (`WEB_REMIX`) requests and the parsers that turn renderers into the model; LRCLIB for synced lyrics |

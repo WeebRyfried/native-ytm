@@ -25,4 +25,5 @@ pub mod stream;
 pub mod theme;
 pub mod ui;
 pub mod update;
+pub mod visualiser;
 pub mod watch;

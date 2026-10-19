@@ -1,22 +1,192 @@
 //! Colours, sizes, fonts and icons. YouTube Music is dark only, and so is
-//! this: near-black surfaces, white text, and red for what is playing.
+//! this: four dark looks to choose from, each near-black surfaces, light
+//! text, and one colour for what is playing.
+
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use egui::{Color32, CornerRadius, FontFamily, FontId, Stroke, TextStyle, Visuals};
+use serde::{Deserialize, Serialize};
 
-pub const BG: Color32 = Color32::from_rgb(0x0b, 0x0b, 0x0b);
-pub const SIDEBAR: Color32 = Color32::from_rgb(0x03, 0x03, 0x03);
-pub const PLAYER: Color32 = Color32::from_rgb(0x17, 0x17, 0x17);
-pub const SURFACE: Color32 = Color32::from_rgb(0x1d, 0x1d, 0x1d);
-pub const SURFACE_HOVER: Color32 = Color32::from_rgb(0x29, 0x29, 0x29);
-pub const SURFACE_ACTIVE: Color32 = Color32::from_rgb(0x33, 0x33, 0x33);
-pub const POPUP: Color32 = Color32::from_rgb(0x21, 0x21, 0x21);
-pub const TEXT: Color32 = Color32::from_rgb(0xf1, 0xf1, 0xf1);
-pub const TEXT_DIM: Color32 = Color32::from_rgb(0xaa, 0xaa, 0xaa);
-pub const TEXT_FAINT: Color32 = Color32::from_rgb(0x71, 0x71, 0x71);
-pub const ACCENT: Color32 = Color32::from_rgb(0xff, 0x00, 0x33);
-/// The accent as text on dark surfaces: a little lighter, to read.
-pub const ACCENT_TEXT: Color32 = Color32::from_rgb(0xff, 0x4d, 0x5e);
-pub const DIVIDER: Color32 = Color32::from_rgb(0x26, 0x26, 0x26);
+/// One look of the app.
+pub struct Palette {
+    pub bg: Color32,
+    pub sidebar: Color32,
+    pub player: Color32,
+    pub surface: Color32,
+    pub surface_hover: Color32,
+    pub surface_active: Color32,
+    pub popup: Color32,
+    pub text: Color32,
+    pub text_dim: Color32,
+    pub text_faint: Color32,
+    pub accent: Color32,
+    /// The accent as text on dark surfaces: a little lighter, to read.
+    pub accent_text: Color32,
+    pub divider: Color32,
+    /// The visualiser's second colour: the accent turns into it across.
+    pub glow: Color32,
+}
+
+const fn rgb(hex: u32) -> Color32 {
+    Color32::from_rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8)
+}
+
+/// The looks on offer, in Settings' order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Theme {
+    /// YouTube Music's own: black and red.
+    #[default]
+    Classic,
+    /// Blue-black, with a blue that turns violet.
+    Midnight,
+    /// Plum, with cherry-blossom pink.
+    Sakura,
+    /// Green-black, with mint.
+    Matcha,
+}
+
+impl Theme {
+    pub const ALL: [Theme; 4] = [Theme::Classic, Theme::Midnight, Theme::Sakura, Theme::Matcha];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Theme::Classic => "Classic",
+            Theme::Midnight => "Midnight",
+            Theme::Sakura => "Sakura",
+            Theme::Matcha => "Matcha",
+        }
+    }
+
+    pub fn palette(self) -> &'static Palette {
+        &PALETTES[self as usize]
+    }
+}
+
+const PALETTES: [Palette; 4] = [
+    Palette {
+        bg: rgb(0x0b0b0b),
+        sidebar: rgb(0x030303),
+        player: rgb(0x171717),
+        surface: rgb(0x1d1d1d),
+        surface_hover: rgb(0x292929),
+        surface_active: rgb(0x333333),
+        popup: rgb(0x212121),
+        text: rgb(0xf1f1f1),
+        text_dim: rgb(0xaaaaaa),
+        text_faint: rgb(0x717171),
+        accent: rgb(0xff0033),
+        accent_text: rgb(0xff4d5e),
+        divider: rgb(0x262626),
+        glow: rgb(0xff6a8e),
+    },
+    Palette {
+        bg: rgb(0x0a0d15),
+        sidebar: rgb(0x05070d),
+        player: rgb(0x131926),
+        surface: rgb(0x172030),
+        surface_hover: rgb(0x212b3e),
+        surface_active: rgb(0x2a354b),
+        popup: rgb(0x1a2333),
+        text: rgb(0xeef2fa),
+        text_dim: rgb(0x9ba7bd),
+        text_faint: rgb(0x667189),
+        accent: rgb(0x4c8dff),
+        accent_text: rgb(0x7eaaff),
+        divider: rgb(0x1f2839),
+        glow: rgb(0xa47bff),
+    },
+    Palette {
+        bg: rgb(0x110b0f),
+        sidebar: rgb(0x0a0609),
+        player: rgb(0x1c1319),
+        surface: rgb(0x23171f),
+        surface_hover: rgb(0x2f2029),
+        surface_active: rgb(0x3a2934),
+        popup: rgb(0x271a23),
+        text: rgb(0xf8eef3),
+        text_dim: rgb(0xbca6b1),
+        text_faint: rgb(0x816c77),
+        accent: rgb(0xff5c9d),
+        accent_text: rgb(0xff8ab8),
+        divider: rgb(0x2d1f28),
+        glow: rgb(0xffb3d0),
+    },
+    Palette {
+        bg: rgb(0x0a0f0c),
+        sidebar: rgb(0x050906),
+        player: rgb(0x131a16),
+        surface: rgb(0x18211c),
+        surface_hover: rgb(0x212c25),
+        surface_active: rgb(0x2a372f),
+        popup: rgb(0x1b251f),
+        text: rgb(0xeef5f0),
+        text_dim: rgb(0xa0b3a7),
+        text_faint: rgb(0x6a7c71),
+        accent: rgb(0x2fcf8a),
+        accent_text: rgb(0x6be3b0),
+        divider: rgb(0x1f2a23),
+        glow: rgb(0x5ee0e6),
+    },
+];
+
+static CURRENT: AtomicU8 = AtomicU8::new(0);
+
+/// Takes on `theme`; `apply` then redoes egui's own colours.
+pub fn set(theme: Theme) {
+    CURRENT.store(theme as u8, Ordering::Relaxed);
+}
+
+pub fn current() -> Theme {
+    Theme::ALL[usize::from(CURRENT.load(Ordering::Relaxed)).min(Theme::ALL.len() - 1)]
+}
+
+fn palette() -> &'static Palette {
+    current().palette()
+}
+
+pub fn bg() -> Color32 {
+    palette().bg
+}
+pub fn sidebar() -> Color32 {
+    palette().sidebar
+}
+pub fn player() -> Color32 {
+    palette().player
+}
+pub fn surface() -> Color32 {
+    palette().surface
+}
+pub fn surface_hover() -> Color32 {
+    palette().surface_hover
+}
+pub fn surface_active() -> Color32 {
+    palette().surface_active
+}
+pub fn popup() -> Color32 {
+    palette().popup
+}
+pub fn text() -> Color32 {
+    palette().text
+}
+pub fn text_dim() -> Color32 {
+    palette().text_dim
+}
+pub fn text_faint() -> Color32 {
+    palette().text_faint
+}
+pub fn accent() -> Color32 {
+    palette().accent
+}
+pub fn accent_text() -> Color32 {
+    palette().accent_text
+}
+pub fn divider() -> Color32 {
+    palette().divider
+}
+pub fn glow() -> Color32 {
+    palette().glow
+}
+
 pub const SCRIM: Color32 = Color32::from_black_alpha(160);
 
 pub const PLAYER_HEIGHT: f32 = 80.0;
@@ -90,19 +260,25 @@ pub fn install(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
     egui_extras::install_image_loaders(ctx);
     fastframe_icons::install::<Icon>(ctx);
+    apply(ctx);
+    style(ctx);
+}
 
+/// egui's own colours, from the theme: on start, and on a change of theme.
+pub fn apply(ctx: &egui::Context) {
+    let p = palette();
     let mut visuals = Visuals::dark();
-    visuals.panel_fill = BG;
-    visuals.window_fill = POPUP;
-    visuals.extreme_bg_color = SURFACE;
-    visuals.faint_bg_color = SURFACE;
-    visuals.override_text_color = Some(TEXT);
-    visuals.hyperlink_color = TEXT;
-    visuals.selection.bg_fill = ACCENT.gamma_multiply(0.45);
-    visuals.selection.stroke = Stroke::new(1.0, TEXT);
+    visuals.panel_fill = p.bg;
+    visuals.window_fill = p.popup;
+    visuals.extreme_bg_color = p.surface;
+    visuals.faint_bg_color = p.surface;
+    visuals.override_text_color = Some(p.text);
+    visuals.hyperlink_color = p.text;
+    visuals.selection.bg_fill = p.accent.gamma_multiply(0.45);
+    visuals.selection.stroke = Stroke::new(1.0, p.text);
     visuals.window_corner_radius = CornerRadius::same(10);
     visuals.menu_corner_radius = CornerRadius::same(8);
-    visuals.window_stroke = Stroke::new(1.0, DIVIDER);
+    visuals.window_stroke = Stroke::new(1.0, p.divider);
     visuals.window_shadow = egui::Shadow {
         offset: [0, 6],
         blur: 24,
@@ -111,19 +287,19 @@ pub fn install(ctx: &egui::Context) {
     };
     visuals.popup_shadow = visuals.window_shadow;
     let w = &mut visuals.widgets;
-    w.noninteractive.bg_fill = BG;
-    w.noninteractive.bg_stroke = Stroke::new(1.0, DIVIDER);
-    w.noninteractive.fg_stroke = Stroke::new(1.0, TEXT_DIM);
+    w.noninteractive.bg_fill = p.bg;
+    w.noninteractive.bg_stroke = Stroke::new(1.0, p.divider);
+    w.noninteractive.fg_stroke = Stroke::new(1.0, p.text_dim);
     for (state, fill) in [
-        (&mut w.inactive, SURFACE),
-        (&mut w.hovered, SURFACE_HOVER),
-        (&mut w.active, SURFACE_ACTIVE),
-        (&mut w.open, SURFACE_HOVER),
+        (&mut w.inactive, p.surface),
+        (&mut w.hovered, p.surface_hover),
+        (&mut w.active, p.surface_active),
+        (&mut w.open, p.surface_hover),
     ] {
         state.bg_fill = fill;
         state.weak_bg_fill = fill;
         state.bg_stroke = Stroke::NONE;
-        state.fg_stroke = Stroke::new(1.5, TEXT);
+        state.fg_stroke = Stroke::new(1.5, p.text);
         state.corner_radius = CornerRadius::same(8);
         state.expansion = 0.0;
     }
@@ -134,7 +310,9 @@ pub fn install(ctx: &egui::Context) {
     ctx.set_theme(egui::ThemePreference::Dark);
     ctx.set_visuals_of(egui::Theme::Dark, visuals.clone());
     ctx.set_visuals_of(egui::Theme::Light, visuals);
+}
 
+fn style(ctx: &egui::Context) {
     ctx.global_style_mut(|style| {
         style.text_styles = [
             (TextStyle::Small, regular(12.0)),
@@ -201,6 +379,7 @@ fastframe_icons::icons! {
         Grip => "grip",
         Chart => "chart",
         Mix => "sparkles",
+        Visualiser => "audio-lines",
         Back => lucide "arrow-left",
         Search => lucide "search",
         Settings => lucide "settings",
