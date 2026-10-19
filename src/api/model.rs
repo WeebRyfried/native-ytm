@@ -257,9 +257,44 @@ pub struct Suggestions {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Lyrics {
     pub text: String,
+    /// Where they are from, said in full, under them.
     pub source: Option<String>,
     /// The lines with their times, when the lyrics are synced.
     pub lines: Vec<LyricLine>,
+    /// Where they are from, in a word or two, to choose between sources.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Who wrote the song, when the lyrics say.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub songwriters: Vec<String>,
+    /// The song's lyrics from the other sources that had them, best first,
+    /// to switch to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub others: Vec<Lyrics>,
+}
+
+impl Lyrics {
+    /// Timed word by word, not only line by line.
+    pub fn by_word(&self) -> bool {
+        self.lines.iter().any(|l| !l.words.is_empty())
+    }
+
+    /// Which of a song's lyrics these are, to remember a choice by: their
+    /// source and how they are timed.
+    pub fn choice(&self) -> String {
+        format!("{}|{}", self.provider.as_deref().unwrap_or_default(), self.timing())
+    }
+
+    /// How they follow the song, in a few words.
+    pub fn timing(&self) -> &'static str {
+        if self.by_word() {
+            "word by word"
+        } else if !self.lines.is_empty() {
+            "line by line"
+        } else {
+            "text only"
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -267,6 +302,31 @@ pub struct LyricLine {
     /// Seconds into the song.
     pub time: f64,
     /// Empty for an instrumental break.
+    pub text: String,
+    /// When it ends, when the lyrics say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<f64>,
+    /// Its words (or syllables) and when each is sung, together `text`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<Word>,
+    /// Backing vocals sung with it, timed the same way.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backing: Vec<Word>,
+    /// What it says in English (or another language), when the lyrics
+    /// come with that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub translation: Option<String>,
+    /// Sung by the duet's other voice: set on the right.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub second_voice: bool,
+}
+
+/// A word, or a syllable, and when it is sung (seconds into the song). Its
+/// text keeps the space after it, if one follows.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Word {
+    pub start: f64,
+    pub end: f64,
     pub text: String,
 }
 

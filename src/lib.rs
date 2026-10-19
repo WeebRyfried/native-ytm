@@ -12,6 +12,7 @@ pub mod kept_pages;
 pub mod lastfm;
 pub mod local;
 pub mod lyrics;
+pub mod lyrics_check;
 pub mod model;
 pub mod net;
 pub mod personal;

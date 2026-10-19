@@ -56,8 +56,10 @@ pub struct Settings {
     pub premium_quality: bool,
     /// Songs kept on disk, at the best quality heard; 0 keeps none.
     pub cached_songs: u32,
-    /// Look up synced lyrics on LRCLIB.
+    /// Look up timed lyrics: Better Lyrics' sources, and LRCLIB.
     pub synced_lyrics: bool,
+    /// A line's translation under it, when the lyrics come with one.
+    pub lyric_translations: bool,
     /// The equaliser, its bands in dB, and the preset they came from.
     pub eq: bool,
     pub eq_gains: [f32; 10],
@@ -116,6 +118,7 @@ impl Default for Settings {
             premium_quality: true,
             cached_songs: 100,
             synced_lyrics: true,
+            lyric_translations: true,
             eq: false,
             eq_gains: [0.0; 10],
             eq_preset: "Flat".into(),

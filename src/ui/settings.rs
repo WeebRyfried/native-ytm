@@ -129,7 +129,21 @@ fn quality(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
             });
         }
         divider(ui);
-        toggle_row(ui, "Synced lyrics", "Lyrics that follow the song, line by line, from LRCLIB, an open lyrics library. Otherwise YouTube Music's own.", &mut draft.synced_lyrics);
+        toggle_row(
+            ui,
+            "Synced lyrics",
+            "Lyrics that follow the song, word by word where they can, from the sources Better Lyrics uses (Musixmatch, QQ Music, KuGou, BiniLyrics, Better Lyrics' own) and LRCLIB. Otherwise YouTube Music's own.",
+            &mut draft.synced_lyrics,
+        );
+        if draft.synced_lyrics {
+            divider(ui);
+            toggle_row(
+                ui,
+                "Translations",
+                "What each line means, under it, when the lyrics come with a translation (often for Japanese and Korean songs).",
+                &mut draft.lyric_translations,
+            );
+        }
         divider(ui);
         toggle_row(
             ui,

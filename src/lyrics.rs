@@ -1,8 +1,8 @@
 //! Lyrics kept on disk once found, so a song's lyrics show at once the next
 //! time, and offline. A song found to have none is remembered for a while
-//! too, then asked about again. Lyrics found while LRCLIB could not answer
-//! (YouTube's plain text in its place) are kept as provisional: shown at
-//! once all the same, and LRCLIB asked again now and then.
+//! too, then asked about again. Lyrics found while a source could not
+//! answer (LRCLIB, or Better Lyrics' server) are kept as provisional: shown
+//! at once all the same, and the sources asked again now and then.
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use crate::api::model::Lyrics;
 
 /// Bumped when what was kept before cannot be trusted.
-const VERSION: &str = "v2";
+const VERSION: &str = "v3";
 
 /// How long a song without lyrics is taken at its word: three days.
 const NONE_FOR_SECS: i64 = 3 * 24 * 60 * 60;
@@ -52,7 +52,9 @@ impl LyricsCache {
     pub fn new(dir: PathBuf) -> Self {
         let _ = std::fs::create_dir_all(&dir);
         // 0.2.5 kept stopgaps too (YouTube's plain lyrics, or none, when
-        // LRCLIB could not be asked): those are let go.
+        // LRCLIB could not be asked), and before 0.3.4 only LRCLIB's and
+        // YouTube's were looked for: those are let go, to be looked up
+        // again from every source.
         let marker = dir.join(VERSION);
         if !marker.exists() {
             if let Ok(entries) = std::fs::read_dir(&dir) {
@@ -131,7 +133,8 @@ mod tests {
         let lyrics = Lyrics {
             text: "la la".into(),
             source: Some("LRCLIB".into()),
-            lines: vec![LyricLine { time: 1.5, text: "la la".into() }],
+            lines: vec![LyricLine { time: 1.5, text: "la la".into(), ..LyricLine::default() }],
+            ..Lyrics::default()
         };
         cache.put("abc", true, &Some(lyrics.clone()), true);
         assert_eq!(cache.get("abc", true), Some(Found { lyrics: Some(lyrics.clone()), recheck: false }));
@@ -140,7 +143,7 @@ mod tests {
         cache.put(r"local:C:\Music\a.flac", false, &None, true);
         assert_eq!(cache.get(r"local:C:\Music\a.flac", false).map(|f| f.lyrics), Some(None));
         // A provisional answer shows, but does not replace a complete one.
-        let plain = Lyrics { text: "plain".into(), source: None, lines: Vec::new() };
+        let plain = Lyrics { text: "plain".into(), ..Lyrics::default() };
         cache.put("abc", true, &Some(plain.clone()), false);
         assert_eq!(cache.get("abc", true).and_then(|f| f.lyrics), Some(lyrics));
         cache.put("def", true, &Some(plain.clone()), false);

@@ -1,6 +1,6 @@
 //! What the app remembers of how it is used, beside the settings: the
-//! searches made lately, and how far each song's synced lyrics are moved
-//! to match the song.
+//! searches made lately, how far each song's synced lyrics are moved to
+//! match the song, and whose lyrics were chosen for it.
 
 use std::collections::HashMap;
 
@@ -20,6 +20,9 @@ pub struct Personal {
     /// How far each song's synced lyrics are moved, in seconds, by the
     /// song's id: later when positive.
     pub lyric_offsets: HashMap<String, f32>,
+    /// The source chosen for each song's lyrics, when not the first found:
+    /// its name and timing, as `Lyrics::choice` gives them.
+    pub lyric_sources: HashMap<String, String>,
 }
 
 impl Personal {
@@ -66,6 +69,19 @@ impl Personal {
 
     pub fn reset_lyrics(&mut self, video_id: &str) {
         self.lyric_offsets.remove(video_id);
+    }
+
+    /// The source chosen for the song's lyrics.
+    pub fn lyric_source(&self, video_id: &str) -> Option<&str> {
+        self.lyric_sources.get(video_id).map(String::as_str)
+    }
+
+    /// Chooses a source for the song's lyrics; none goes back to the first.
+    pub fn choose_lyrics(&mut self, video_id: &str, choice: Option<String>) {
+        match choice {
+            Some(choice) => self.lyric_sources.insert(video_id.to_owned(), choice),
+            None => self.lyric_sources.remove(video_id),
+        };
     }
 }
 

@@ -249,7 +249,7 @@ pub struct App {
     /// The queue ran out and more is being fetched to carry on.
     ended_waiting: bool,
     pub now: NowInfo,
-    pub lyrics: HashMap<String, Loadable<Option<Lyrics>>>,
+    pub lyrics: HashMap<String, Loadable<Option<Arc<Lyrics>>>>,
 
     pub signed_in: bool,
     pub account: Option<Account>,
@@ -358,6 +358,8 @@ impl App {
         let ytdlp = (!settings.ytdlp_path.trim().is_empty())
             .then(|| std::path::PathBuf::from(settings.ytdlp_path.trim()));
         crate::stream::clean_scratch(&paths.scratch());
+        // Better Lyrics' key and its check's WebView2 profile.
+        crate::api::betterlyrics::init(paths.cache.join("lyrics-check"));
         let backend = Backend::new(
             &settings.language,
             crate::stream::Resolver::new(ytdlp, settings.use_ytdlp, settings.premium_quality, paths.scratch()),
@@ -1177,7 +1179,13 @@ impl App {
                 };
                 self.stats.summaries.insert((crate::stats::Source::LastFm, period), (loaded, Instant::now(), 0));
             }
-            Response::Lyrics { video_id, result, complete } => {
+            Response::Lyrics { video_id, partial: true, result, .. } => {
+                // Shown while the rest is waited for: kept only once it comes.
+                if let (Some(Loadable::Loading), Ok(lyrics)) = (self.lyrics.get(&video_id), result) {
+                    self.lyrics.insert(video_id, Loadable::Ready(lyrics.map(Arc::new)));
+                }
+            }
+            Response::Lyrics { video_id, result, complete, .. } => {
                 if let Ok(lyrics) = &result {
                     // A stopgap (YouTube's plain text while LRCLIB could not
                     // answer) is kept as provisional, so it shows at once
@@ -1192,7 +1200,7 @@ impl App {
                 self.lyrics.insert(
                     video_id,
                     match result {
-                        Ok(lyrics) => Loadable::Ready(lyrics),
+                        Ok(lyrics) => Loadable::Ready(lyrics.map(Arc::new)),
                         Err(error) => Loadable::Failed(error),
                     },
                 );
@@ -1572,7 +1580,7 @@ impl App {
             if kept.recheck {
                 self.lyrics_retry.insert(track.video_id.clone(), Instant::now());
             }
-            self.lyrics.insert(track.video_id.clone(), Loadable::Ready(kept.lyrics));
+            self.lyrics.insert(track.video_id.clone(), Loadable::Ready(kept.lyrics.map(Arc::new)));
         }
         // A restored song that has not played yet has no info yet.
         if self.now.video_id != track.video_id {
@@ -1622,7 +1630,7 @@ impl App {
             if kept.recheck {
                 self.lyrics_retry.insert(track.video_id.clone(), Instant::now());
             }
-            self.lyrics.insert(track.video_id.clone(), Loadable::Ready(kept.lyrics));
+            self.lyrics.insert(track.video_id.clone(), Loadable::Ready(kept.lyrics.map(Arc::new)));
             return;
         }
         self.lyrics.insert(track.video_id.clone(), Loadable::Loading);
@@ -3430,6 +3438,10 @@ impl App {
             }
             Action::ResetLyrics(video_id) => {
                 self.personal.reset_lyrics(&video_id);
+                self.personal_dirty = Some(Instant::now());
+            }
+            Action::ChooseLyrics { video_id, choice } => {
+                self.personal.choose_lyrics(&video_id, choice);
                 self.personal_dirty = Some(Instant::now());
             }
             Action::SetSearchFilter(filter) => {

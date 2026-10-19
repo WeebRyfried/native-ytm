@@ -83,8 +83,8 @@ pub enum Request {
         seq: u64,
         playlist_id: String,
     },
-    /// YouTube's lyrics (by their browse id), and synced ones from LRCLIB
-    /// (by the song's names).
+    /// YouTube's lyrics (by their browse id), and timed ones from Better
+    /// Lyrics' sources and LRCLIB (by the song's names).
     Lyrics {
         video_id: String,
         browse_id: Option<String>,
@@ -227,8 +227,12 @@ pub enum Response {
         result: Result<Option<Lyrics>, String>,
         /// Every source asked answered: what was found can be kept. Not so
         /// when LRCLIB was out of reach or turned the request away (it
-        /// limits how often it is asked), and the answer is a stopgap.
+        /// limits how often it is asked), or Better Lyrics' server could
+        /// not be asked, and the answer is a stopgap.
         complete: bool,
+        /// Shown while a slower source is still being waited for; the
+        /// answer itself follows.
+        partial: bool,
     },
     Resolved {
         token: u64,
@@ -346,7 +350,11 @@ impl Backend {
         let tx = self.tx.clone();
         let wake = self.wake.clone();
         self.runtime.spawn(async move {
-            if let Some(response) = run(&api, &resolver, request).await {
+            let early = |response: Response| {
+                let _ = tx.send(response);
+                wake();
+            };
+            if let Some(response) = run(&api, &resolver, request, &early).await {
                 let _ = tx.send(response);
                 wake();
             }
@@ -449,10 +457,13 @@ async fn youtube_art(api: &Innertube, query: &crate::local::ArtQuery) -> Option<
     song.track.and_then(|t| t.thumbnail).or(song.thumbnail)
 }
 
+/// `early` takes an answer given before the request's own, as lyrics
+/// shown while a slower source is waited for.
 async fn run(
     api: &Innertube,
     resolver: &parking_lot::RwLock<Resolver>,
     request: Request,
+    early: &(dyn Fn(Response) + Sync),
 ) -> Option<Response> {
     Some(match request {
         Request::Bootstrap => {
@@ -614,16 +625,76 @@ async fn run(
                     None => (None, true),
                 }
             };
-            let (youtube, (open, answered)) = tokio::join!(youtube, open);
-            let complete = answered && youtube.is_ok();
-            // Synced first; then YouTube's own text; then LRCLIB's.
-            let result = match (open, youtube) {
-                (Some(synced), _) if !synced.lines.is_empty() => Ok(Some(synced)),
-                (_, Ok(Some(text))) => Ok(Some(text)),
-                (Some(plain), _) => Ok(Some(plain)),
-                (None, other) => other,
+            // Better Lyrics' sources, by the song's YouTube Music id: for a
+            // song on this PC, its twin there.
+            let better = match &query {
+                Some(query) => {
+                    let id = if crate::local::is_local_id(&video_id) {
+                        let search = format!("{} {}", query.title, query.artist);
+                        find_song(api, &search, Some(&query.artist), Some(&query.title)).await.map(|t| t.video_id)
+                    } else {
+                        Some(video_id.clone())
+                    };
+                    id.map(|id| crate::api::betterlyrics::Query {
+                        video_id: id,
+                        title: query.title.clone(),
+                        artist: query.artist.clone(),
+                        album: query.album.clone(),
+                        duration: query.duration,
+                    })
+                }
+                None => None,
             };
-            Response::Lyrics { video_id, result, complete }
+            let better = better.map(|query| {
+                let http = api.http.clone();
+                tokio::spawn(async move { crate::api::betterlyrics::find(&http, &query).await })
+            });
+            let (youtube, (open, answered)) = tokio::join!(youtube, open);
+            // LRCLIB (the app's own look, when Better Lyrics' has none) and
+            // YouTube's text, in their places among Better Lyrics' sources.
+            use crate::api::betterlyrics::{self as bl, Found};
+            let mut found: Vec<Found> = Vec::new();
+            if let Some(open) = open {
+                let rank = if open.lines.is_empty() { bl::LRCLIB_TEXT } else { bl::LRCLIB_SYNCED };
+                found.push(Found { rank, lyrics: open });
+            }
+            if let Ok(Some(text)) = &youtube {
+                found.push(Found { rank: bl::YOUTUBE_TEXT, lyrics: text.clone() });
+            }
+            let mut better_answered = true;
+            if let Some(better) = better {
+                // Better Lyrics' server can take its time over a song it has
+                // not looked up before: what is here shows meanwhile.
+                if !better.is_finished()
+                    && let Some(meanwhile) = bl::gather(found.clone())
+                {
+                    early(Response::Lyrics { video_id: video_id.clone(), result: Ok(Some(meanwhile)), complete: false, partial: true });
+                }
+                match better.await {
+                    Ok(Ok(more)) => {
+                        // LRCLIB once: Better Lyrics' look at it, if it made one.
+                        if more.iter().any(|f| f.lyrics.provider.as_deref() == Some("LRCLIB")) {
+                            found.retain(|f| f.lyrics.provider.as_deref() != Some("LRCLIB"));
+                        }
+                        found.extend(more);
+                    }
+                    Ok(Err(error)) => {
+                        log::info!("Better Lyrics: {error:#}");
+                        better_answered = false;
+                    }
+                    Err(_) => better_answered = false,
+                }
+            }
+            let complete = answered && youtube.is_ok() && better_answered;
+            let mut ranked: Vec<&Found> = found.iter().collect();
+            ranked.sort_by_key(|f| f.rank);
+            let names: Vec<String> = ranked.iter().map(|f| format!("{} ({})", f.lyrics.provider.as_deref().unwrap_or("?"), f.lyrics.timing())).collect();
+            log::info!("lyrics found: {}", if names.is_empty() { "none".to_owned() } else { names.join(", ") });
+            let result = match bl::gather(found) {
+                Some(best) => Ok(Some(best)),
+                None => youtube,
+            };
+            Response::Lyrics { video_id, result, complete, partial: false }
         }
         Request::Resolve {
             token,

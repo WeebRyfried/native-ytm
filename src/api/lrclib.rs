@@ -146,7 +146,9 @@ fn to_lyrics(record: Record) -> Option<Lyrics> {
     Some(Lyrics {
         text,
         source: Some(if lines.is_empty() { "Lyrics from LRCLIB" } else { "Synced lyrics from LRCLIB" }.into()),
+        provider: Some("LRCLIB".into()),
         lines,
+        ..Lyrics::default()
     })
 }
 
@@ -194,7 +196,7 @@ pub fn parse_lrc(text: &str) -> Vec<LyricLine> {
             }
         }
         for time in times {
-            lines.push(LyricLine { time, text: rest.trim().to_owned() });
+            lines.push(LyricLine { time, text: rest.trim().to_owned(), ..LyricLine::default() });
         }
     }
     lines.sort_by(|a, b| a.time.total_cmp(&b.time));

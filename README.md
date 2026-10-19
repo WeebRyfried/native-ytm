@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="../../releases/latest"><img src="https://img.shields.io/badge/download-v0.3.3-ff0033?style=flat-square" alt="Download v0.3.3"></a>
+  <a href="../../releases/latest"><img src="https://img.shields.io/badge/download-v0.3.4-ff0033?style=flat-square" alt="Download v0.3.4"></a>
   <img src="https://img.shields.io/badge/Windows-x64-0078D4?style=flat-square&logo=windows11&logoColor=white" alt="Windows x64">
   <img src="https://img.shields.io/badge/Rust-2024-B7410E?style=flat-square&logo=rust&logoColor=white" alt="Rust 2024">
   <img src="https://img.shields.io/badge/UI-egui%20%2B%20OpenGL-1f1f1f?style=flat-square" alt="egui and OpenGL">
@@ -69,6 +69,16 @@ sounds as good as your account allows.
   dim, the view gliding along. Click a line to play from there. Lines a
   little early or late? Move them half a second at a time from the corner
   of the lyrics; it is kept for that song.
+- **Word by word**, from every source the [Better Lyrics](https://github.com/better-lyrics/better-lyrics)
+  extension uses: Better Lyrics' own (Apple Music's timing), BiniLyrics,
+  Musixmatch, QQ Music, KuGou and Unison, then LRCLIB and YouTube's text.
+  Each word lights up as it is sung, a soft edge sweeping through it;
+  backing vocals sit small under their line, a duet's other voice on the
+  right, and a translation under it all when the lyrics have one. Another
+  source is a click away in the corner, and the choice is kept for the
+  song. Better Lyrics' server wants a Cloudflare check passed first: the
+  app runs its check page in Edge's WebView2, unseen unless Cloudflare
+  asks for a click, about once a day.
 - **Readings over Japanese lyrics** in the full-window player: how each
   word sounds, set small over it, in romaji or as furigana.
 - **A full-window player**: the artwork large over a wash of its own colours,
@@ -236,7 +246,8 @@ cargo build --release
 | App state | `src/app.rs`, `src/queue.rs` | navigation, the queue, what plays next, preloading, the switch to Premium |
 | Deck of artwork | `src/ui/now_playing.rs` | the next song's card out from behind once it is a few seconds off, and the turn timed by the song coming in: where the crossfade has it start and for how long the two overlap, which the player records as it joins them |
 | Network | `src/backend.rs` | a two-thread tokio runtime; the interface never waits on it |
-| API | `src/api/` | InnerTube (`WEB_REMIX`) requests and the parsers that turn renderers into the model; LRCLIB for synced lyrics |
+| API | `src/api/` | InnerTube (`WEB_REMIX`) requests and the parsers that turn renderers into the model; timed lyrics from Better Lyrics' sources (`betterlyrics.rs`: its server's stream of providers, and Unison) and LRCLIB, read from TTML, LRC timed by the word, and QRC (`lyric_formats.rs`) |
+| Lyrics check | `src/lyrics_check.rs` | Better Lyrics' Cloudflare check page in WebView2 (through wry, on a plain window), in a process of its own; its token traded for a key that lasts a day |
 | Streams | `src/stream.rs` | finds a stream for a song (below) |
 | Audio | `src/player/` | range downloader (or a file read as it plays), symphonia (MP4, WebM, AAC, and MP3, FLAC, Vorbis, ALAC, WAV for local files), libopus for Opus, rubato resampler, the smart crossfade (`smart.rs`: where the songs go quiet), the equaliser (`eq.rs`, in the audio callback), fastframe-audio output |
 | Music on this PC | `src/local.rs` | the folder scan (a thread at background priority), tags and pictures read once into an index, search (with readings of Japanese names), artwork found online |
@@ -245,7 +256,7 @@ cargo build --release
 | Songs on disk | `src/cache.rs`, `src/lyrics.rs`, `src/kept_pages.rs` | downloads, and whole files kept from plays (the best quality heard, the least recently played going first); lyrics once found; Home and the library's pages as they last loaded |
 | Stats | `src/stats.rs`, `src/ui/stats.rs` | the plays the app hears (one line of JSON each), summed over a stretch; Last.fm's own over the same |
 | Folder watch | `src/watch.rs` | Windows' change notifications for the folders of music, a burst of changes settled into one look through them |
-| Remembered | `src/personal.rs` | recent searches, and how far each song's lyrics are moved |
+| Remembered | `src/personal.rs` | recent searches, how far each song's lyrics are moved, and whose lyrics each song shows |
 | Offline | `src/net.rs` | whether there is internet, from Windows' Network List Manager, asked when a request fails and while offline |
 | Desktop | `src/discord.rs`, `src/lastfm.rs`, `src/platform.rs` | Discord's local pipe, Last.fm's API, DPAPI, the app's identity for the media flyout |
 
@@ -281,7 +292,9 @@ play the songs on this PC from the Nth, `update` to install an update once
 found, and `download` for the song playing, joined with `|`);
 `NATIVE_YTM_VERSION` makes the app believe it is that version (to be offered
 the latest release); `NATIVE_YTM_SHOT=out.png`
-saves a screenshot after `NATIVE_YTM_SHOT_DELAY` ms and quits;
+saves a screenshot after `NATIVE_YTM_SHOT_DELAY` ms and quits (with
+`NATIVE_YTM_SHOT_EVERY` ms and `NATIVE_YTM_SHOT_COUNT`, a numbered run of
+them, for animations);
 `NATIVE_YTM_SCROLL`, `NATIVE_YTM_SEEK`, `NATIVE_YTM_MUTE`;
 `NATIVE_YTM_NO_DISCORD`; `NATIVE_YTM_PROFILE=DIR` runs a separate copy with
 its own data; `NATIVE_YTM_WIGGLE=x,y`, `NATIVE_YTM_WHEEL=x,y` and
@@ -308,6 +321,9 @@ and decoding. [egui and eframe](https://github.com/emilk/egui)
 [libopus](https://opus-codec.org) (BSD) through
 [unsafe-libopus](https://github.com/DCNick3/unsafe-libopus).
 [LRCLIB](https://lrclib.net) for synced lyrics.
+[Better Lyrics](https://github.com/better-lyrics/better-lyrics) and the
+providers its server asks, for lyrics timed by the word, and
+[wry](https://github.com/tauri-apps/wry) (MIT or Apache-2.0) for its check.
 [JMdict](https://www.edrdg.org/jmdict/j_jmdict.html) by the EDRDG
 (CC BY-SA 4.0) for the readings of Japanese lyrics.
 [th-ch/youtube-music](https://github.com/th-ch/youtube-music) for its Discord

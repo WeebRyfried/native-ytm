@@ -291,6 +291,12 @@ pub enum Action {
         by: f32,
     },
     ResetLyrics(String),
+    /// Shows the song's lyrics from another source (`Lyrics::choice`), or
+    /// the first found again.
+    ChooseLyrics {
+        video_id: String,
+        choice: Option<String>,
+    },
     SetSearchFilter(Filter),
     Suggest(String),
     ShowSidePanel(SideTab),

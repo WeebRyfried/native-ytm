@@ -13,6 +13,11 @@ fn main() {
     // Started by an update: the old program is still closing, and holds
     // the one-copy slot until it has.
     let args: Vec<String> = std::env::args().collect();
+    // The lyrics check's own process (src/lyrics_check.rs), not the app.
+    if let Some(i) = args.iter().position(|a| a == native_ytm::lyrics_check::FLAG) {
+        native_ytm::lyrics_check::child(args.get(i + 1).map(String::as_str));
+        return;
+    }
     let updated_from = args
         .iter()
         .position(|a| a == "--updated-from")
