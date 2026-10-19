@@ -147,11 +147,16 @@ struct Window {
 /// without a person at the screen: `NATIVE_YTM_SHOT=out.png`, optionally
 /// with `NATIVE_YTM_ROUTE` (search:QUERY, browse:ID, play:VIDEO_ID,
 /// explore, library, settings, queue, lyrics) and `NATIVE_YTM_SHOT_DELAY`
-/// in milliseconds.
+/// in milliseconds. With `NATIVE_YTM_SHOT_EVERY` (milliseconds) and
+/// `NATIVE_YTM_SHOT_COUNT`, a run of shots that far apart, numbered
+/// (out-000.png, out-001.png...), for watching an animation.
 struct Shot {
     path: std::path::PathBuf,
     due: std::time::Instant,
     asked: bool,
+    every: Option<std::time::Duration>,
+    count: u32,
+    taken: u32,
 }
 
 impl Shot {
@@ -161,11 +166,26 @@ impl Shot {
             .ok()
             .and_then(|d| d.parse().ok())
             .unwrap_or(7000);
+        let every = std::env::var("NATIVE_YTM_SHOT_EVERY").ok().and_then(|d| d.parse().ok()).map(std::time::Duration::from_millis);
+        let count = std::env::var("NATIVE_YTM_SHOT_COUNT").ok().and_then(|d| d.parse().ok()).unwrap_or(1);
         Some(Self {
             path: path.into(),
             due: std::time::Instant::now() + std::time::Duration::from_millis(delay),
             asked: false,
+            every,
+            count,
+            taken: 0,
         })
+    }
+
+    /// Where the next shot goes: numbered in a run.
+    fn next_path(&self) -> std::path::PathBuf {
+        if self.every.is_none() {
+            return self.path.clone();
+        }
+        let stem = self.path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let ext = self.path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_else(|| "png".into());
+        self.path.with_file_name(format!("{stem}-{:03}.{ext}", self.taken))
     }
 }
 
@@ -466,12 +486,21 @@ impl eframe::App for Window {
                 let size = image.size;
                 let pixels: Vec<u8> = image.pixels.iter().flat_map(|p| p.to_array()).collect();
                 if let Some(buffer) = image::RgbaImage::from_raw(size[0] as u32, size[1] as u32, pixels) {
-                    let _ = buffer.save(&shot.path);
+                    let _ = buffer.save(shot.next_path());
                 }
-                self.app.quit = true;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                shot.taken += 1;
+                match shot.every {
+                    Some(every) if shot.taken < shot.count => {
+                        shot.asked = false;
+                        shot.due += every;
+                    }
+                    _ => {
+                        self.app.quit = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                }
             }
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            ctx.request_repaint_after(shot.every.unwrap_or(std::time::Duration::from_millis(100)).min(std::time::Duration::from_millis(100)));
         }
     }
 

@@ -5,6 +5,7 @@
 use egui::{Align, Color32, CornerRadius, CursorIcon, Layout, Mesh, Rect, RichText, Sense, Shape, Ui, UiBuilder, pos2, vec2};
 
 use crate::app::{App, Upgrade, UpgradePhase};
+use crate::images::Images;
 use crate::model::{Action, SideTab};
 use crate::theme::{self, Icon};
 use crate::ui::{lyrics, side_panel, widgets};
@@ -15,7 +16,9 @@ use crate::ui::{lyrics, side_panel, widgets};
 /// go with the bar while the mouse rests).
 pub fn show(app: &mut App, ui: &mut Ui, rect: Rect, rise: f32, foot: f32, chrome: f32) {
     let track = app.current().cloned();
-    backdrop(app, ui, rect, track.as_ref().and_then(|t| t.thumbnail.as_deref()));
+    let deck = track.as_ref().map(|t| deal(app, ui, t.thumbnail.clone()));
+    let turning = deck.as_ref().and_then(|d| d.swap.as_ref()).map(|s| smooth(s.t));
+    backdrop(app, ui, rect, track.as_ref().and_then(|t| t.thumbnail.as_deref()), turning);
 
     if chrome > 0.0 {
         let close = Rect::from_min_size(rect.min + vec2(20.0, 16.0 + rise), vec2(40.0, 40.0));
@@ -62,33 +65,11 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect, rise: f32, foot: f32, chrome
     let block_h = art_size + titles_h;
     let art_top = left.top() + ((left.height() - block_h) / 2.0).max(0.0);
     let art = Rect::from_min_size(pos2(left.center().x - art_size / 2.0, art_top), vec2(art_size, art_size));
-    let shadow = egui::Shadow {
-        offset: [0, 18],
-        blur: 60,
-        spread: 0,
-        color: Color32::from_black_alpha(150),
-    };
-    ui.painter().add(shadow.as_shape(art, CornerRadius::same(12)));
-    // A new song's artwork fades in over the last one's, settling from a
-    // touch smaller.
-    let art_id = ui.id().with("np-art");
-    let (last_url, shown_url): (Option<String>, Option<String>) = ui.data(|d| d.get_temp(art_id)).unwrap_or_default();
-    let (last_url, shown_url) = if shown_url != track.thumbnail {
-        let pair = (shown_url, track.thumbnail.clone());
-        ui.data_mut(|d| d.insert_temp(art_id, pair.clone()));
-        pair
-    } else {
-        (last_url, shown_url)
-    };
-    let key = egui::Id::new(&shown_url).value();
-    let t = theme::appear(ui.ctx(), art_id.with("t"), key, 0.38);
-    if t < 1.0 && last_url.is_some() {
-        widgets::paint_art_faded(ui, &mut app.images, last_url.as_deref(), art, 12.0, false, 1.0 - t);
-    }
-    let settle = art.shrink(art.width() * 0.015 * (1.0 - t));
-    widgets::paint_art_faded(ui, &mut app.images, shown_url.as_deref(), settle, 12.0, false, if last_url.is_some() { t } else { 1.0 });
+    // Room beside the artwork for the card that peeks out from behind it.
+    let room = (art.left() - rect.left() - 24.0, right.left() - art.right() - 16.0);
+    let moved = deck.as_ref().map_or(0.0, |deck| paint_deck(app, ui, deck, art, room));
 
-    let titles = Rect::from_min_size(pos2(art.left(), art.bottom() + 24.0), vec2(art.width(), titles_h - 24.0));
+    let titles = Rect::from_min_size(pos2(art.left() + moved, art.bottom() + 24.0), vec2(art.width(), titles_h - 24.0));
     let mut text = ui.new_child(UiBuilder::new().max_rect(titles).layout(Layout::top_down(Align::Min)));
     text.spacing_mut().item_spacing.y = 4.0;
     // The titles fade in with the new song.
@@ -143,6 +124,265 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect, rise: f32, foot: f32, chrome
         SideTab::UpNext => side_panel::queue(app, &mut side),
         SideTab::Lyrics => lyrics::show(app, &mut side, true),
     }
+}
+
+// ---- The deck ---------------------------------------------------------------
+
+/// How long before the next song comes in its artwork starts to peek out
+/// from behind this one's, in seconds.
+const PEEK_LEAD: f64 = 8.0;
+/// How long the card behind takes to slide out, or back in.
+const PEEK_SECS: f32 = 0.9;
+/// The card behind, to the size of the one in front...
+const BEHIND: f32 = 0.9;
+/// ...poking out by this much of it...
+const POKE: f32 = 0.2;
+/// ...and this much darker.
+const DIM: f32 = 0.35;
+/// How far the card going slides away, of its size: clear of the one
+/// coming forward, so it never shows through it.
+const SLIDE: f32 = 1.05;
+/// A turn with no crossfade to keep time with: a skip, a gapless change.
+const TURN_SECS: f32 = 0.6;
+
+/// The artwork as a deck of cards. Near a song's end the next one's
+/// artwork peeks out from behind it; as the next song comes in, its card
+/// comes to the front while this one slides away and fades, in time with
+/// the crossfade. Going back, the card before slides in on top instead.
+#[derive(Clone, Default)]
+struct Deck {
+    /// The entry in front, by uid, and its artwork.
+    front: Option<u64>,
+    front_url: Option<String>,
+    /// The entry behind, its artwork, and how far out it is (0 to 1).
+    behind: Option<u64>,
+    behind_url: Option<String>,
+    peek: f32,
+    /// The card behind is wanted soon: its artwork is fetched ahead.
+    warm: bool,
+    /// The pass it was last drawn in.
+    pass: u64,
+    swap: Option<Swap>,
+}
+
+#[derive(Clone)]
+struct Swap {
+    /// The artwork of the card going.
+    leaving: Option<String>,
+    /// The next came forward; otherwise the one before came back.
+    forward: bool,
+    /// How far out the card coming forward already was.
+    peeked: f32,
+    clock: Clock,
+    /// How far along, from 0 to 1, never going back.
+    t: f32,
+}
+
+#[derive(Clone, Copy)]
+enum Clock {
+    /// In time with the crossfade: the song coming in, from its second
+    /// `from`, over `overlap` seconds.
+    Music { from: f64, overlap: f64 },
+    /// On its own, from `since`.
+    Wall { since: f64 },
+}
+
+/// The deck moved on to this frame, `url` the artwork of the song in front.
+fn deal(app: &mut App, ui: &Ui, url: Option<String>) -> Deck {
+    let id = ui.id().with("np-deck");
+    let mut deck: Deck = ui.data(|d| d.get_temp(id)).unwrap_or_default();
+    let pass = ui.ctx().cumulative_pass_nr();
+    // Not drawn last time (the player was closed): nothing to turn from.
+    if deck.pass + 1 < pass {
+        deck = Deck::default();
+    }
+    deck.pass = pass;
+    let now = ui.input(|i| i.time);
+    let dt = ui.input(|i| i.stable_dt).min(0.1);
+
+    let uid = app.queue.current().map(|e| e.uid);
+    if deck.front.is_some() && uid != deck.front {
+        // Back one: the song that was in front comes after this one again.
+        let was = deck.front.and_then(|u| app.queue.index_of(u));
+        let back = deck.behind != uid && matches!((was, app.queue.current), (Some(w), Some(n)) if n + 1 == w);
+        let clock = match app.player.blend() {
+            Some(b) if !back && b.token == app.current_token() && b.overlap.as_secs_f64() >= 0.5 => Clock::Music {
+                from: b.from.as_secs_f64(),
+                overlap: b.overlap.as_secs_f64(),
+            },
+            _ => Clock::Wall { since: now },
+        };
+        let peeked = if deck.behind == uid { deck.peek } else { 0.0 };
+        let leaving = deck.front_url.take();
+        // The same artwork (the next song of one album): nothing to turn.
+        deck.swap = (leaving != url).then_some(Swap { leaving, forward: !back, peeked, clock, t: 0.0 });
+        deck.behind = None;
+        deck.behind_url = None;
+        deck.peek = 0.0;
+    }
+    deck.front = uid;
+    deck.front_url = url;
+
+    if let Some(swap) = &mut deck.swap {
+        let t = match swap.clock {
+            Clock::Music { from, overlap } => {
+                let at = app.position();
+                // Sought back out of the crossfade: it is over.
+                if at < from - 0.5 { 1.0 } else { ((at - from) / overlap) as f32 }
+            }
+            Clock::Wall { since } => (now - since) as f32 / TURN_SECS,
+        };
+        swap.t = swap.t.max(t.clamp(0.0, 1.0));
+        theme::next_frame(ui.ctx());
+    }
+    if deck.swap.as_ref().is_some_and(|s| s.t >= 1.0) {
+        deck.swap = None;
+    }
+
+    // The card behind comes out once the next song is a few seconds off:
+    // where the crossfade has it come in, or else at the end.
+    let mut out = false;
+    deck.warm = false;
+    match app.coming_up().map(|(uid, token, t)| (uid, token, t.thumbnail.clone())) {
+        Some((next, token, next_url)) => {
+            if deck.behind != Some(next) {
+                deck.behind = Some(next);
+                deck.peek = 0.0;
+            }
+            deck.behind_url = next_url;
+            let comes_in = app
+                .player
+                .blend()
+                .filter(|b| token == Some(b.token))
+                .map(|b| b.at.as_secs_f64())
+                .or_else(|| app.duration());
+            if let Some(comes_in) = comes_in {
+                let left = comes_in - app.position();
+                out = left <= PEEK_LEAD && deck.swap.is_none() && deck.behind_url != deck.front_url;
+                deck.warm = left <= PEEK_LEAD + 20.0;
+            }
+        }
+        // Nothing after this: the card behind goes back in, and away.
+        None if deck.peek == 0.0 => {
+            deck.behind = None;
+            deck.behind_url = None;
+        }
+        None => {}
+    }
+    let step = dt / PEEK_SECS;
+    let peek = if out { (deck.peek + step).min(1.0) } else { (deck.peek - step).max(0.0) };
+    if peek != deck.peek || (out && peek < 1.0) {
+        theme::next_frame(ui.ctx());
+    }
+    deck.peek = peek;
+    ui.data_mut(|d| d.insert_temp(id, deck.clone()));
+    deck
+}
+
+/// The deck drawn where the artwork goes, with `room` (to the left, to the
+/// right) free beside it. How far the front card has moved over, for the
+/// titles to keep to it.
+fn paint_deck(app: &mut App, ui: &Ui, deck: &Deck, art: Rect, room: (f32, f32)) -> f32 {
+    let size = art.width();
+    let (left, right) = (room.0.max(0.0), room.1.max(0.0));
+    // The card behind pokes out to the right. The deck stays about where
+    // the artwork was: the front card moves left to make room.
+    let poke = (size * POKE).min(left + right);
+    let shift = (poke * 0.5).max(poke - right).min(left);
+    let poke = poke.min(right + shift);
+    let front_at = |q: f32| art.translate(vec2(-shift * q, 0.0));
+    let behind_at = |q: f32| {
+        let side = size * BEHIND;
+        let edge = front_at(q).right() + poke * q;
+        Rect::from_min_size(pos2(edge - side, art.center().y - side / 2.0), vec2(side, side))
+    };
+    // One image for each card however large it is drawn.
+    let px = (size * ui.ctx().pixels_per_point()).round() as u32;
+    let images = &mut app.images;
+    if deck.warm
+        && let Some(url) = &deck.behind_url
+    {
+        images.get(url, px);
+        images.backdrop(url);
+    }
+    let card = |images: &mut Images, url: Option<&str>, rect: Rect, dim: f32, opacity: f32| {
+        if opacity <= 0.0 {
+            return;
+        }
+        let k = rect.width() / size.max(1.0);
+        let shadow = egui::Shadow {
+            offset: [0, (18.0 * k) as i8],
+            blur: (60.0 * k) as u8,
+            spread: 0,
+            color: Color32::from_black_alpha((150.0 * opacity) as u8),
+        };
+        ui.painter().add(shadow.as_shape(rect, CornerRadius::same((12.0 * k) as u8)));
+        let tint = Color32::from_gray(((1.0 - dim) * 255.0) as u8).gamma_multiply(opacity);
+        widgets::paint_art_tinted(ui, images, url, rect, 12.0 * k, false, tint, Some(px));
+    };
+
+    let turning = deck.swap.is_some();
+    let (last, shown, t) = art_change(ui, deck.front_url.as_deref(), turning);
+    match &deck.swap {
+        None => {
+            let q = smooth(deck.peek);
+            if q > 0.0 {
+                card(images, deck.behind_url.as_deref(), behind_at(q), DIM, q);
+            }
+            // The front card's artwork arriving late fades in over what it
+            // showed, settling from a touch smaller.
+            let front = front_at(q);
+            if t < 1.0 && last.is_some() {
+                card(images, last.as_deref(), front, 0.0, 1.0 - t);
+            }
+            let settle = front.shrink(front.width() * 0.015 * (1.0 - t));
+            card(images, shown.as_deref(), settle, 0.0, if last.is_some() { t } else { 1.0 });
+            front.left() - art.left()
+        }
+        Some(swap) if swap.forward => {
+            // The card behind comes forward and brightens; the one in
+            // front is dealt off to the left, fading once it is clear.
+            let e = smooth(swap.t);
+            let q = smooth(swap.peeked);
+            card(images, deck.front_url.as_deref(), behind_at(q).lerp_towards(&art, e), DIM * (1.0 - e), 1.0);
+            let going = front_at(q).translate(vec2(-size * SLIDE * e, 0.0)).scale_from_center(1.0 - 0.06 * e);
+            card(images, swap.leaving.as_deref(), going, 0.0, 1.0 - smooth((swap.t - 0.45) / 0.5));
+            0.0
+        }
+        Some(swap) => {
+            // Back: the card before slides in on top from the left, and the
+            // one that was in front goes behind it.
+            let e = smooth(swap.t);
+            card(images, swap.leaving.as_deref(), art.lerp_towards(&behind_at(0.0), e), DIM * e, 1.0);
+            let coming = art.translate(vec2(-size * SLIDE * (1.0 - e), 0.0)).scale_from_center(1.0 - 0.06 * (1.0 - e));
+            card(images, deck.front_url.as_deref(), coming, 0.0, smooth(swap.t / 0.5));
+            0.0
+        }
+    }
+}
+
+/// The front card's artwork changing under it, as when it arrives late:
+/// the last one, the one shown, and how far that has faded in. While the
+/// deck turns, the card coming forward is the change, and nothing fades
+/// on it after.
+fn art_change(ui: &Ui, url: Option<&str>, turning: bool) -> (Option<String>, Option<String>, f32) {
+    let id = ui.id().with("np-art");
+    let (last, shown): (Option<String>, Option<String>) = ui.data(|d| d.get_temp(id)).unwrap_or_default();
+    let (last, shown) = if shown.as_deref() != url || (turning && last.is_some()) {
+        let pair = (if turning { None } else { shown }, url.map(str::to_owned));
+        ui.data_mut(|d| d.insert_temp(id, pair.clone()));
+        pair
+    } else {
+        (last, shown)
+    };
+    let t = theme::appear(ui.ctx(), id.with("t"), egui::Id::new(&shown).value(), 0.38);
+    (last, shown, t)
+}
+
+/// Eases in and out, for the deck's moves.
+fn smooth(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
 }
 
 /// The stream playing ("OPUS 257 KB/S"), small and quiet. On a quick
@@ -289,10 +529,12 @@ fn ease_out_back(t: f32) -> f32 {
 }
 
 /// The artwork's colours, blurred across the window and darkened so text
-/// reads on them, fading from the last song's when the song changes.
-/// One textured pass per image: the darkening, and the deepening toward the
-/// player bar, are the mesh's vertex colours rather than layers on top.
-fn backdrop(app: &mut App, ui: &Ui, rect: Rect, url: Option<&str>) {
+/// reads on them, fading from the last song's when the song changes (as
+/// far as `turning` when the deck is turning to it, in time with the
+/// crossfade). One textured pass per image: the darkening, and the
+/// deepening toward the player bar, are the mesh's vertex colours rather
+/// than layers on top.
+fn backdrop(app: &mut App, ui: &Ui, rect: Rect, url: Option<&str>, turning: Option<f32>) {
     let painter = ui.painter_at(rect);
     let id = ui.id().with("np-backdrop");
     let (mut current, mut previous): (Option<String>, Option<String>) = ui.data(|d| d.get_temp(id)).unwrap_or_default();
@@ -334,7 +576,8 @@ fn backdrop(app: &mut App, ui: &Ui, rect: Rect, url: Option<&str>) {
     let old = previous.as_deref().and_then(|u| images.backdrop(u));
     match (&fresh, &old) {
         (Some(texture), old) => {
-            let t = ui.ctx().animate_bool_with_time(id.with(current.as_deref()), true, 0.8);
+            let t = theme::appear(ui.ctx(), id.with("t"), egui::Id::new(current.as_deref()).value(), 0.8);
+            let t = turning.map_or(t, |turn| turn.min(t));
             if t < 1.0 {
                 match old {
                     Some(old) => paint(old, 1.0),

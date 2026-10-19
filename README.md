@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="../../releases/latest"><img src="https://img.shields.io/badge/download-v0.3.2-ff0033?style=flat-square" alt="Download v0.3.2"></a>
+  <a href="../../releases/latest"><img src="https://img.shields.io/badge/download-v0.3.3-ff0033?style=flat-square" alt="Download v0.3.3"></a>
   <img src="https://img.shields.io/badge/Windows-x64-0078D4?style=flat-square&logo=windows11&logoColor=white" alt="Windows x64">
   <img src="https://img.shields.io/badge/Rust-2024-B7410E?style=flat-square&logo=rust&logoColor=white" alt="Rust 2024">
   <img src="https://img.shields.io/badge/UI-egui%20%2B%20OpenGL-1f1f1f?style=flat-square" alt="egui and OpenGL">
@@ -74,6 +74,11 @@ sounds as good as your account allows.
 - **A full-window player**: the artwork large over a wash of its own colours,
   the year it came out beside the title, with what plays next or the lyrics
   beside it.
+- **The artwork as a deck of cards.** In the last seconds of a song the
+  next one's artwork peeks out from behind it; as the next comes in, its
+  card comes to the front while this one is dealt away, in time with the
+  crossfade, the colours behind changing with it. A skip turns the deck
+  quickly, and going back brings the card before in on top.
 - **Full screen** (F11): the player alone, the bar and the pointer slipping
   away while the mouse rests and back the moment it moves.
 
@@ -229,6 +234,7 @@ cargo build --release
 | Themes | `src/theme.rs` | four palettes; the colours are read from the one chosen, so a change shows on the next frame |
 | Visualiser | `src/visualiser.rs`, `src/ui/visualiser.rs` | the audio callback's last moments in a lock-free ring (the middle of the stereo picture and its sides), an FFT into bands by octaves under a scale that follows the music, each band's loudness and its hits (how far it jumps above its own recent level), weighted for the drums or the voice, drawn as meshes |
 | App state | `src/app.rs`, `src/queue.rs` | navigation, the queue, what plays next, preloading, the switch to Premium |
+| Deck of artwork | `src/ui/now_playing.rs` | the next song's card out from behind once it is a few seconds off, and the turn timed by the song coming in: where the crossfade has it start and for how long the two overlap, which the player records as it joins them |
 | Network | `src/backend.rs` | a two-thread tokio runtime; the interface never waits on it |
 | API | `src/api/` | InnerTube (`WEB_REMIX`) requests and the parsers that turn renderers into the model; LRCLIB for synced lyrics |
 | Streams | `src/stream.rs` | finds a stream for a song (below) |

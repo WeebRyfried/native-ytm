@@ -51,14 +51,21 @@ pub fn paint_art(ui: &Ui, images: &mut Images, url: Option<&str>, rect: Rect, ra
 
 /// The same, at `opacity`, for crossfades.
 pub fn paint_art_faded(ui: &Ui, images: &mut Images, url: Option<&str>, rect: Rect, radius: f32, round: bool, opacity: f32) {
+    paint_art_tinted(ui, images, url, rect, radius, round, Color32::WHITE.gamma_multiply(opacity), None);
+}
+
+/// The same, multiplied by `tint` (darker, fainter or both), its image
+/// fetched at `px` (else at `rect`'s size): artwork that grows keeps one
+/// image all the way.
+pub fn paint_art_tinted(ui: &Ui, images: &mut Images, url: Option<&str>, rect: Rect, radius: f32, round: bool, tint: Color32, px: Option<u32>) {
     let painter = ui.painter_at(rect.expand(1.0));
-    let tint = Color32::WHITE.gamma_multiply(opacity);
+    let opacity = f32::from(tint.a()) / 255.0;
     let corner = if round {
         CornerRadius::same((rect.width() / 2.0).min(255.0) as u8)
     } else {
         CornerRadius::same(radius.min(255.0) as u8)
     };
-    let px = (rect.width().max(rect.height()) * ui.ctx().pixels_per_point()).round() as u32;
+    let px = px.unwrap_or_else(|| (rect.width().max(rect.height()) * ui.ctx().pixels_per_point()).round() as u32);
     let texture = url.and_then(|url| images.get_or_smaller(url, px));
     match texture {
         Some(texture) => {

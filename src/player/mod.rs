@@ -152,6 +152,19 @@ pub enum State {
     Buffering,
 }
 
+/// A crossfade worked out: where in the song playing the next comes in,
+/// and how long the two are heard together.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Blend {
+    /// The song coming in.
+    pub token: u64,
+    /// The song ending's time where the next comes in.
+    pub at: Duration,
+    /// The next song's time it comes in from (its silence skipped).
+    pub from: Duration,
+    pub overlap: Duration,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Status {
     /// The token loaded (or heard, once a preloaded one takes over).
@@ -169,6 +182,8 @@ struct Shared {
     source: Mutex<Option<Arc<source::Shared>>>,
     /// Where a seek is going, shown until the device catches up.
     seek_to: Mutex<Option<Duration>>,
+    /// The last crossfade worked out.
+    blend: Mutex<Option<Blend>>,
 }
 
 /// The app's handle on the engine thread. Cheap to call every frame.
@@ -196,6 +211,7 @@ impl Player {
             status: Mutex::new(Status::default()),
             source: Mutex::new(None),
             seek_to: Mutex::new(None),
+            blend: Mutex::new(None),
         });
         let report = Arc::new(Report::default());
         let volume = Arc::new(AtomicU32::new(curve(0.8).to_bits()));
@@ -352,6 +368,12 @@ impl Player {
 
     pub fn status(&self) -> Status {
         self.shared.status.lock().clone()
+    }
+
+    /// The last crossfade worked out, once the next song's start has been
+    /// looked at: some seconds before it is heard.
+    pub fn blend(&self) -> Option<Blend> {
+        *self.shared.blend.lock()
     }
 
     /// Where the heard track is.
@@ -648,6 +670,7 @@ impl Engine {
                 self.current = None;
                 self.next = None;
                 self.incoming = None;
+                *self.shared.blend.lock() = None;
                 self.cut();
                 self.report.drained.store(false, Ordering::SeqCst);
                 self.report.audible.store(0, Ordering::SeqCst);
@@ -754,6 +777,7 @@ impl Engine {
                 self.current = None;
                 self.next = None;
                 self.incoming = None;
+                *self.shared.blend.lock() = None;
                 self.cut();
                 self.report.audible.store(0, Ordering::SeqCst);
                 *self.shared.source.lock() = None;
@@ -1284,6 +1308,13 @@ impl Engine {
         let overlap = plan.overlap * channels;
         if let Some(current) = &mut self.current {
             current.deliver(&self.queue, &held[..solo], out_rate, channels);
+            // Where the two meet, for the artwork to follow.
+            *self.shared.blend.lock() = Some(Blend {
+                token,
+                at: current.next_time,
+                from: frames_to_time(plan.skip, out_rate),
+                overlap: frames_to_time(plan.overlap, out_rate),
+            });
         }
         let skip = (plan.skip * channels).min(head.len());
         let next = &head[skip..];

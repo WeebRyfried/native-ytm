@@ -1698,6 +1698,20 @@ impl App {
         self.current_token
     }
 
+    /// The entry that plays after this one, by its uid, with the token it
+    /// was preloaded under once it has been: the card waiting behind the
+    /// artwork in the full player.
+    pub fn coming_up(&self) -> Option<(u64, Option<u64>, &Track)> {
+        if let Some((token, uid)) = self.preload
+            && let Some(index) = self.queue.index_of(uid)
+        {
+            return Some((uid, Some(token), &self.queue.entries[index].track));
+        }
+        let next = self.queue.next_index(self.settings.repeat, false).filter(|&i| Some(i) != self.queue.current)?;
+        let entry = self.queue.entries.get(next)?;
+        Some((entry.uid, None, &entry.track))
+    }
+
     /// A switch to the better stream is heard once playback reaches it.
     fn upgrade_tick(&mut self) {
         let position = self.position();
