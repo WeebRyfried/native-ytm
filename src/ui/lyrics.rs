@@ -1,6 +1,7 @@
 //! Lyrics, the way Apple Music shows them: synced lines follow the song,
-//! the line being sung bright and the rest dim, the view gliding to keep
-//! it in place, three dots breathing through instrumental breaks. Lyrics
+//! the lines being sung bright (more than one when singers overlap) and
+//! the rest dim, the view gliding to keep them in place, three dots
+//! breathing through instrumental breaks. Lyrics
 //! timed by the word light up as each word is sung, a soft edge sweeping
 //! through it; backing vocals sit small under their line, and a translation
 //! under it all when there is one. When more than one singer is named, the
@@ -95,13 +96,31 @@ struct View {
     from: f32,
     to: f32,
     glide_start: f64,
-    /// The line lit now, the one lit before it, and when that changed.
-    line: Option<usize>,
-    previous: Option<usize>,
-    changed_at: f64,
     hand_until: f64,
     by_hand: bool,
     placed: bool,
+}
+
+/// When each line is over: once it has ended and the next has started
+/// (the last never is). A line is sung from its time until then, so lines
+/// sung over one another are sung, and lit, together.
+fn overs(lines: &[LyricLine]) -> Vec<f64> {
+    (0..lines.len())
+        .map(|i| match lines.get(i + 1) {
+            Some(next) => lines[i].end.map_or(next.time, |end| end.max(next.time)),
+            None => f64::INFINITY,
+        })
+        .collect()
+}
+
+/// How lit a line is at `position` (0 to 1): coming in over [`LIGHT`] from
+/// its time, going out over it once the line is `over`. By the song's own
+/// time, so it holds still while the song is paused.
+fn light(time: f64, over: f64, position: f64) -> f32 {
+    let ramp = |since: f64| theme::ease_out((since / f64::from(LIGHT)) as f32);
+    let on = if position >= time { ramp(position - time) } else { 0.0 };
+    let off = if position >= over { ramp(position - over) } else { 0.0 };
+    (on * (1.0 - off)).clamp(0.0, 1.0)
 }
 
 pub fn show(app: &mut App, ui: &mut Ui, big: bool) {
@@ -443,7 +462,9 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
     let heard = app.position() - offset;
     let position = heard + LEAD;
     let playing = app.playing();
-    let current = lines.iter().rposition(|l| l.time <= position);
+    // The lines being sung: one, or more when singers overlap.
+    let over = overs(&lines);
+    let active: Vec<usize> = (0..lines.len()).filter(|&i| lines[i].time <= position && position < over[i]).collect();
     let dots_h = size * 0.9;
 
     // Where each line sits, from the top of the lyrics.
@@ -541,7 +562,7 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
         match &galleys[i] {
             Some(laid) => laid.height,
             // A break takes room only while it is the one playing.
-            None if current == Some(i) => dots_h,
+            None if active.contains(&i) => dots_h,
             None => 0.0,
         }
     };
@@ -554,28 +575,29 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
     }
     let total = y;
 
-    // Follow the line being sung, unless scrolled by hand a moment ago.
+    // Follow the lines being sung (the middle of them, those still being
+    // sung, as Better Lyrics does), unless scrolled by hand a moment ago.
     let id = ui.id().with(("lyrics-view", video_id));
     let mut view: View = ui.data(|d| d.get_temp(id)).unwrap_or_default();
     let now = ui.input(|i| i.time);
     let anchor = rect.height() * if big { 0.36 } else { 0.3 };
-    let focus = current.unwrap_or(0);
-    let target = tops.get(focus).copied().unwrap_or(0.0) + height_of(focus) / 2.0 - anchor;
+    let singing: Vec<usize> = active
+        .iter()
+        .enumerate()
+        .filter(|&(k, &i)| k + 1 == active.len() || lines[i].end.is_none_or(|end| heard < end))
+        .map(|(_, &i)| i)
+        .collect();
+    let focus: Vec<usize> = if singing.is_empty() { vec![0] } else { singing };
+    let middle = focus.iter().map(|&i| tops.get(i).copied().unwrap_or(0.0) + height_of(i) / 2.0).sum::<f32>() / focus.len() as f32;
+    let target = middle - anchor;
     if !view.placed {
         view = View {
             offset: target,
             from: target,
             to: target,
-            line: current,
-            changed_at: now - f64::from(LIGHT),
             placed: true,
             ..View::default()
         };
-    }
-    if current != view.line {
-        view.previous = view.line;
-        view.line = current;
-        view.changed_at = now;
     }
     if response.contains_pointer() {
         let scroll = ui.input(|i| i.smooth_scroll_delta.y);
@@ -604,16 +626,13 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
             theme::next_frame(ui.ctx());
         }
     }
-    let lit = theme::ease_out((now - view.changed_at) as f32 / LIGHT);
-    if lit < 1.0 {
-        theme::next_frame(ui.ctx());
-    }
     ui.data_mut(|d| d.insert_temp(id, view));
 
     let pointer = ui.ctx().pointer_hover_pos().filter(|p| rect.contains(*p) && response.contains_pointer());
     let fade = if big { 72.0 } else { 40.0 };
     let mut clicked_line = None;
     let mut sweeping = false;
+    let mut lighting = false;
     for (i, line) in lines.iter().enumerate() {
         let h = height_of(i);
         if h == 0.0 {
@@ -624,15 +643,11 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
             continue;
         }
         let line_rect = Rect::from_min_size(pos2(rect.left() + pad, top), vec2(width, h));
-        let is_current = current == Some(i);
-        // The line coming in brightens as the one before it dims.
-        let alpha = if is_current {
-            0.32 + 0.68 * lit
-        } else if view.previous == Some(i) {
-            1.0 - 0.68 * lit
-        } else {
-            0.32
-        };
+        let is_active = active.contains(&i);
+        // A line coming in brightens, one that is over dims.
+        let lit = light(line.time, over[i], position);
+        lighting |= lit > 0.0 && lit < 1.0;
+        let alpha = 0.32 + 0.68 * lit;
         // Lines fade out toward the edges of the view.
         let edge = ((top - rect.top()) / fade).min((rect.bottom() - top - h) / fade).clamp(0.0, 1.0);
         let reach = 0.25 + 0.75 * edge;
@@ -650,13 +665,13 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
                         clicked_line = Some(line.time);
                     }
                 }
-                if !laid.timed.is_empty() && is_current && !line.text.is_empty() {
-                    // Being sung, timed by the word: lit as far as the singing
-                    // has come, the rest a little brighter than the lines
-                    // around it.
+                if !laid.timed.is_empty() && lit > 0.0 && !line.text.is_empty() {
+                    // Being sung (or just over), timed by the word: lit as far
+                    // as the singing has come, the rest a little brighter
+                    // than the lines around it.
                     let upto = sung(&laid.timed, heard);
                     let dim = ink((0.32 + 0.14 * lit) * reach);
-                    let bright = ink(reach);
+                    let bright = ink(alpha * reach);
                     paint_sung(&painter, line_rect.min, &laid.main.galley, upto, dim, bright);
                     for ruby in &laid.main.readings {
                         let color = if upto > ruby.at as f32 { bright } else { dim };
@@ -667,14 +682,14 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
                         );
                     }
                     let end = line.end.unwrap_or_else(|| line.words.last().map_or(line.time, |w| w.end));
-                    sweeping |= heard < end + 0.1;
+                    sweeping |= is_active && heard < end + 0.1;
                 } else if !line.text.is_empty() {
                     paint_line(&painter, line_rect.min, &laid.main, ink(alpha * reach));
                 }
                 if let Some((galley, y, timed)) = &laid.backing {
                     let at = line_rect.min + vec2(0.0, *y);
                     // Swept as sung only when the line is timed by the word.
-                    if is_current && !timed.is_empty() && !laid.timed.is_empty() {
+                    if is_active && !timed.is_empty() && !laid.timed.is_empty() {
                         let upto = sung(timed, heard);
                         paint_sung(&painter, at, galley, upto, ink(0.26 * reach), ink(0.78 * reach));
                         sweeping |= timed.last().is_some_and(|t| heard < t.1 + 0.1);
@@ -719,8 +734,9 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
         view.to = f32::NAN;
         ui.data_mut(|d| d.insert_temp(id, view));
     }
-    if playing && sweeping {
-        // A word being sung: every frame, at no more than 60 a second.
+    if playing && (sweeping || lighting) {
+        // A word being sung, or a line lighting: every frame, at no more
+        // than 60 a second.
         theme::next_frame(ui.ctx());
     } else if playing
         && let Some(next) = lines.iter().find(|l| l.time > position)
@@ -892,6 +908,32 @@ mod tests {
         assert_eq!(old.singer(), Voice::Second);
         assert!(duet(&[line(Voice::First, "a"), old]));
         assert_eq!((across(Voice::First), across(Voice::Second), across(Voice::Third), across(Voice::Together)), (0.0, 1.0, 1.0, 0.5));
+    }
+
+    #[test]
+    fn lines_sung_over_one_another_are_sung_together() {
+        let line = |time: f64, end: Option<f64>| LyricLine { time, end, text: "x".into(), ..LyricLine::default() };
+        // 打上花火's round: each voice comes in before the other is done.
+        let round = [line(158.42, Some(160.55)), line(159.49, Some(161.52)), line(160.86, Some(162.66)), line(170.0, Some(172.0))];
+        let over = overs(&round);
+        assert_eq!(over[..3], [160.55, 161.52, 170.0]);
+        assert_eq!(over[3], f64::INFINITY);
+        let active = |at: f64| (0..round.len()).filter(|&i| round[i].time <= at && at < over[i]).collect::<Vec<_>>();
+        assert_eq!(active(158.5), [0]);
+        assert_eq!(active(160.0), [0, 1]);
+        assert_eq!(active(161.0), [1, 2]);
+        // An ended line stays lit until the next comes in.
+        assert_eq!(active(165.0), [2]);
+        // Timed by the line alone: one at a time, as ever.
+        let plain = [line(1.0, None), line(5.0, None), line(9.0, None)];
+        let over = overs(&plain);
+        assert_eq!(over[..2], [5.0, 9.0]);
+        // Lit coming in, dimmed once over, by the song's own time.
+        assert_eq!(light(5.0, 9.0, 4.0), 0.0);
+        assert!(light(5.0, 9.0, 5.1) > 0.0 && light(5.0, 9.0, 5.1) < 1.0);
+        assert_eq!(light(5.0, 9.0, 7.0), 1.0);
+        assert!(light(5.0, 9.0, 9.1) < 1.0);
+        assert_eq!(light(5.0, 9.0, 10.0), 0.0);
     }
 
     #[test]
