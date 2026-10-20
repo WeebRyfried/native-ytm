@@ -4,6 +4,12 @@ What changed in each version of Native YTM, newest first. After an update,
 the app shows what is new since the version it had; this file is built into
 it for that (src/changelog.rs).
 
+## 0.3.10 — 21 October 2026
+
+Fades that stay smooth all the way out.
+
+- **No more sudden dimming halfway through a fade.** As a sung line faded, the lyrics moving on to the next line carried it into the dimmer edge at the top of the view, which darkened it all at once on top of the fade. A line still fading now keeps clear of that, and dims only as its own fade has it, at an even pace from start to end.
+
 ## 0.3.9 — 21 October 2026
 
 Lyrics that fade out as fast as they were sung.

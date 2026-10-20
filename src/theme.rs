@@ -224,6 +224,22 @@ pub fn ease_in_out(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// Eases in and out over the first and last fifth, at an even pace between
+/// (a fifth faster than going straight through): for fading out, so that no
+/// part of the fade rushes, as the middle of [`ease_in_out`] does.
+pub fn ease_even(t: f32) -> f32 {
+    const EASE: f32 = 0.2;
+    let t = t.clamp(0.0, 1.0);
+    let top = 1.0 / (1.0 - EASE);
+    if t < EASE {
+        top * t * t / (2.0 * EASE)
+    } else if t <= 1.0 - EASE {
+        top * (t - EASE / 2.0)
+    } else {
+        1.0 - top * (1.0 - t) * (1.0 - t) / (2.0 * EASE)
+    }
+}
+
 /// How far, from 0 to 1 and eased, something has come in since `key` last
 /// changed in `slot` (a new page, a new song), over `secs`. Frames keep
 /// coming only until it is done.

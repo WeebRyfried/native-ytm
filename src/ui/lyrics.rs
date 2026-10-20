@@ -120,12 +120,12 @@ fn overs(lines: &[LyricLine]) -> Vec<f64> {
 }
 
 /// How lit a line (or its backing vocals) is at `position` (0 to 1):
-/// coming in over [`LIGHT`] from its time, and once `over`, going out
-/// gently (eased in and out) over `out` seconds. By the song's own time, so
-/// it holds still while the song is paused.
+/// coming in over [`LIGHT`] from its time, and once `over`, going out at an
+/// even pace, eased at its ends, over `out` seconds. By the song's own time,
+/// so it holds still while the song is paused.
 fn light(time: f64, over: f64, position: f64, out: f32) -> f32 {
     let on = if position >= time { theme::ease_out(((position - time) / f64::from(LIGHT)) as f32) } else { 0.0 };
-    let off = if position >= over { theme::ease_in_out(((position - over) / f64::from(out.max(0.01))) as f32) } else { 0.0 };
+    let off = if position >= over { theme::ease_even(((position - over) / f64::from(out.max(0.01))) as f32) } else { 0.0 };
     (on * (1.0 - off)).clamp(0.0, 1.0)
 }
 
@@ -676,10 +676,15 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
         // A line coming in brightens, one that is over dims.
         let lit = light(line.time, over[i], position, fade_out(&line.words, line.end.map(|end| (line.time, end, line.text.as_str()))));
         lighting |= lit > 0.0 && lit < 1.0;
-        let alpha = 0.32 + 0.68 * lit;
-        // Lines fade out toward the edges of the view.
+        // Lines fade out toward the edges of the view; but not one still
+        // lit, which the view gliding on would otherwise push into the
+        // edge's fade mid-fade, dimming it all at once. How bright a part of
+        // a line is goes straight from its rest (with the edge's fade) to
+        // its brightest as it lights, so the line dims at the pace of its
+        // own fade and of nothing else.
         let edge = ((top - rect.top()) / fade).min((rect.bottom() - top - h) / fade).clamp(0.0, 1.0);
-        let reach = 0.25 + 0.75 * edge;
+        let at_edge = 0.25 + 0.75 * edge;
+        let tone = |rest: f32, full: f32, lit: f32| rest * at_edge + (full - rest * at_edge) * lit;
         match &galleys[i] {
             Some(laid) => {
                 // Drawn in its singer's colour (white, with one singer).
@@ -699,8 +704,8 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
                     // as the singing has come, the rest a little brighter
                     // than the lines around it.
                     let upto = sung(&laid.timed, heard);
-                    let dim = ink((0.32 + 0.14 * lit) * reach);
-                    let bright = ink(alpha * reach);
+                    let dim = ink(tone(0.32, 0.46, lit));
+                    let bright = ink(tone(0.32, 1.0, lit));
                     paint_sung(&painter, line_rect.min, &laid.main.galley, upto, dim, bright);
                     for ruby in &laid.main.readings {
                         let color = if upto > ruby.at as f32 { bright } else { dim };
@@ -713,7 +718,7 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
                     let end = line.end.unwrap_or_else(|| line.words.last().map_or(line.time, |w| w.end));
                     sweeping |= is_active && heard < end + 0.1;
                 } else if !line.text.is_empty() {
-                    paint_line(&painter, line_rect.min, &laid.main, ink(alpha * reach));
+                    paint_line(&painter, line_rect.min, &laid.main, ink(tone(0.32, 1.0, lit)));
                 }
                 if let Some((galley, y, timed)) = &laid.backing {
                     let at = line_rect.min + vec2(0.0, *y);
@@ -723,8 +728,7 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
                     let end = line.backing.last().map_or(line.time, |w| w.end);
                     let glow = light(line.time, over[i].max(end + LEAD), position, fade_out(&line.backing, None));
                     lighting |= glow > 0.0 && glow < 1.0;
-                    let rest = 0.32 * 0.7;
-                    let level = |lit: f32| ink((rest + (lit - rest) * glow) * reach);
+                    let level = |full: f32| ink(tone(0.32 * 0.7, full, glow));
                     // Swept as sung only when the line is timed by the word.
                     if !timed.is_empty() && !laid.timed.is_empty() {
                         paint_sung(&painter, at, galley, sung(timed, heard), level(0.26), level(0.78));
@@ -734,7 +738,7 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
                     }
                 }
                 if let Some((galley, y)) = &laid.translation {
-                    painter.galley_with_override_text_color(line_rect.min + vec2(0.0, *y), galley.clone(), ink(alpha * 0.62 * reach));
+                    painter.galley_with_override_text_color(line_rect.min + vec2(0.0, *y), galley.clone(), ink(tone(0.32 * 0.62, 0.62, lit)));
                 }
             }
             None => {
@@ -1002,6 +1006,13 @@ mod tests {
         assert!((light(10.0, over, over + f64::from(slow) / 2.0, slow) - 0.5).abs() < 1e-3);
         assert_eq!(light(10.0, over, over + f64::from(slow), slow), 0.0);
         assert!(light(10.0, over, over + 0.3, slow) > light(10.0, over, over + 0.3, quick));
+        // At an even pace through the middle: no part of it rushes.
+        let speed = |at: f64| (light(10.0, over, at, slow) - light(10.0, over, at + step, slow)) as f64 / step;
+        let even = 1.0 / (0.8 * f64::from(slow));
+        for k in 0..6 {
+            let at = over + f64::from(slow) * (0.25 + 0.1 * f64::from(k));
+            assert!((speed(at) - even).abs() < 0.02 * even, "even at {at}");
+        }
     }
 
     #[test]
