@@ -4,6 +4,13 @@ What changed in each version of Native YTM, newest first. After an update,
 the app shows what is new since the version it had; this file is built into
 it for that (src/changelog.rs).
 
+## 0.3.11 — 21 October 2026
+
+Fades that really go all the way down smoothly.
+
+- **No more drop at the end of a fade.** A line timed by the word was drawn twice while it faded, dim under bright, and the two see-through layers added up: near the end of its fade it showed at about half again its resting brightness, then fell to it in one frame. Each part of a line is now drawn once, in its one colour, so it fades all the way down evenly. Backing vocals the same.
+- **Lines dim toward the edges smoothly too.** As the view moves on, lines carried into the dimmer top and bottom of the lyrics get there over most of a second, instead of as fast as the view's glide.
+
 ## 0.3.10 — 21 October 2026
 
 Fades that stay smooth all the way out.

@@ -94,6 +94,9 @@ const LIGHT: f32 = 0.35;
 const FADE_WORDS: f64 = 2.5;
 const FADE_MIN: f32 = 0.3;
 const FADE_MAX: f32 = 2.0;
+/// How long a line takes to dim (or brighten) toward the view's edges as
+/// the view moves on.
+const EDGE_EASE: f32 = 0.8;
 
 #[derive(Clone, Copy, Default)]
 struct View {
@@ -117,6 +120,38 @@ fn overs(lines: &[LyricLine]) -> Vec<f64> {
             None => f64::INFINITY,
         })
         .collect()
+}
+
+/// How far a line is into the view's edges' fade (0 at the very edge, 1
+/// clear of it), eased from one place to the next.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Edge {
+    from: f32,
+    to: f32,
+    since: f64,
+}
+
+impl Edge {
+    fn at(&self, now: f64) -> f32 {
+        let t = ((now - self.since) / f64::from(EDGE_EASE)) as f32;
+        self.from + (self.to - self.from) * theme::ease_even(t)
+    }
+
+    /// Where a line is in the edges' fade now, heading for `target`: from
+    /// wherever it was, over [`EDGE_EASE`] at an even pace, so the view
+    /// moving on never dims a line all at once; at once when `at_once` (the
+    /// view scrolled by hand, which the fade follows as the hand moves).
+    /// Also whether it is still on its way.
+    fn ease(slot: &mut Option<Edge>, target: f32, now: f64, at_once: bool) -> (f32, bool) {
+        let edge = slot.get_or_insert(Edge { from: target, to: target, since: now });
+        if at_once {
+            *edge = Edge { from: target, to: target, since: now };
+        } else if (edge.to - target).abs() > 1e-3 {
+            *edge = Edge { from: edge.at(now), to: target, since: now };
+        }
+        let value = edge.at(now);
+        (value, (value - edge.to).abs() > 1e-4)
+    }
 }
 
 /// How lit a line (or its backing vocals) is at `position` (0 to 1):
@@ -347,45 +382,73 @@ fn sung(spans: &[Span], time: f64) -> f32 {
 }
 
 /// Paints `galley` at `at` dim, and bright as far as `upto` (a character
-/// index, see [`sung`]), the edge between them soft.
+/// index, see [`sung`]), the edge between them soft. Each part is painted
+/// once, in its one colour: the colours are see-through, so dim under
+/// bright would add up to more than either (a fading line drawn half again
+/// as bright as it should be, then dropping when it stops being swept).
 fn paint_sung(painter: &egui::Painter, at: Pos2, galley: &Arc<Galley>, upto: f32, dim: Color32, bright: Color32) {
-    painter.galley_with_override_text_color(at, galley.clone(), dim);
     if upto <= 0.0 {
+        painter.galley_with_override_text_color(at, galley.clone(), dim);
         return;
     }
     let total = galley.job.text.chars().count();
     let whole = upto.floor() as usize;
-    let (edge_row, edge_x) = if whole >= total {
-        (usize::MAX, 0.0)
-    } else {
-        let a = galley.pos_from_cursor(egui::text::CCursor::new(whole));
-        let row = galley.rows.iter().position(|r| a.center().y >= r.rect().min.y - 0.5 && a.center().y <= r.rect().max.y + 0.5).unwrap_or(0);
-        let b = galley.pos_from_cursor(egui::text::CCursor::new(whole + 1));
-        let next_x = if (a.min.y - b.min.y).abs() < 1.0 { b.min.x } else { galley.rows[row].rect().max.x };
-        (row, a.min.x + (next_x - a.min.x) * upto.fract())
-    };
+    if whole >= total {
+        painter.galley_with_override_text_color(at, galley.clone(), bright);
+        return;
+    }
+    let a = galley.pos_from_cursor(egui::text::CCursor::new(whole));
+    let edge_row = galley.rows.iter().position(|r| a.center().y >= r.rect().min.y - 0.5 && a.center().y <= r.rect().max.y + 0.5).unwrap_or(0);
+    let b = galley.pos_from_cursor(egui::text::CCursor::new(whole + 1));
+    let next_x = if (a.min.y - b.min.y).abs() < 1.0 { b.min.x } else { galley.rows[edge_row].rect().max.x };
+    let x = at.x + a.min.x + (next_x - a.min.x) * upto.fract();
     let clip = painter.clip_rect();
-    for (i, row) in galley.rows.iter().enumerate() {
-        if i > edge_row {
-            break;
+    let paint = |area: Rect, color: Color32| {
+        let area = area.intersect(clip);
+        if area.is_positive() {
+            painter.with_clip_rect(area).galley_with_override_text_color(at, galley.clone(), color);
         }
-        let rect = row.rect().translate(at.to_vec2()).expand2(vec2(4.0, 2.0));
-        if i < edge_row {
-            painter.with_clip_rect(rect.intersect(clip)).galley_with_override_text_color(at, galley.clone(), bright);
-            continue;
-        }
-        let x = at.x + edge_x;
-        let filled = Rect::from_min_max(rect.min, pos2(x, rect.max.y));
-        painter.with_clip_rect(filled.intersect(clip)).galley_with_override_text_color(at, galley.clone(), bright);
-        // The soft edge: slivers fading from bright to dim.
-        const SLIVERS: usize = 5;
-        const WIDE: f32 = 2.5;
-        for k in 0..SLIVERS {
-            let t = 1.0 - (k as f32 + 1.0) / (SLIVERS as f32 + 1.0);
-            let sliver = Rect::from_min_max(pos2(x + WIDE * k as f32, rect.min.y), pos2(x + WIDE * (k as f32 + 1.0), rect.max.y));
-            painter.with_clip_rect(sliver.intersect(clip)).galley_with_override_text_color(at, galley.clone(), bright.gamma_multiply(t));
+    };
+    let rows: Vec<(f32, f32)> = galley.rows.iter().map(|r| (r.rect().min.y, r.rect().max.y)).collect();
+    // The soft edge: slivers going from bright to dim.
+    const SLIVERS: usize = 5;
+    const WIDE: f32 = 2.5;
+    for (i, (top, bottom)) in bands(&rows).into_iter().enumerate() {
+        let band = |left: f32, right: f32| Rect::from_min_max(pos2(left, at.y + top), pos2(right, at.y + bottom));
+        let (far_left, far_right) = (clip.left() - 1.0, clip.right() + 1.0);
+        match i.cmp(&edge_row) {
+            std::cmp::Ordering::Less => paint(band(far_left, far_right), bright),
+            std::cmp::Ordering::Greater => paint(band(far_left, far_right), dim),
+            std::cmp::Ordering::Equal => {
+                paint(band(far_left, x), bright);
+                for k in 0..SLIVERS {
+                    let t = 1.0 - (k as f32 + 1.0) / (SLIVERS as f32 + 1.0);
+                    paint(band(x + WIDE * k as f32, x + WIDE * (k as f32 + 1.0)), mix(dim, bright, t));
+                }
+                paint(band(x + WIDE * SLIVERS as f32, far_right), dim);
+            }
         }
     }
+}
+
+/// The rows of a galley (each its top and bottom) as bands that meet
+/// halfway between them, the first and last running on: each row's own,
+/// with nothing in two of them.
+fn bands(rows: &[(f32, f32)]) -> Vec<(f32, f32)> {
+    (0..rows.len())
+        .map(|i| {
+            let top = if i == 0 { -1e6 } else { (rows[i - 1].1 + rows[i].0) / 2.0 };
+            let bottom = if i + 1 == rows.len() { 1e6 } else { (rows[i].1 + rows[i + 1].0) / 2.0 };
+            (top, bottom)
+        })
+        .collect()
+}
+
+/// `a` going toward `b` by `t`, premultiplied as egui's colours are.
+fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+    let (a, b) = (a.to_array(), b.to_array());
+    let c = |k: usize| (f32::from(a[k]) + (f32::from(b[k]) - f32::from(a[k])) * t.clamp(0.0, 1.0)).round() as u8;
+    Color32::from_rgba_premultiplied(c(0), c(1), c(2), c(3))
 }
 
 fn plain(app: &App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, big: bool) {
@@ -662,6 +725,10 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
     let mut clicked_line = None;
     let mut sweeping = false;
     let mut lighting = false;
+    let mut edging = false;
+    let edges_id = ui.id().with(("lyrics-edges", video_id));
+    let mut edges: Vec<Option<Edge>> = ui.data_mut(|d| std::mem::take(d.get_temp_mut_or_default::<Vec<Option<Edge>>>(edges_id)));
+    edges.resize(lines.len(), None);
     for (i, line) in lines.iter().enumerate() {
         let h = height_of(i);
         if h == 0.0 {
@@ -669,6 +736,8 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
         }
         let top = rect.top() + tops[i] - view.offset;
         if top > rect.bottom() || top + h < rect.top() {
+            // Out of view: placed afresh when it comes back.
+            edges[i] = None;
             continue;
         }
         let line_rect = Rect::from_min_size(pos2(rect.left() + pad, top), vec2(width, h));
@@ -676,13 +745,17 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
         // A line coming in brightens, one that is over dims.
         let lit = light(line.time, over[i], position, fade_out(&line.words, line.end.map(|end| (line.time, end, line.text.as_str()))));
         lighting |= lit > 0.0 && lit < 1.0;
-        // Lines fade out toward the edges of the view; but not one still
-        // lit, which the view gliding on would otherwise push into the
-        // edge's fade mid-fade, dimming it all at once. How bright a part of
-        // a line is goes straight from its rest (with the edge's fade) to
-        // its brightest as it lights, so the line dims at the pace of its
-        // own fade and of nothing else.
-        let edge = ((top - rect.top()) / fade).min((rect.bottom() - top - h) / fade).clamp(0.0, 1.0);
+        // Lines fade out toward the edges of the view, by where the view is
+        // going rather than where its glide has them: the glide is quick,
+        // and would dim a line pushed into the edge all at once. The fade
+        // moves on at its own pace instead ([`Edge::ease`]).
+        let bound = if view.by_hand { top } else { rect.top() + tops[i] - view.to };
+        let target = ((bound - rect.top()) / fade).min((rect.bottom() - bound - h) / fade).clamp(0.0, 1.0);
+        let (edge, easing) = Edge::ease(&mut edges[i], target, now, view.by_hand);
+        edging |= easing;
+        // How bright a part of a line is goes straight from its rest (with
+        // the edges' fade) to its brightest as it lights: not one still lit
+        // is dimmed by the edge, so it dims at the pace of its own fade.
         let at_edge = 0.25 + 0.75 * edge;
         let tone = |rest: f32, full: f32, lit: f32| rest * at_edge + (full - rest * at_edge) * lit;
         match &galleys[i] {
@@ -746,6 +819,11 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
                 dots(ui, &painter, line_rect, size, (position - line.time) / (next - line.time).max(0.5), playing);
             }
         }
+    }
+    ui.data_mut(|d| d.insert_temp(edges_id, edges));
+    if edging {
+        // Paused or not: the view moves either way.
+        theme::next_frame(ui.ctx());
     }
     let footer = footer(lyrics).map(|mut said| {
         if !layout.borrowed_from.is_empty() {
@@ -1013,6 +1091,52 @@ mod tests {
             let at = over + f64::from(slow) * (0.25 + 0.1 * f64::from(k));
             assert!((speed(at) - even).abs() < 0.02 * even, "even at {at}");
         }
+    }
+
+    #[test]
+    fn the_view_moving_on_dims_a_line_at_its_own_pace() {
+        let mut slot = None;
+        assert_eq!(Edge::ease(&mut slot, 1.0, 10.0, false), (1.0, false));
+        // The view moves on, the line now heading into the top's fade: it
+        // starts where it was and gets there evenly, never at once.
+        let (start, easing) = Edge::ease(&mut slot, 0.2, 11.0, false);
+        assert!((start - 1.0).abs() < 1e-4 && easing);
+        let step = 1.0 / 60.0;
+        let mut last = start;
+        let mut at = 11.0;
+        while at < 11.0 + f64::from(EDGE_EASE) {
+            at += step;
+            let (now, _) = Edge::ease(&mut slot, 0.2, at, false);
+            assert!(last - now < 0.025, "a little a frame");
+            last = now;
+        }
+        let (end, easing) = Edge::ease(&mut slot, 0.2, at, false);
+        assert!((end - 0.2).abs() < 1e-5 && !easing);
+        // Turned back halfway: from where it had got to.
+        let (_, _) = Edge::ease(&mut slot, 1.0, 20.0, false);
+        let (half, _) = Edge::ease(&mut slot, 1.0, 20.0 + f64::from(EDGE_EASE) / 2.0, false);
+        let (back, _) = Edge::ease(&mut slot, 0.2, 20.0 + f64::from(EDGE_EASE) / 2.0, false);
+        assert!((half - 0.6).abs() < 1e-3 && (back - half).abs() < 1e-4);
+        // Scrolled by hand: where the hand puts it.
+        assert_eq!(Edge::ease(&mut slot, 0.9, 21.0, true), (0.9, false));
+    }
+
+    #[test]
+    fn a_swept_line_is_painted_once_over() {
+        // Rows that touch or overlap a little: bands that meet between them.
+        let rows = [(0.0, 20.0), (18.0, 40.0), (40.0, 60.0)];
+        let bands = bands(&rows);
+        assert_eq!(bands.len(), 3);
+        for k in 0..2 {
+            assert_eq!(bands[k].1, bands[k + 1].0, "no gap and no overlap");
+        }
+        assert_eq!((bands[0].1, bands[1].1), (19.0, 40.0));
+        assert!(bands[0].0 < -1000.0 && bands[2].1 > 1000.0);
+        // The soft edge's colours go between the two, never past either.
+        let (dim, bright) = (Color32::WHITE.gamma_multiply(0.32), Color32::WHITE);
+        assert_eq!(mix(dim, bright, 0.0), dim);
+        assert_eq!(mix(dim, bright, 1.0), bright);
+        assert!(mix(dim, bright, 0.5).a() > dim.a() && mix(dim, bright, 0.5).a() < bright.a());
     }
 
     #[test]
