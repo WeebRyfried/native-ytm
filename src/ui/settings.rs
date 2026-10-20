@@ -325,6 +325,9 @@ fn updates(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
                 if widgets::pill(ui, Some(Icon::Refresh), "Check for updates", false).clicked() {
                     clicked = Some(Action::CheckForUpdates);
                 }
+                if widgets::icon_button(ui, Icon::Mix, 16.0, theme::text_dim(), "What's new in each version").clicked() {
+                    clicked = Some(Action::ShowWhatsNew);
+                }
             }
         });
         if let State::Downloading(_, done) = state {
@@ -633,6 +636,13 @@ fn appearance(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
         );
         divider(ui);
         toggle_row(ui, "Keep playing when closed", "Closing the window leaves the music playing, from the icon in the taskbar's corner.", &mut draft.close_to_tray);
+        divider(ui);
+        toggle_row(
+            ui,
+            "Show song changes",
+            "With the window minimised or in the taskbar's corner, a small note at the top right of the screen shows the song ending and the one coming in, for a few seconds. It never takes a click, and stays away from games and videos in full screen.",
+            &mut draft.song_note,
+        );
         divider(ui);
         let mut autostart = app.autostart;
         toggle_row(

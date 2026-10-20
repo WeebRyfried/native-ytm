@@ -88,6 +88,9 @@ const BREAK_AFTER: f64 = 6.0;
 /// How long the view glides to a new line, and a line takes to light.
 const GLIDE: f32 = 0.45;
 const LIGHT: f32 = 0.35;
+/// How long backing vocals take to dim once sung: longer than a line, as
+/// they often trail away after it.
+const BACKING_FADE: f32 = 1.4;
 
 #[derive(Clone, Copy, Default)]
 struct View {
@@ -120,6 +123,16 @@ fn light(time: f64, over: f64, position: f64) -> f32 {
     let ramp = |since: f64| theme::ease_out((since / f64::from(LIGHT)) as f32);
     let on = if position >= time { ramp(position - time) } else { 0.0 };
     let off = if position >= over { ramp(position - over) } else { 0.0 };
+    (on * (1.0 - off)).clamp(0.0, 1.0)
+}
+
+/// How lit a line's backing vocals are at `position` (0 to 1): coming in
+/// with their line, and going out once they too have been sung (`over`),
+/// slowly and gently, over [`BACKING_FADE`]: they ebb away rather than go
+/// out at once.
+fn backing_light(time: f64, over: f64, position: f64) -> f32 {
+    let on = if position >= time { theme::ease_out(((position - time) / f64::from(LIGHT)) as f32) } else { 0.0 };
+    let off = if position >= over { theme::ease_in_out(((position - over) / f64::from(BACKING_FADE)) as f32) } else { 0.0 };
     (on * (1.0 - off)).clamp(0.0, 1.0)
 }
 
@@ -688,13 +701,20 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
                 }
                 if let Some((galley, y, timed)) = &laid.backing {
                     let at = line_rect.min + vec2(0.0, *y);
+                    // Lit while their line is, and for as long as they are
+                    // sung after it; then dimmed slowly, from however bright
+                    // they were to the line's rest.
+                    let end = line.backing.last().map_or(line.time, |w| w.end);
+                    let glow = backing_light(line.time, over[i].max(end + LEAD), position);
+                    lighting |= glow > 0.0 && glow < 1.0;
+                    let rest = 0.32 * 0.7;
+                    let level = |lit: f32| ink((rest + (lit - rest) * glow) * reach);
                     // Swept as sung only when the line is timed by the word.
-                    if is_active && !timed.is_empty() && !laid.timed.is_empty() {
-                        let upto = sung(timed, heard);
-                        paint_sung(&painter, at, galley, upto, ink(0.26 * reach), ink(0.78 * reach));
-                        sweeping |= timed.last().is_some_and(|t| heard < t.1 + 0.1);
+                    if !timed.is_empty() && !laid.timed.is_empty() {
+                        paint_sung(&painter, at, galley, sung(timed, heard), level(0.26), level(0.78));
+                        sweeping |= glow > 0.0 && heard < end + 0.1;
                     } else {
-                        painter.galley_with_override_text_color(at, galley.clone(), ink(alpha * 0.7 * reach));
+                        painter.galley_with_override_text_color(at, galley.clone(), level(0.7));
                     }
                 }
                 if let Some((galley, y)) = &laid.translation {
@@ -934,6 +954,31 @@ mod tests {
         assert_eq!(light(5.0, 9.0, 7.0), 1.0);
         assert!(light(5.0, 9.0, 9.1) < 1.0);
         assert_eq!(light(5.0, 9.0, 10.0), 0.0);
+    }
+
+    #[test]
+    fn backing_vocals_ebb_away_after_they_are_sung() {
+        // A line from 10 to 14, its backing vocals sung on until 15.
+        let over = 14.0f64.max(15.0);
+        assert_eq!(backing_light(10.0, over, 9.0), 0.0);
+        assert_eq!(backing_light(10.0, over, 12.0), 1.0);
+        // Still lit while sung after their line is over.
+        assert_eq!(backing_light(10.0, over, 14.5), 1.0);
+        // Dimming from where they were, slowly at first: no sudden drop.
+        let step = 1.0 / 60.0;
+        assert!(backing_light(10.0, over, over + step) > 0.99);
+        let mut last = 1.0;
+        let mut at = over;
+        while at < over + f64::from(BACKING_FADE) {
+            let now = backing_light(10.0, over, at);
+            assert!(last - now < 0.03, "never more than a little in a frame");
+            last = now;
+            at += step;
+        }
+        assert!((backing_light(10.0, over, over + f64::from(BACKING_FADE) / 2.0) - 0.5).abs() < 1e-3);
+        assert_eq!(backing_light(10.0, over, over + f64::from(BACKING_FADE)), 0.0);
+        // Slower than their line goes out.
+        assert!(backing_light(10.0, over, over + 0.3) > light(10.0, over, over + 0.3));
     }
 
     #[test]

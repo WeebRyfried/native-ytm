@@ -263,6 +263,8 @@ pub struct App {
     /// to be deleted (its id and name).
     pub rename_playlist: Option<(String, String)>,
     pub delete_playlist: Option<(String, String)>,
+    /// What changed, over the window: after an update, or asked for.
+    pub whats_new: Option<crate::changelog::Shown>,
     pub toasts: Vec<Toast>,
     pub side_tab: SideTab,
     /// The full-window player: the artwork, with the queue or the lyrics.
@@ -317,6 +319,12 @@ pub struct App {
     ticking: Arc<AtomicBool>,
     tray: Option<fastframe_tray::Tray>,
     tray_playing: Option<bool>,
+    /// The note at the corner of the screen as songs change, and the song
+    /// it last knew of.
+    overlay: crate::overlay::Overlay,
+    note_last: Option<(u64, crate::overlay::Song)>,
+    /// The window is minimised, or there is none (closed to the tray).
+    pub out_of_sight: bool,
     waker: fastframe_shell::Waker,
     pub quit: bool,
     pub hide: bool,
@@ -351,6 +359,8 @@ pub struct App {
 impl App {
     pub fn new(waker: fastframe_shell::Waker) -> Self {
         let paths = Paths::new();
+        // Nothing to say is new to someone running the app for the first time.
+        let first_run = !paths.settings().exists();
         let settings: Settings = settings::load(&paths.settings());
         crate::theme::set(settings.theme);
         let wake: Arc<dyn Fn() + Send + Sync> = {
@@ -496,6 +506,7 @@ impl App {
             new_playlist: None,
             rename_playlist: None,
             delete_playlist: None,
+            whats_new: None,
             toasts: Vec::new(),
             side_tab: SideTab::UpNext,
             full_view: false,
@@ -526,6 +537,9 @@ impl App {
             ticking,
             tray: None,
             tray_playing: None,
+            overlay: crate::overlay::Overlay::default(),
+            note_last: None,
+            out_of_sight: false,
             waker,
             quit: false,
             hide: false,
@@ -585,11 +599,32 @@ impl App {
         if app.settings.discord && std::env::var_os("NATIVE_YTM_NO_DISCORD").is_none() {
             app.presence = Some(discord::Presence::spawn(&app.discord_client_id()));
         }
+        app.note_version(first_run);
         app.tray = fastframe_tray::Tray::spawn(tray_config(), {
             let waker = app.waker.clone();
             move || waker.wake()
         });
         app
+    }
+
+    /// Notes this version as the one that ran; after an update, what is new
+    /// since the one before shows over the window.
+    fn note_version(&mut self, first_run: bool) {
+        let now = env!("CARGO_PKG_VERSION");
+        let had = std::mem::replace(&mut self.settings.last_version, now.to_owned());
+        if had == now {
+            return;
+        }
+        self.save_settings();
+        // A first run, or an older version than ran before.
+        if first_run || (!had.is_empty() && !update::newer(now, &had)) {
+            return;
+        }
+        let releases = crate::changelog::since(&crate::changelog::releases(), (!had.is_empty()).then_some(had.as_str()), now);
+        if !releases.is_empty() {
+            log::info!("updated from {} to {now}: what is new shows", if had.is_empty() { "0.3.7 or before" } else { had.as_str() });
+            self.whats_new = Some(crate::changelog::Shown { releases, after_update: true });
+        }
     }
 
     /// Attaches the app to a new window's context.
@@ -604,6 +639,7 @@ impl App {
         crate::theme::install(ctx);
         ctx.set_zoom_factor(self.settings.zoom.clamp(0.7, 2.0));
         self.window_styled = false;
+        self.out_of_sight = false;
     }
 
     /// Home as it came: with Quick picks in it, that moves up to second.
@@ -715,6 +751,7 @@ impl App {
         for action in actions {
             self.apply(action);
         }
+        self.note_tick();
     }
 
     /// A song's title as the settings would have it shown.
@@ -3721,6 +3758,9 @@ impl App {
             Action::OpenUrl(url) => {
                 crate::platform::open_url(&url);
             }
+            Action::ShowWhatsNew => {
+                self.whats_new = Some(crate::changelog::Shown { releases: crate::changelog::releases(), after_update: false });
+            }
             Action::ClearSongCache => {
                 let bytes = self.audio_cache.usage().kept_bytes;
                 self.audio_cache.clear(false);
@@ -4111,6 +4151,26 @@ impl App {
         }
     }
 
+    /// One song giving way to another with the window out of sight: a note
+    /// at the corner of the screen, when chosen (Settings, Window).
+    fn note_tick(&mut self) {
+        let uid = self.current().and(self.current_uid);
+        if uid == self.note_last.as_ref().map(|(uid, _)| *uid) {
+            return;
+        }
+        let song = self.current().map(|t| crate::overlay::Song {
+            title: self.shown_title(t).to_owned(),
+            artist: t.artist_line(),
+        });
+        let last = std::mem::replace(&mut self.note_last, uid.zip(song));
+        if let (Some((_, from)), Some((_, to))) = (last, &self.note_last)
+            && self.settings.song_note
+            && self.out_of_sight
+        {
+            self.overlay.show(crate::overlay::Change { from, to: to.clone() });
+        }
+    }
+
     pub fn tray_shown(&self) -> bool {
         self.tray.as_ref().is_some_and(fastframe_tray::Tray::is_shown)
     }
@@ -4153,6 +4213,7 @@ impl fastframe_shell::Resident for App {
     }
 
     fn window_gone(&mut self) {
+        self.out_of_sight = true;
         self.hide = false;
         self.wants_show = false;
         self.save_session();

@@ -134,7 +134,8 @@ fn main() {
 struct Window {
     app: fastframe_shell::Held<App>,
     shot: Option<Shot>,
-    /// `NATIVE_YTM_SEEK`: a position to jump to once the song plays.
+    /// `NATIVE_YTM_SEEK`: a position to jump to once the song plays (less
+    /// than nothing: that far before its end).
     seek: Option<f64>,
     simulate: Option<Simulate>,
     /// The window's size last frame, and when it last changed: a second
@@ -252,6 +253,10 @@ static UPDATE_WHEN_FOUND: std::sync::atomic::AtomicBool = std::sync::atomic::Ato
 /// once the scan has found them (N + 1, so 0 is none).
 static PLAY_LOCAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// `minimize` or `tray` in NATIVE_YTM_ROUTE: once the song plays (and any
+/// seek is done), minimise the window (1) or close it to the tray (2).
+static OUT_OF_SIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// `localradio:N`: start a radio from the Nth song on this PC, the same way.
 static RADIO_LOCAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -288,6 +293,10 @@ fn dev_route(app: &mut App) {
             }
             "local" => {
                 PLAY_LOCAL.store(arg.parse::<usize>().unwrap_or(0) + 1, std::sync::atomic::Ordering::Relaxed);
+                continue;
+            }
+            "minimize" | "tray" => {
+                OUT_OF_SIGHT.store(if kind == "tray" { 2 } else { 1 }, std::sync::atomic::Ordering::Relaxed);
                 continue;
             }
             "localradio" => {
@@ -378,6 +387,7 @@ impl eframe::App for Window {
     }
 
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.app.out_of_sight = ctx.input(|i| i.viewport().minimized == Some(true));
         self.app.background();
         if std::mem::take(&mut self.app.wants_show) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -474,7 +484,14 @@ impl eframe::App for Window {
         }
         if self.seek.is_some() && self.app.playing() && self.app.position() > 0.5 {
             let to = self.seek.take().unwrap_or_default();
+            let to = if to < 0.0 { self.app.duration().map_or(0.0, |d| (d + to).max(0.0)) } else { to };
             self.app.actions.push(native_ytm::model::Action::Seek(to));
+        } else if self.seek.is_none() && self.app.playing() && self.app.position() > 1.0 {
+            match OUT_OF_SIGHT.swap(0, Ordering::Relaxed) {
+                1 => ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true)),
+                2 => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                _ => {}
+            }
         }
         if let Some(shot) = &mut self.shot {
             if !shot.asked && std::time::Instant::now() >= shot.due {

@@ -1,5 +1,5 @@
 //! Dialogs over the window: signing in, saving to a playlist, naming a new
-//! one, renaming one, and making sure before deleting one.
+//! one, renaming one, making sure before deleting one, and what is new.
 
 use egui::{Align, Color32, CornerRadius, CursorIcon, Id, Layout, Margin, Rect, RichText, Sense, Ui, Vec2, pos2, vec2};
 
@@ -24,6 +24,78 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     }
     if app.delete_playlist.is_some() {
         delete_playlist(app, ctx);
+    }
+    if app.whats_new.is_some() {
+        whats_new(app, ctx);
+    }
+}
+
+/// What changed: after an update, in each version since the one before;
+/// from Settings, in every version.
+fn whats_new(app: &mut App, ctx: &egui::Context) {
+    let mut close = false;
+    let mut releases_page = false;
+    let shown = app.whats_new.as_ref().expect("shown");
+    let height = (ctx.content_rect().height() * 0.6).clamp(200.0, 520.0);
+    let response = egui::Modal::new(Id::new("whats-new"))
+        .frame(frame())
+        .backdrop_color(theme::SCRIM)
+        .show(ctx, |ui: &mut Ui| {
+            ui.set_width(500.0);
+            ui.label(RichText::new("What's new").font(theme::bold(22.0)));
+            if shown.after_update {
+                ui.add_space(4.0);
+                ui.label(RichText::new(format!("Native YTM has been updated to {}.", env!("CARGO_PKG_VERSION"))).color(theme::text_dim()));
+            }
+            ui.add_space(16.0);
+            egui::ScrollArea::vertical().max_height(height).auto_shrink([false, true]).show(ui, |ui| {
+                for (n, release) in shown.releases.iter().enumerate() {
+                    if n > 0 {
+                        ui.add_space(14.0);
+                        let y = ui.cursor().top();
+                        ui.painter().hline(ui.max_rect().x_range(), y, egui::Stroke::new(1.0, theme::divider()));
+                        ui.add_space(16.0);
+                    }
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 10.0;
+                        ui.label(RichText::new(&release.version).font(theme::semibold(13.5)).color(theme::accent_text()));
+                        ui.label(RichText::new(&release.date).font(theme::regular(12.5)).color(theme::text_faint()));
+                    });
+                    ui.add_space(4.0);
+                    ui.add(egui::Label::new(RichText::new(&release.summary).font(theme::semibold(16.0)).color(theme::text())).wrap());
+                    ui.add_space(8.0);
+                    for change in &release.changes {
+                        ui.horizontal_top(|ui| {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            let (dot, _) = ui.allocate_exact_size(vec2(16.0, 20.0), Sense::hover());
+                            ui.painter().circle_filled(pos2(dot.left() + 4.0, dot.top() + 10.0), 2.2, theme::text_faint());
+                            let mut job = egui::text::LayoutJob::default();
+                            for (piece, bold) in crate::changelog::pieces(change) {
+                                let (font, color) = if bold { (theme::semibold(14.0), theme::text()) } else { (theme::regular(14.0), theme::text_dim()) };
+                                job.append(piece, 0.0, egui::TextFormat { font_id: font, color, line_height: Some(20.0), ..Default::default() });
+                            }
+                            ui.add(egui::Label::new(job).wrap());
+                        });
+                        ui.add_space(6.0);
+                    }
+                }
+            });
+            ui.add_space(18.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                if widgets::pill(ui, None, "Done", true).clicked() {
+                    close = true;
+                }
+                if widgets::pill(ui, Some(Icon::External), "Every release", false).clicked() {
+                    releases_page = true;
+                }
+            });
+        });
+    if releases_page {
+        app.actions.push(Action::OpenUrl(format!("https://github.com/{}/releases", crate::update::REPO)));
+    }
+    if close || response.should_close() {
+        app.whats_new = None;
     }
 }
 

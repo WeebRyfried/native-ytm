@@ -44,6 +44,9 @@ pub struct Settings {
     pub shuffle: bool,
     /// Closing the window keeps the music playing in the tray.
     pub close_to_tray: bool,
+    /// With the window out of sight, a note at the top right of the screen
+    /// as one song gives way to the next.
+    pub song_note: bool,
     /// The interface language YouTube Music answers in.
     pub language: String,
     /// The region for charts and recommendations; YouTube's guess when empty.
@@ -89,6 +92,9 @@ pub struct Settings {
     pub local_folders: Vec<String>,
     /// Look for a newer version now and then.
     pub check_updates: bool,
+    /// The version that ran last, to say what is new after an update
+    /// (empty from 0.3.7 and before, which did not keep it).
+    pub last_version: String,
     /// The look: one of four dark themes.
     pub theme: crate::theme::Theme,
     /// The visualiser along the top of the player bar, and how it draws.
@@ -111,6 +117,7 @@ impl Default for Settings {
             repeat: Repeat::Off,
             shuffle: false,
             close_to_tray: true,
+            song_note: false,
             language: "en".into(),
             region: String::new(),
             use_ytdlp: true,
@@ -135,6 +142,7 @@ impl Default for Settings {
             zoom: 1.0,
             local_folders: Vec::new(),
             check_updates: true,
+            last_version: String::new(),
             theme: crate::theme::Theme::Classic,
             visualiser: true,
             visualiser_mode: crate::visualiser::Mode::Wave,

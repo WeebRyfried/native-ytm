@@ -340,6 +340,8 @@ pub enum Action {
     ApplySettings(Box<Settings>),
     CopyLink(String),
     OpenUrl(String),
+    /// What changed in each version, over the window.
+    ShowWhatsNew,
     ClearImageCache,
     /// Deletes the lyrics kept on disk.
     ClearLyricsCache,

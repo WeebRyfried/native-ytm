@@ -77,7 +77,8 @@ sounds as good as your account allows.
   Musixmatch, QQ Music, KuGou and Unison, then LRCLIB and YouTube's text.
   Each word lights up as it is sung, a soft edge sweeping through it;
   backing vocals sit small under their line (also when a source writes
-  them into it in brackets), and a translation under it all: the lyrics'
+  them into it in brackets), lit for as long as they are sung and ebbing
+  away slowly after, and a translation under it all: the lyrics'
   own, another source's for the same line, or else Unison's. When the
   lyrics name more than one singer, the first sings on the left, the others
   on the right and all of them together in the middle, each in a colour of
@@ -142,6 +143,11 @@ sounds as good as your account allows.
 - The media keys and the volume flyout, with the song's name and artwork.
 - Closes to the tray and keeps playing. One copy at a time. Starts with
   Windows if you like, straight to the tray.
+- **Song changes at the corner of the screen**, if you like: with the window
+  minimised or in the tray, a small note at the top right shows the song
+  ending with an arrow, then the next one, for a few seconds. It never takes
+  a click or the focus, stays away from games and videos in full screen,
+  and costs nothing in between (Settings, Window).
 - **Your YouTube Music history** gets what you play, as on the web.
 - **Discord**: "Listening to" the artist, with the artwork, the song and a
   progress bar on your profile. Songs on this PC show their album's
@@ -151,7 +157,8 @@ sounds as good as your account allows.
   often you've scrobbled them.
 - **Updates in one click.** A new version shows in the top bar: one click
   downloads it, checks it against the digest GitHub publishes, and restarts
-  into it, the music carrying on where it was.
+  into it, the music carrying on where it was, and says what is new since
+  the version you had ([CHANGELOG.md](CHANGELOG.md)).
 - **Four themes**, all dark: Classic (YouTube Music's black and red),
   Midnight, Sakura and Matcha, picked from little pictures of each in
   Settings, and taken on at once.
@@ -258,7 +265,8 @@ cargo build --release
 | Streams | `src/stream.rs` | finds a stream for a song (below) |
 | Audio | `src/player/` | range downloader (or a file read as it plays), symphonia (MP4, WebM, AAC, and MP3, FLAC, Vorbis, ALAC, WAV for local files), libopus for Opus, rubato resampler, the smart crossfade (`smart.rs`: where the songs go quiet), the equaliser (`eq.rs`, in the audio callback), fastframe-audio output |
 | Music on this PC | `src/local.rs` | the folder scan (a thread at background priority), tags and pictures read once into an index, search (with readings of Japanese names), artwork found online |
-| Updates | `src/update.rs` | the latest GitHub release, the download checked against its SHA-256 digest, the running program renamed aside for the new one |
+| Updates | `src/update.rs`, `src/changelog.rs` | the latest GitHub release, the download checked against its SHA-256 digest, the running program renamed aside for the new one; CHANGELOG.md built in, for what is new after an update |
+| Song note | `src/overlay.rs` | a layered window on a thread of its own, both made for a song change and gone once it fades; the words drawn once with GDI, each frame put together from them only while something moves |
 | Lyric readings | `src/readings.rs` | Japanese words read longest match first from a table made from JMdict, then put in romaji or hiragana |
 | Songs on disk | `src/cache.rs`, `src/lyrics.rs`, `src/kept_pages.rs` | downloads, and whole files kept from plays (the best quality heard, the least recently played going first); lyrics once found; Home and the library's pages as they last loaded |
 | Stats | `src/stats.rs`, `src/ui/stats.rs` | the plays the app hears (one line of JSON each), summed over a stretch; Last.fm's own over the same |
@@ -296,13 +304,15 @@ system's fallback fonts instead of reading them in.
 `browse:ID`, `play:VIDEO_ID`, `explore`, `library`, `settings`, `queue`,
 `lyrics`, `signin`, `full`, `fullscreen`, `cached`, `device`, `deviceview:N` (0 songs, 1 albums, 2 artists), `artist:NAME`, `localalbum:N`, `localradio:N`, `stats` (`stats:app` for the app's own), `recent` (the empty search box, focused), `local:N` to
 play the songs on this PC from the Nth, `update` to install an update once
-found, and `download` for the song playing, joined with `|`);
+found, `download` for the song playing, and `minimize` or `tray` to put the
+window out of sight once the song plays, joined with `|`);
 `NATIVE_YTM_VERSION` makes the app believe it is that version (to be offered
 the latest release); `NATIVE_YTM_SHOT=out.png`
 saves a screenshot after `NATIVE_YTM_SHOT_DELAY` ms and quits (with
 `NATIVE_YTM_SHOT_EVERY` ms and `NATIVE_YTM_SHOT_COUNT`, a numbered run of
 them, for animations);
-`NATIVE_YTM_SCROLL`, `NATIVE_YTM_SEEK`, `NATIVE_YTM_MUTE`;
+`NATIVE_YTM_SCROLL`, `NATIVE_YTM_SEEK` (less than nothing: that far before
+the end), `NATIVE_YTM_MUTE`;
 `NATIVE_YTM_NO_DISCORD`; `NATIVE_YTM_PROFILE=DIR` runs a separate copy with
 its own data; `NATIVE_YTM_WIGGLE=x,y`, `NATIVE_YTM_WHEEL=x,y` and
 `NATIVE_YTM_CLICK=x,y[,seconds]` make up pointer input; `NATIVE_YTM_NO_FRAME_SKIP` draws identical frames anyway;

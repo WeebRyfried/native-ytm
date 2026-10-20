@@ -217,6 +217,13 @@ pub fn ease_out(t: f32) -> f32 {
     1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
 }
 
+/// Eases in and out (slow, quicker, slow): for things that move and stop,
+/// and for fading away gently.
+pub fn ease_in_out(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 /// How far, from 0 to 1 and eased, something has come in since `key` last
 /// changed in `slot` (a new page, a new song), over `secs`. Frames keep
 /// coming only until it is done.
