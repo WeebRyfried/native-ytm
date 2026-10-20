@@ -68,8 +68,8 @@ sounds as good as your account allows.
 
 **Lyrics and the full view**
 - **Synced lyrics** that follow the song: the line being sung lit (lines
-  sung over one another, as in a round, lit together), the rest dim, the
-  view gliding along. Click a line to play from there. Lines a
+  sung over one another, as in a round, lit together), the rest dim, each
+  line fading once sung as fast as it was sung, the view gliding along. Click a line to play from there. Lines a
   little early or late? Move them half a second at a time from the corner
   of the lyrics; it is kept for that song.
 - **Word by word**, from every source the [Better Lyrics](https://github.com/better-lyrics/better-lyrics)
@@ -77,8 +77,8 @@ sounds as good as your account allows.
   Musixmatch, QQ Music, KuGou and Unison, then LRCLIB and YouTube's text.
   Each word lights up as it is sung, a soft edge sweeping through it;
   backing vocals sit small under their line (also when a source writes
-  them into it in brackets), lit for as long as they are sung and ebbing
-  away slowly after, and a translation under it all: the lyrics'
+  them into it in brackets), lit for as long as they are sung, and a
+  translation under it all: the lyrics'
   own, another source's for the same line, or else Unison's. When the
   lyrics name more than one singer, the first sings on the left, the others
   on the right and all of them together in the middle, each in a colour of
