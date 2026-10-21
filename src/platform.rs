@@ -224,6 +224,56 @@ pub fn restyle_main_window(caption: egui::Color32) {
     }
 }
 
+/// The main window's icons drawn anew by `draw` (straight RGBA, square, at
+/// the size asked), after a change of theme: the large one the taskbar and
+/// Alt+Tab show and the small one, each at the size Windows shows it at the
+/// window's scale. (egui's own command changes only the small one.)
+#[cfg(windows)]
+pub fn set_main_window_icon(draw: fn(usize) -> Vec<u8>) {
+    use std::sync::atomic::{AtomicIsize, Ordering};
+
+    use image::ImageEncoder;
+    use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CreateIconFromResourceEx, DestroyIcon, ICON_BIG, ICON_SMALL, LR_DEFAULTCOLOR, SM_CXICON, SM_CXSMICON,
+        SendMessageW, WM_SETICON,
+    };
+    // The icons made here last, let go once replaced. (Those the window
+    // starts with are eframe's, which keeps no hold on them either.)
+    static MADE: [AtomicIsize; 2] = [AtomicIsize::new(0), AtomicIsize::new(0)];
+    let hwnd = MAIN_WINDOW.load(Ordering::Relaxed);
+    if hwnd == 0 {
+        return;
+    }
+    let hwnd = hwnd as windows_sys::Win32::Foundation::HWND;
+    // SAFETY: the window is the app's own; each icon is made from a whole
+    // PNG in memory (which CreateIconFromResourceEx takes as an icon's
+    // image), and the one it replaces was made here and is no longer used.
+    unsafe {
+        let dpi = GetDpiForWindow(hwnd);
+        for (made, (which, metric)) in MADE.iter().zip([(ICON_BIG, SM_CXICON), (ICON_SMALL, SM_CXSMICON)]) {
+            let size = GetSystemMetricsForDpi(metric, dpi).max(16) as u32;
+            let mut png = Vec::new();
+            let encoder = image::codecs::png::PngEncoder::new(&mut png);
+            if encoder.write_image(&draw(size as usize), size, size, image::ExtendedColorType::Rgba8).is_err() {
+                continue;
+            }
+            let icon = CreateIconFromResourceEx(png.as_ptr(), png.len() as u32, 1, 0x0003_0000, size as i32, size as i32, LR_DEFAULTCOLOR);
+            if icon.is_null() {
+                continue;
+            }
+            SendMessageW(hwnd, WM_SETICON, which as usize, icon as isize);
+            let old = made.swap(icon as isize, Ordering::Relaxed);
+            if old != 0 {
+                DestroyIcon(old as _);
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn set_main_window_icon(_draw: fn(usize) -> Vec<u8>) {}
+
 /// Windows' folder picker, over the main window. Blocks until it closes,
 /// so call it from a thread of its own.
 #[cfg(windows)]

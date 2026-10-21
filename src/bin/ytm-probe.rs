@@ -28,7 +28,7 @@ fn main() -> anyhow::Result<()> {
         Some("logo") => {
             // The logo as a PNG, to look at or to publish.
             let size: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(512);
-            let rgba = native_ytm::theme::app_icon_rgba(size);
+            let rgba = native_ytm::theme::logo_rgba(size);
             let image = image::RgbaImage::from_raw(size as u32, size as u32, rgba).expect("size");
             image.save(args.get(2).map_or("logo.png", String::as_str))?;
             return Ok(());
@@ -167,12 +167,12 @@ fn lastfm(args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Writes the app's drawn icon as a Windows .ico, PNG images inside.
+/// Writes the app's logo as a Windows .ico, PNG images inside.
 fn write_icon(path: &str) -> anyhow::Result<()> {
     let sizes = [16u32, 20, 24, 32, 40, 48, 64, 128, 256];
     let mut images = Vec::new();
     for &size in &sizes {
-        let rgba = native_ytm::theme::app_icon_rgba(size as usize);
+        let rgba = native_ytm::theme::logo_rgba(size as usize);
         let mut png = Vec::new();
         image::codecs::png::PngEncoder::new(&mut png).write_image(&rgba, size, size, image::ExtendedColorType::Rgba8)?;
         images.push((size, png));

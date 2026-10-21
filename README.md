@@ -162,7 +162,8 @@ sounds as good as your account allows.
   the version you had ([CHANGELOG.md](CHANGELOG.md)).
 - **Four themes**, all dark: Classic (YouTube Music's black and red),
   Midnight, Sakura and Matcha, picked from little pictures of each in
-  Settings, and taken on at once.
+  Settings, and taken on at once. The logo takes the theme's colour too, in
+  the sidebar, on the taskbar and in the tray.
 - **A visualiser** rising from the top of the player bar as the music
   plays, in the theme's colours: Bars, Wave, Mirror or Aurora. It follows
   every hit in the music, or mostly the drums, or mostly the voice. A
@@ -265,7 +266,7 @@ cargo build --release
 | Part | Where | What |
 | --- | --- | --- |
 | Interface | `src/ui/` | egui views; they emit `Action`s, which `src/app.rs` applies after each frame |
-| Themes | `src/theme.rs` | four palettes; the colours are read from the one chosen, so a change shows on the next frame |
+| Themes | `src/theme.rs` | four palettes; the colours are read from the one chosen, so a change shows on the next frame; the logo turned to the theme's hue in OKLab, each pixel as light and as colourful as it was |
 | Visualiser | `src/visualiser.rs`, `src/ui/visualiser.rs` | the audio callback's last moments in a lock-free ring (the middle of the stereo picture and its sides), an FFT into bands by octaves under a scale that follows the music, each band's loudness and its hits (how far it jumps above its own recent level), weighted for the drums or the voice, drawn as meshes |
 | App state | `src/app.rs`, `src/queue.rs` | navigation, the queue, what plays next, preloading, the switch to Premium |
 | Deck of artwork | `src/ui/now_playing.rs` | the next song's card out from behind once it is a few seconds off, and the turn timed by the song coming in: where the crossfade has it start and for how long the two overlap, which the player records as it joins them |

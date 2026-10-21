@@ -13,15 +13,22 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     ui.add_space(14.0);
     ui.horizontal(|ui| {
         ui.add_space(8.0);
-        let (rect, _) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::hover());
-        let texture = ui.ctx().data_mut(|d| d.get_temp::<egui::TextureHandle>(egui::Id::new("app-icon")));
-        let texture = texture.unwrap_or_else(|| {
-            let size = 64;
-            let image = egui::ColorImage::from_rgba_unmultiplied([size, size], &theme::app_icon_rgba(size));
-            let texture = ui.ctx().load_texture("app-icon", image, egui::TextureOptions::LINEAR);
-            ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("app-icon"), texture.clone()));
-            texture
-        });
+        // The logo in the look's colour, made at the screen's own pixels
+        // (again when the look or the scale changes).
+        let px = (30.0 * ui.ctx().pixels_per_point()).round().max(1.0) as usize;
+        let made_for = (theme::current() as u8, px);
+        let id = egui::Id::new("app-icon");
+        let kept = ui.ctx().data_mut(|d| d.get_temp::<((u8, usize), egui::TextureHandle)>(id));
+        let texture = match kept {
+            Some((made, texture)) if made == made_for => texture,
+            _ => {
+                let image = egui::ColorImage::from_rgba_unmultiplied([px, px], &theme::app_icon_rgba(px));
+                let texture = ui.ctx().load_texture("app-icon", image, egui::TextureOptions::LINEAR);
+                ui.ctx().data_mut(|d| d.insert_temp(id, (made_for, texture.clone())));
+                texture
+            }
+        };
+        let (rect, logo) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::click());
         ui.painter().image(
             texture.id(),
             rect,
@@ -30,17 +37,22 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         );
         ui.add_space(2.0);
         // The name, and the version small and grey on its baseline.
-        let name = ui.painter().layout_no_wrap("YTMusic".to_owned(), theme::bold(19.0), theme::text());
+        let name = ui.painter().layout_no_wrap("Music".to_owned(), theme::bold(19.0), theme::text());
         let version = ui.painter().layout_no_wrap(concat!("v", env!("CARGO_PKG_VERSION")).to_owned(), theme::medium(10.5), theme::text_faint());
         let size = vec2(name.size().x + 5.0 + version.size().x, name.size().y);
-        let (rect, response) = ui.allocate_exact_size(size, Sense::hover());
+        let (rect, title) = ui.allocate_exact_size(size, Sense::click());
         let top = rect.center().y - name.size().y / 2.0;
         // Inter's baseline sits about four fifths down its line.
         let baseline = top + name.size().y * 0.8;
         let name_w = name.size().x;
         ui.painter().galley(pos2(rect.left(), top), name, theme::text());
         ui.painter().galley(pos2(rect.left() + name_w + 5.0, baseline - version.size().y * 0.8), version, theme::text_faint());
-        response.on_hover_text(concat!("Native YTM ", env!("CARGO_PKG_VERSION")));
+        // Either goes Home.
+        let logo = logo.on_hover_cursor(CursorIcon::PointingHand);
+        let title = title.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(concat!("Native YTM ", env!("CARGO_PKG_VERSION")));
+        if logo.clicked() || title.clicked() {
+            app.actions.push(Action::Navigate(Route::Home));
+        }
     });
     ui.add_space(16.0);
     let route = app.route.clone();

@@ -6,10 +6,12 @@ it for that (src/changelog.rs).
 
 ## 0.3.14 — 22 October 2026
 
-The next song in an island at the top of the screen.
+The next song in an island at the top of the screen, and a new logo.
 
 - **An island for song changes.** The note at the top right is now an island in the middle of the top of the screen, as on an iPhone. With the window minimised or in the taskbar's corner, a black pill comes down from above the screen and springs open to the song ending, its artwork beside its title and artist; the next song slides in as the old one slides away, the island taking its width, and a few seconds later it closes and goes back up. The artwork is the one the media overlay already has, so nothing more is downloaded. It never takes a click or the focus, and stays away from games and videos in full screen.
 - **Still next to nothing to run.** A frame of the island takes about a millisecond to put together and show, and frames are made only while it moves (about two seconds of the six it shows): a sixth of a second of work for each song change, and none in between. Off unless turned on: Settings, Window, Show song changes.
+- **A new logo.** A music note with a window in its flag, white on a rounded square. In the app it takes the colour of your theme (red for Classic, blue for Midnight, pink for Sakura, green for Matcha) in the sidebar, on the taskbar and in the tray, and changes with it.
+- **Just Music.** The name beside the logo is now Music, and a click on either takes you Home.
 
 ## 0.3.13 — 21 October 2026
 

@@ -3754,6 +3754,12 @@ impl App {
                     crate::theme::set(new.theme);
                     crate::theme::apply(&self.ctx);
                     crate::platform::restyle_main_window(crate::theme::sidebar());
+                    // The logo in the new colour on the window, the taskbar
+                    // and the tray (the sidebar's follows by itself).
+                    crate::platform::set_main_window_icon(crate::theme::app_icon_rgba);
+                    if let Some(tray) = &mut self.tray {
+                        tray.set_icon(crate::theme::app_icon_rgba, None);
+                    }
                 }
                 self.settings = new;
                 self.settings_dirty = Some(Instant::now());
