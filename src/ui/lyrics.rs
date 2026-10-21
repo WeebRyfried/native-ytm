@@ -90,13 +90,15 @@ const GLIDE: f32 = 0.45;
 const LIGHT: f32 = 0.35;
 /// Once sung, a line (or its backing vocals) dims for as long as this many
 /// of its words took, on average: a quick line goes out quickly, a slow
-/// one ebbs away. No quicker than the first, no slower than the second.
-const FADE_WORDS: f64 = 2.5;
-const FADE_MIN: f32 = 0.3;
-const FADE_MAX: f32 = 2.0;
+/// one more slowly. No quicker than the first, no slower than the second.
+const FADE_WORDS: f64 = 1.25;
+const FADE_MIN: f32 = 0.2;
+const FADE_MAX: f32 = 1.0;
 /// How long a line takes to dim (or brighten) toward the view's edges as
 /// the view moves on.
-const EDGE_EASE: f32 = 0.8;
+const EDGE_EASE: f32 = 0.5;
+/// How wide the soft edge of the singing is, in points.
+const SOFT: f32 = 12.5;
 
 #[derive(Clone, Copy, Default)]
 struct View {
@@ -154,6 +156,59 @@ impl Edge {
     }
 }
 
+/// A song's lines as the view goes through them: with a break of their own
+/// where it is quiet a while (see [`timeline`]), when each is over, and
+/// whether any is Japanese (for readings). Made once per song and source.
+struct Timeline {
+    lines: Vec<LyricLine>,
+    over: Vec<f64>,
+    japanese: bool,
+}
+
+/// `lyrics` as a [`Timeline`]: a quiet start becomes a break with its dots,
+/// and so does a long silence between lines that say when they end.
+fn timeline(ui: &Ui, video_id: &str, lyrics: &Lyrics) -> Arc<Timeline> {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut lines_now = std::collections::hash_map::DefaultHasher::new();
+    for line in &lyrics.lines {
+        (line.time.to_bits(), line.text.len(), line.words.len(), line.backing.len()).hash(&mut lines_now);
+    }
+    let key = egui::Id::new(("lyrics-timeline", video_id, lines_now.finish()));
+    cached(ui, ui.id().with("lyrics-timeline"), key, || {
+        let mut lines: Vec<LyricLine> = Vec::with_capacity(lyrics.lines.len() + 4);
+        if lyrics.lines.first().is_some_and(|l| l.time > 3.0) {
+            lines.push(LyricLine::default());
+        }
+        for (i, line) in lyrics.lines.iter().enumerate() {
+            lines.push(line.clone());
+            if let (Some(end), Some(next)) = (line.end, lyrics.lines.get(i + 1))
+                && next.time - end > BREAK_AFTER
+                && !line.text.is_empty()
+            {
+                lines.push(LyricLine { time: end, ..LyricLine::default() });
+            }
+        }
+        let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        let japanese = readings::is_japanese(&texts);
+        let over = overs(&lines);
+        Arc::new(Timeline { lines, over, japanese })
+    })
+}
+
+/// What `make` makes for `key`, kept in `slot` (one a view) until the key
+/// changes: so only the song showing is kept, not every song played (nor
+/// the lyrics at every width the panel was dragged through).
+fn cached<T: Clone + Send + Sync + 'static>(ui: &Ui, slot: egui::Id, key: egui::Id, make: impl FnOnce() -> T) -> T {
+    if let Some((kept, value)) = ui.data(|d| d.get_temp::<(egui::Id, T)>(slot))
+        && kept == key
+    {
+        return value;
+    }
+    let value = make();
+    ui.data_mut(|d| d.insert_temp(slot, (key, value.clone())));
+    value
+}
+
 /// How lit a line (or its backing vocals) is at `position` (0 to 1):
 /// coming in over [`LIGHT`] from its time, and once `over`, going out at an
 /// even pace, eased at its ends, over `out` seconds. By the song's own time,
@@ -170,8 +225,11 @@ fn light(time: f64, over: f64, position: f64, out: f32) -> f32 {
 /// characters, for Japanese, Chinese and Korean written without spaces);
 /// without an end either, [`LIGHT`].
 fn fade_out(words: &[Word], span: Option<(f64, f64, &str)>) -> f32 {
-    let sung: Vec<f64> = words.iter().filter(|w| !w.text.trim().is_empty()).map(|w| w.end - w.start).filter(|d| *d > 0.0).collect();
-    let pace = if sung.is_empty() {
+    let (sum, count) = words
+        .iter()
+        .filter(|w| w.end > w.start && !w.text.trim().is_empty())
+        .fold((0.0, 0usize), |(sum, count), w| (sum + (w.end - w.start), count + 1));
+    let pace = if count == 0 {
         let Some((start, end, text)) = span.filter(|(start, end, _)| end > start) else {
             return LIGHT;
         };
@@ -182,7 +240,7 @@ fn fade_out(words: &[Word], span: Option<(f64, f64, &str)>) -> f32 {
         }
         (end - start) / units as f64
     } else {
-        sung.iter().sum::<f64>() / sung.len() as f64
+        sum / count as f64
     };
     ((pace * FADE_WORDS) as f32).clamp(FADE_MIN, FADE_MAX)
 }
@@ -225,8 +283,8 @@ fn message(ui: &mut Ui, text: &str) {
 
 /// Readings for these lyrics, when they are wanted and Japanese: the
 /// dictionary (once loaded) and the style.
-fn readings_for(app: &App, ui: &Ui, big: bool, texts: &[&str]) -> Option<(&'static Dictionary, Style)> {
-    if !big || !app.settings.lyric_readings || !readings::is_japanese(texts) {
+fn readings_for(app: &App, ui: &Ui, big: bool, japanese: impl FnOnce() -> bool) -> Option<(&'static Dictionary, Style)> {
+    if !big || !app.settings.lyric_readings || !japanese() {
         return None;
     }
     let ctx = ui.ctx().clone();
@@ -382,10 +440,11 @@ fn sung(spans: &[Span], time: f64) -> f32 {
 }
 
 /// Paints `galley` at `at` dim, and bright as far as `upto` (a character
-/// index, see [`sung`]), the edge between them soft. Each part is painted
-/// once, in its one colour: the colours are see-through, so dim under
-/// bright would add up to more than either (a fading line drawn half again
-/// as bright as it should be, then dropping when it stops being swept).
+/// index, see [`sung`]), the edge between them soft. In one go: each glyph
+/// takes its colour from where it is against the edge, one the edge
+/// crosses cut where its colour changes, so the line is one mesh, each part
+/// of it painted once (see-through colours painted over one another would
+/// add up, and pieces clipped apart cost a draw each).
 fn paint_sung(painter: &egui::Painter, at: Pos2, galley: &Arc<Galley>, upto: f32, dim: Color32, bright: Color32) {
     if upto <= 0.0 {
         painter.galley_with_override_text_color(at, galley.clone(), dim);
@@ -401,47 +460,102 @@ fn paint_sung(painter: &egui::Painter, at: Pos2, galley: &Arc<Galley>, upto: f32
     let edge_row = galley.rows.iter().position(|r| a.center().y >= r.rect().min.y - 0.5 && a.center().y <= r.rect().max.y + 0.5).unwrap_or(0);
     let b = galley.pos_from_cursor(egui::text::CCursor::new(whole + 1));
     let next_x = if (a.min.y - b.min.y).abs() < 1.0 { b.min.x } else { galley.rows[edge_row].rect().max.x };
-    let x = at.x + a.min.x + (next_x - a.min.x) * upto.fract();
-    let clip = painter.clip_rect();
-    let paint = |area: Rect, color: Color32| {
-        let area = area.intersect(clip);
-        if area.is_positive() {
-            painter.with_clip_rect(area).galley_with_override_text_color(at, galley.clone(), color);
-        }
-    };
-    let rows: Vec<(f32, f32)> = galley.rows.iter().map(|r| (r.rect().min.y, r.rect().max.y)).collect();
-    // The soft edge: slivers going from bright to dim.
-    const SLIVERS: usize = 5;
-    const WIDE: f32 = 2.5;
-    for (i, (top, bottom)) in bands(&rows).into_iter().enumerate() {
-        let band = |left: f32, right: f32| Rect::from_min_max(pos2(left, at.y + top), pos2(right, at.y + bottom));
-        let (far_left, far_right) = (clip.left() - 1.0, clip.right() + 1.0);
+    let edge = a.min.x + (next_x - a.min.x) * upto.fract();
+    let mut swept = (**galley).clone();
+    let (mut vertices, mut indices) = (0, 0);
+    for (i, placed) in swept.rows.iter_mut().enumerate() {
+        let x = placed.pos.x;
+        let visuals = &mut Arc::make_mut(&mut placed.row).visuals;
         match i.cmp(&edge_row) {
-            std::cmp::Ordering::Less => paint(band(far_left, far_right), bright),
-            std::cmp::Ordering::Greater => paint(band(far_left, far_right), dim),
-            std::cmp::Ordering::Equal => {
-                paint(band(far_left, x), bright);
-                for k in 0..SLIVERS {
-                    let t = 1.0 - (k as f32 + 1.0) / (SLIVERS as f32 + 1.0);
-                    paint(band(x + WIDE * k as f32, x + WIDE * (k as f32 + 1.0)), mix(dim, bright, t));
-                }
-                paint(band(x + WIDE * SLIVERS as f32, far_right), dim);
-            }
+            std::cmp::Ordering::Less => colour_glyphs(visuals, bright),
+            std::cmp::Ordering::Greater => colour_glyphs(visuals, dim),
+            std::cmp::Ordering::Equal => cut_at_edge(visuals, edge - x, dim, bright),
         }
+        vertices += visuals.mesh.vertices.len();
+        indices += visuals.mesh.indices.len();
+    }
+    swept.num_vertices = vertices;
+    swept.num_indices = indices;
+    painter.add(egui::epaint::TextShape::new(at, Arc::new(swept), dim));
+}
+
+/// A row's glyphs all in `colour`.
+fn colour_glyphs(visuals: &mut egui::epaint::text::RowVisuals, colour: Color32) {
+    for vertex in &mut visuals.mesh.vertices[visuals.glyph_vertex_range.clone()] {
+        vertex.color = colour;
     }
 }
 
-/// The rows of a galley (each its top and bottom) as bands that meet
-/// halfway between them, the first and last running on: each row's own,
-/// with nothing in two of them.
-fn bands(rows: &[(f32, f32)]) -> Vec<(f32, f32)> {
-    (0..rows.len())
-        .map(|i| {
-            let top = if i == 0 { -1e6 } else { (rows[i - 1].1 + rows[i].0) / 2.0 };
-            let bottom = if i + 1 == rows.len() { 1e6 } else { (rows[i].1 + rows[i + 1].0) / 2.0 };
-            (top, bottom)
-        })
-        .collect()
+/// The glyphs of the row being sung, `edge` across it: bright up to there,
+/// dim from [`SOFT`] after it, going from one to the other between; a glyph
+/// quad (as egui lays them out, four corners each) cut where that begins
+/// and ends, so its colours follow it exactly.
+fn cut_at_edge(visuals: &mut egui::epaint::text::RowVisuals, edge: f32, dim: Color32, bright: Color32) {
+    use egui::epaint::Vertex;
+    let colour = |x: f32| mix(bright, dim, (x - edge) / SOFT);
+    let mesh = &mut visuals.mesh;
+    let quads = mesh.vertices.len() / 4;
+    if visuals.glyph_vertex_range != (0..mesh.vertices.len()) || mesh.vertices.len() % 4 != 0 || mesh.indices.len() != quads * 6 {
+        // More than glyphs (a background, an underline): coloured by
+        // where each corner is, uncut.
+        for vertex in &mut mesh.vertices[visuals.glyph_vertex_range.clone()] {
+            vertex.color = colour(vertex.pos.x);
+        }
+        return;
+    }
+    let corners = std::mem::take(&mut mesh.vertices);
+    mesh.indices.clear();
+    let between = |a: Vertex, b: Vertex, t: f32| {
+        let pos = a.pos + (b.pos - a.pos) * t;
+        Vertex { pos, uv: a.uv + (b.uv - a.uv) * t, color: colour(pos.x) }
+    };
+    for quad in corners.chunks_exact(4) {
+        let (lt, rt, lb, rb) = (quad[0], quad[1], quad[2], quad[3]);
+        // Where along the glyph it is cut: where the soft edge begins and
+        // ends, if it does within it.
+        let wide = rt.pos.x - lt.pos.x;
+        let mut cuts = [0.0f32, 1.0, 1.0, 1.0];
+        let mut n = 1;
+        if wide > 0.0 {
+            for x in [edge, edge + SOFT] {
+                let t = (x - lt.pos.x) / wide;
+                if t > 0.0 && t < 1.0 {
+                    cuts[n] = t;
+                    n += 1;
+                }
+            }
+        }
+        cuts[n] = 1.0;
+        for piece in cuts[..=n].windows(2) {
+            let first = mesh.vertices.len() as u32;
+            mesh.vertices.extend([between(lt, rt, piece[0]), between(lt, rt, piece[1]), between(lb, rb, piece[0]), between(lb, rb, piece[1])]);
+            mesh.indices.extend([first, first + 1, first + 2, first + 2, first + 1, first + 3]);
+        }
+    }
+    visuals.glyph_vertex_range = 0..mesh.vertices.len();
+}
+
+/// When a sweep through `spans` next needs a frame, at `time`, in seconds
+/// from then: while a word is sung, once its edge has moved about a pixel
+/// (`per_char` points a character), however slow; between words, when the
+/// next begins; never, once all are sung.
+fn sweep_wait(spans: &[Span], time: f64, per_char: f32) -> f64 {
+    for &(start, end, from, to) in spans {
+        if time < start {
+            return start - time;
+        }
+        if time < end {
+            let speed = (to - from) as f64 / (end - start).max(0.01) * f64::from(per_char);
+            return (1.0 / speed.max(1.0)).min(0.25);
+        }
+    }
+    f64::INFINITY
+}
+
+/// How wide a character of `galley` is, on average, in points.
+fn per_char(galley: &Galley) -> f32 {
+    let chars = galley.job.text.chars().count().max(1);
+    galley.rows.iter().map(|r| r.rect().width()).sum::<f32>() / chars as f32
 }
 
 /// `a` going toward `b` by `t`, premultiplied as egui's colours are.
@@ -453,7 +567,7 @@ fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
 
 fn plain(app: &App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, big: bool) {
     let texts: Vec<&str> = lyrics.text.lines().collect();
-    let readings = readings_for(app, ui, big, &texts);
+    let readings = readings_for(app, ui, big, || readings::is_japanese(&texts));
     egui::ScrollArea::vertical()
         .id_salt("plain-lyrics")
         .auto_shrink([false, false])
@@ -467,11 +581,9 @@ fn plain(app: &App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, big: bool) {
                 let font = theme::semibold(size);
                 let painter = ui.painter().clone();
                 let source = lyrics.choice();
-                let id = ui.id().with(("plain-readings", video_id, &source, width.round() as i32, readings.1));
-                let laid: Arc<Vec<LaidLine>> = ui.data(|d| d.get_temp(id)).unwrap_or_else(|| {
-                    let laid = Arc::new(texts.iter().map(|t| lay_line(&painter, t, &font, width, Some(readings), 0.0)).collect());
-                    ui.data_mut(|d| d.insert_temp(id, Arc::clone(&laid)));
-                    laid
+                let key = ui.id().with(("plain-readings", video_id, &source, width.round() as i32, readings.1));
+                let laid: Arc<Vec<LaidLine>> = cached(ui, ui.id().with("plain-readings"), key, || {
+                    Arc::new(texts.iter().map(|t| lay_line(&painter, t, &font, width, Some(readings), 0.0)).collect())
                 });
                 ui.spacing_mut().item_spacing.y = size * 0.3;
                 for line in laid.iter() {
@@ -533,21 +645,8 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
     let width = (rect.width() - pad * 2.0).max(60.0);
     let translations = app.settings.lyric_translations;
 
-    // A quiet start becomes a break of its own, with its dots; and so does
-    // a long silence between lines that say when they end.
-    let mut lines: Vec<LyricLine> = Vec::with_capacity(lyrics.lines.len() + 4);
-    if lyrics.lines.first().is_some_and(|l| l.time > 3.0) {
-        lines.push(LyricLine::default());
-    }
-    for (i, line) in lyrics.lines.iter().enumerate() {
-        lines.push(line.clone());
-        if let (Some(end), Some(next)) = (line.end, lyrics.lines.get(i + 1))
-            && next.time - end > BREAK_AFTER
-            && !line.text.is_empty()
-        {
-            lines.push(LyricLine { time: end, ..LyricLine::default() });
-        }
-    }
+    let timeline = timeline(ui, video_id, lyrics);
+    let lines = &timeline.lines;
 
     // Lyrics a little early or late for this recording: moved, per song.
     let offset = app.personal.lyric_offset(video_id);
@@ -555,20 +654,19 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
     let position = heard + LEAD;
     let playing = app.playing();
     // The lines being sung: one, or more when singers overlap.
-    let over = overs(&lines);
+    let over = &timeline.over;
     let active: Vec<usize> = (0..lines.len()).filter(|&i| lines[i].time <= position && position < over[i]).collect();
     let dots_h = size * 0.9;
 
     // Where each line sits, from the top of the lyrics.
     // Laid out once per song, source, size, width, readings and
     // translations, not every frame.
-    let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
-    let readings = readings_for(app, ui, big, &texts);
+    let readings = readings_for(app, ui, big, || timeline.japanese);
     let scale = (ui.ctx().pixels_per_point() * 100.0).round() as i32;
     let machine = &all[0].translated;
     let source = (lyrics.choice(), lines.len(), lyrics.text.len(), machine.lines.len());
-    let layout_id = ui.id().with(("lyrics-layout", video_id, source, width.round() as i32, big, scale, readings.map(|r| r.1), translations));
-    let layout: Arc<Layout> = ui.data(|d| d.get_temp(layout_id)).unwrap_or_else(|| {
+    let layout_key = ui.id().with(("lyrics-layout", video_id, source, width.round() as i32, big, scale, readings.map(|r| r.1), translations));
+    let layout: Arc<Layout> = cached(ui, ui.id().with("lyrics-layout"), layout_key, || {
         let backing_font = theme::semibold(size * 0.62);
         let translation_font = theme::medium(size * 0.5);
         // The other sources' translations, to borrow by the moment sung.
@@ -636,9 +734,7 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
         if machine.from.as_deref() == Some(crate::api::translate::INTO) || !crate::api::translate::worth_asking(&untranslated) {
             untranslated.clear();
         }
-        let layout = Arc::new(Layout { lines: laid, untranslated, borrowed_from, by_machine });
-        ui.data_mut(|d| d.insert_temp(layout_id, layout.clone()));
-        layout
+        Arc::new(Layout { lines: laid, untranslated, borrowed_from, by_machine })
     });
     if !layout.untranslated.is_empty() {
         let id = ui.id().with(("lyrics-translate", video_id));
@@ -714,8 +810,11 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
         }
         let g = ((now - view.glide_start) as f32 / GLIDE).clamp(0.0, 1.0);
         view.offset = view.from + (view.to - view.from) * theme::ease_out(g);
-        if g < 1.0 {
+        if g < 1.0 && (view.to - view.offset).abs() > 0.25 {
             theme::next_frame(ui.ctx());
+        } else {
+            // Its last stretch is less than a pixel: there already.
+            view.offset = view.to;
         }
     }
     ui.data_mut(|d| d.insert_temp(id, view));
@@ -723,7 +822,8 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
     let pointer = ui.ctx().pointer_hover_pos().filter(|p| rect.contains(*p) && response.contains_pointer());
     let fade = if big { 72.0 } else { 40.0 };
     let mut clicked_line = None;
-    let mut sweeping = false;
+    // When the sweep next moves, in seconds.
+    let mut sweep = f64::INFINITY;
     let mut lighting = false;
     let mut edging = false;
     let edges_id = ui.id().with(("lyrics-edges", video_id));
@@ -788,8 +888,9 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
                             color.gamma_multiply(0.72),
                         );
                     }
-                    let end = line.end.unwrap_or_else(|| line.words.last().map_or(line.time, |w| w.end));
-                    sweeping |= is_active && heard < end + 0.1;
+                    if is_active {
+                        sweep = sweep.min(sweep_wait(&laid.timed, heard, per_char(&laid.main.galley)));
+                    }
                 } else if !line.text.is_empty() {
                     paint_line(&painter, line_rect.min, &laid.main, ink(tone(0.32, 1.0, lit)));
                 }
@@ -805,7 +906,9 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
                     // Swept as sung only when the line is timed by the word.
                     if !timed.is_empty() && !laid.timed.is_empty() {
                         paint_sung(&painter, at, galley, sung(timed, heard), level(0.26), level(0.78));
-                        sweeping |= glow > 0.0 && heard < end + 0.1;
+                        if glow > 0.0 {
+                            sweep = sweep.min(sweep_wait(timed, heard, per_char(galley)));
+                        }
                     } else {
                         painter.galley_with_override_text_color(at, galley.clone(), level(0.7));
                     }
@@ -825,21 +928,18 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
         // Paused or not: the view moves either way.
         theme::next_frame(ui.ctx());
     }
-    let footer = footer(lyrics).map(|mut said| {
+    let footer_top = rect.top() + total - view.offset + gap;
+    if footer_top < rect.bottom() && footer_top > rect.top() - 40.0
+        && let Some(mut said) = footer(lyrics)
+    {
         if !layout.borrowed_from.is_empty() {
             said.push_str(&format!("\nTranslations from {}", layout.borrowed_from.join(", ")));
         }
         if layout.by_machine {
             said.push_str("\nTranslations from Unison, Better Lyrics' community (made by machine)");
         }
-        said
-    });
-    if let Some(source) = footer {
-        let top = rect.top() + total - view.offset + gap;
-        if top < rect.bottom() && top > rect.top() - 40.0 {
-            let galley = painter.layout(source, theme::regular(12.5), theme::text_faint(), width);
-            painter.galley(pos2(rect.left() + pad, top), galley, theme::text_faint());
-        }
+        let galley = painter.layout(said, theme::regular(12.5), theme::text_faint(), width);
+        painter.galley(pos2(rect.left() + pad, footer_top), galley, theme::text_faint());
     }
     if response.contains_pointer() || offset != 0.0 {
         nudge(app, ui, rect, video_id, offset, response.contains_pointer());
@@ -852,16 +952,18 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
         view.to = f32::NAN;
         ui.data_mut(|d| d.insert_temp(id, view));
     }
-    if playing && (sweeping || lighting) {
-        // A word being sung, or a line lighting: every frame, at no more
-        // than 60 a second.
+    if playing && lighting {
+        // A line lighting or going out: every frame, at no more than 60 a
+        // second.
         theme::next_frame(ui.ctx());
-    } else if playing
-        && let Some(next) = lines.iter().find(|l| l.time > position)
-    {
-        // Wake for the next line rather than every frame.
-        let wait = (next.time - position).max(0.016);
-        theme::repaint_in(ui.ctx(), std::time::Duration::from_secs_f64(wait));
+    } else if playing {
+        // Otherwise only as the sweep moves (a frame a pixel, at no more
+        // than 60 a second), and for the next line.
+        let next = lines.iter().find(|l| l.time > position).map_or(f64::INFINITY, |l| l.time - position);
+        let wait = sweep.min(next);
+        if wait.is_finite() {
+            theme::repaint_in(ui.ctx(), std::time::Duration::from_secs_f64(wait.max(1.0 / 60.0)));
+        }
     }
 }
 
@@ -1060,13 +1162,13 @@ mod tests {
         // Quick words go out quickly, slow ones ebb away, within bounds.
         let quick = fade_out(&words(0.2, 6), None);
         let slow = fade_out(&words(0.6, 4), None);
-        assert!((quick - 0.5).abs() < 1e-4);
-        assert!((slow - 1.5).abs() < 1e-4);
+        assert!((quick - 0.25).abs() < 1e-4);
+        assert!((slow - 0.75).abs() < 1e-4);
         assert_eq!(fade_out(&words(0.05, 8), None), FADE_MIN);
         assert_eq!(fade_out(&words(3.0, 2), None), FADE_MAX);
         // Timed by the line: its length over its words, or its characters.
-        assert!((fade_out(&[], Some((10.0, 12.0, "one two three four"))) - 1.25).abs() < 1e-4);
-        assert!((fade_out(&[], Some((10.0, 12.0, "夜に咲いた"))) - 1.0).abs() < 1e-4);
+        assert!((fade_out(&[], Some((10.0, 12.0, "one two three four"))) - 0.625).abs() < 1e-4);
+        assert!((fade_out(&[], Some((10.0, 12.0, "夜に咲いた"))) - 0.5).abs() < 1e-4);
         assert_eq!(fade_out(&[], None), LIGHT);
         // Backing vocals sung on after their line, until 15: lit while sung,
         // then dimmed gently, never more than a little in a frame.
@@ -1107,7 +1209,7 @@ mod tests {
         while at < 11.0 + f64::from(EDGE_EASE) {
             at += step;
             let (now, _) = Edge::ease(&mut slot, 0.2, at, false);
-            assert!(last - now < 0.025, "a little a frame");
+            assert!(last - now < 0.8 * 1.25 / EDGE_EASE / 60.0 + 1e-3, "a little a frame");
             last = now;
         }
         let (end, easing) = Edge::ease(&mut slot, 0.2, at, false);
@@ -1122,21 +1224,45 @@ mod tests {
     }
 
     #[test]
-    fn a_swept_line_is_painted_once_over() {
-        // Rows that touch or overlap a little: bands that meet between them.
-        let rows = [(0.0, 20.0), (18.0, 40.0), (40.0, 60.0)];
-        let bands = bands(&rows);
-        assert_eq!(bands.len(), 3);
-        for k in 0..2 {
-            assert_eq!(bands[k].1, bands[k + 1].0, "no gap and no overlap");
-        }
-        assert_eq!((bands[0].1, bands[1].1), (19.0, 40.0));
-        assert!(bands[0].0 < -1000.0 && bands[2].1 > 1000.0);
-        // The soft edge's colours go between the two, never past either.
+    fn a_swept_line_is_one_mesh_cut_at_its_edge() {
+        use egui::epaint::text::RowVisuals;
         let (dim, bright) = (Color32::WHITE.gamma_multiply(0.32), Color32::WHITE);
+        // The soft edge's colours go between the two, never past either.
         assert_eq!(mix(dim, bright, 0.0), dim);
         assert_eq!(mix(dim, bright, 1.0), bright);
         assert!(mix(dim, bright, 0.5).a() > dim.a() && mix(dim, bright, 0.5).a() < bright.a());
+        // Two glyphs, 0-20 and 30-40 across, the edge at 5: the first cut
+        // where the soft edge begins and ends, the second (past it) dim.
+        let mut mesh = egui::Mesh::default();
+        mesh.add_rect_with_uv(Rect::from_min_max(pos2(0.0, 0.0), pos2(20.0, 10.0)), Rect::from_min_max(pos2(100.0, 0.0), pos2(120.0, 10.0)), Color32::WHITE);
+        mesh.add_rect_with_uv(Rect::from_min_max(pos2(30.0, 0.0), pos2(40.0, 10.0)), Rect::from_min_max(pos2(200.0, 0.0), pos2(210.0, 10.0)), Color32::WHITE);
+        let mut visuals = RowVisuals { glyph_vertex_range: 0..8, mesh, ..RowVisuals::default() };
+        cut_at_edge(&mut visuals, 5.0, dim, bright);
+        let mesh = &visuals.mesh;
+        assert_eq!((mesh.vertices.len(), mesh.indices.len()), (16, 24));
+        assert_eq!(visuals.glyph_vertex_range, 0..16);
+        let xs: Vec<f32> = mesh.vertices.iter().step_by(4).map(|v| v.pos.x).collect();
+        assert_eq!(xs, [0.0, 5.0, 17.5, 30.0]);
+        // Bright to the edge, dim past the soft edge, the texture following.
+        assert_eq!((mesh.vertices[0].color, mesh.vertices[1].color), (bright, bright));
+        assert_eq!(mesh.vertices[1].uv.x, 105.0);
+        assert_eq!((mesh.vertices[9].color, mesh.vertices[13].color), (dim, dim));
+        assert!(mesh.indices.chunks(6).enumerate().all(|(q, i)| i == [0, 1, 2, 2, 1, 3].map(|k| k + 4 * q as u32)));
+    }
+
+    #[test]
+    fn frames_only_while_the_singing_moves() {
+        // "ab " sung from 1 to 2, "cd" from 3 to 5: a pause between.
+        let spans = spans(&[word(1.0, 2.0, "ab "), word(3.0, 5.0, "cd")], "ab cd");
+        // Before and between words, nothing until the next begins.
+        assert_eq!(sweep_wait(&spans, 0.5, 10.0), 0.5);
+        assert!((sweep_wait(&spans, 2.4, 10.0) - 0.6).abs() < 1e-9);
+        // While one is sung, about a pixel's travel: 3 characters a second
+        // at 10 points is 30 points a second; slower, longer.
+        assert!((sweep_wait(&spans, 1.5, 10.0) - 1.0 / 30.0).abs() < 1e-9);
+        assert!((sweep_wait(&spans, 4.0, 10.0) - 1.0 / 10.0).abs() < 1e-9);
+        // All sung: no more frames for it.
+        assert_eq!(sweep_wait(&spans, 6.0, 10.0), f64::INFINITY);
     }
 
     #[test]

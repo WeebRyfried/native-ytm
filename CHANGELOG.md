@@ -4,6 +4,13 @@ What changed in each version of Native YTM, newest first. After an update,
 the app shows what is new since the version it had; this file is built into
 it for that (src/changelog.rs).
 
+## 0.3.12 — 21 October 2026
+
+Lighter lyrics, and quicker fades.
+
+- **About 40% less work with the lyrics open.** Each frame now goes to the graphics card in one upload rather than two for every piece of it (which lightens every screen, not just the lyrics), the line being sung is drawn in one piece rather than seven or more, frames come only while the singing moves (fewer on held notes, none between words), and only the song showing has its lyrics kept in memory. With the lyrics beside the queue: 7% of a core rather than 12%.
+- **Quicker fades.** A sung line dims in about half the time it did, still by how fast it was sung (between a fifth of a second and a second), and lines carried toward the edges of the view dim in half a second.
+
 ## 0.3.11 — 21 October 2026
 
 Fades that really go all the way down smoothly.

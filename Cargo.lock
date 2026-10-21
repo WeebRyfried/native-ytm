@@ -1387,8 +1387,6 @@ dependencies = [
 [[package]]
 name = "egui_glow"
 version = "0.36.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "606ed4167daf341e5753d703285c4c1d562324b2c07aa8f405cd7d066fe58f3b"
 dependencies = [
  "bytemuck",
  "egui",
@@ -2894,7 +2892,7 @@ dependencies = [
 
 [[package]]
 name = "native-ytm"
-version = "0.3.11"
+version = "0.3.12"
 dependencies = [
  "anyhow",
  "directories",

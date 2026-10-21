@@ -1,6 +1,6 @@
 [package]
 name = "native-ytm"
-version = "0.3.11"
+version = "0.3.12"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
@@ -87,9 +87,12 @@ winresource = "0.1"
 fastframe-fonts = { path = "vendor/fastframe-fonts" }
 
 # eframe, which redraws for every pointer movement, made to skip frames
-# identical to the one on screen (vendor/eframe/Cargo.toml says more).
+# identical to the one on screen (vendor/eframe/Cargo.toml says more); and
+# egui_glow, made to send a frame to the GPU in one upload rather than two
+# for every mesh (vendor/egui_glow/Cargo.toml).
 [patch.crates-io]
 eframe = { path = "vendor/eframe" }
+egui_glow = { path = "vendor/egui_glow" }
 
 [profile.release]
 lto = "thin"

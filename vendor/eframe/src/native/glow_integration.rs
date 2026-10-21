@@ -1908,16 +1908,12 @@ fn frame_fingerprint(
                     egui::TextureId::Managed(id) => hasher.write_u64(id),
                     egui::TextureId::User(id) => hasher.write_u64(id ^ (1 << 63)),
                 }
+                // The vertices and indices as they are in memory, in bulk:
+                // several times quicker than field by field.
                 hasher.write_usize(mesh.vertices.len());
-                for vertex in &mesh.vertices {
-                    hasher.write_u64(u64::from(vertex.pos.x.to_bits()) << 32 | u64::from(vertex.pos.y.to_bits()));
-                    hasher.write_u64(u64::from(vertex.uv.x.to_bits()) << 32 | u64::from(vertex.uv.y.to_bits()));
-                    hasher.write_u32(u32::from_le_bytes(vertex.color.to_array()));
-                }
+                hasher.write(bytemuck::cast_slice(&mesh.vertices));
                 hasher.write_usize(mesh.indices.len());
-                for index in &mesh.indices {
-                    hasher.write_u32(*index);
-                }
+                hasher.write(bytemuck::cast_slice(&mesh.indices));
             }
             egui::epaint::Primitive::Callback(_) => return None,
         }

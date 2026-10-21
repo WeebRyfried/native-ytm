@@ -185,7 +185,8 @@ Measured with the release build on a laptop drawing on Intel UHD graphics:
 | --- | --- | --- | --- |
 | Open, idle | 101 MB | 0.2% | 0% |
 | Playing | 110 MB | 3% | 0.6% |
-| Full-window player, lyrics moving | 115 MB | 3.3% | 3% |
+| Lyrics beside the queue, word by word | 110 MB | 7% | 6% |
+| Full-window player, lyrics word by word | 105 MB | 8% | 7.5% |
 | Playing from the tray | 33 MB | 0.5% | none |
 
 The interface draws a frame only when something on screen changes, and
@@ -294,10 +295,14 @@ the signed-in player request, then the playback address it names.
 **Frames.** egui runs a frame for every pointer movement. The vendored
 eframe (`vendor/eframe`, search for "native-ytm patch") puts off a frame
 asked for before the screen could show the last, and neither draws nor
-presents a frame identical to the one on screen. Animations the app drives
-are held to 60 frames a second (`theme::repaint_in` makes up for egui
-shortening every delay by a frame). The vendored fastframe-fonts maps the
-system's fallback fonts instead of reading them in.
+presents a frame identical to the one on screen. The vendored egui_glow
+(`vendor/egui_glow`) sends a frame to the GPU in one vertex buffer and one
+index buffer, rather than two made afresh for every mesh. Animations the app
+drives are held to 60 frames a second (`theme::repaint_in` makes up for egui
+shortening every delay by a frame); the line of lyrics being sung is one mesh,
+its glyphs cut and coloured where the singing has got to, drawn about a pixel
+of the singing at a time. The vendored fastframe-fonts maps the system's
+fallback fonts instead of reading them in.
 
 **For development**, the app takes a few environment variables:
 `NATIVE_YTM_ROUTE` opens pages or plays at start (`search:QUERY`,
