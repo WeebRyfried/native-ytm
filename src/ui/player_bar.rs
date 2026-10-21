@@ -73,9 +73,14 @@ fn seek_bar(app: &mut App, ui: &mut Ui, rect: Rect) {
         return;
     };
     let downloaded = app.player.status().downloaded.clamp(0.0, 1.0);
+    // Ends in whole pixels: the song's time moves them a little every
+    // frame, and a frame drawn between (the pointer moving) that looks just
+    // as the last need not be painted.
+    let ppp = ui.ctx().pixels_per_point();
+    let pixel = |x: f32| (x * ppp).round() / ppp;
     if downloaded > 0.0 && app.player.status().token != 0 {
         painter.rect_filled(
-            Rect::from_min_max(track.min, pos2(rect.left() + rect.width() * downloaded, track.bottom())),
+            Rect::from_min_max(track.min, pos2(pixel(rect.left() + rect.width() * downloaded), track.bottom())),
             CornerRadius::ZERO,
             Color32::from_white_alpha(30),
         );
@@ -97,7 +102,7 @@ fn seek_bar(app: &mut App, ui: &mut Ui, rect: Rect) {
         position = dragging;
     }
     let f = (position / duration).clamp(0.0, 1.0) as f32;
-    let x = rect.left() + rect.width() * f;
+    let x = pixel(rect.left() + rect.width() * f);
     painter.rect_filled(
         Rect::from_min_max(track.min, pos2(x, track.bottom())),
         CornerRadius::ZERO,

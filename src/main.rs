@@ -121,6 +121,9 @@ fn main() {
                     size: None,
                     resized_at: None,
                     released_once: false,
+                    settle_at: Some(std::time::Instant::now() + SETTLE),
+                    minimized_at: None,
+                    minimized_released: false,
                     close_when_windowed: false,
                 }))
             }),
@@ -144,10 +147,20 @@ struct Window {
     size: Option<egui::Vec2>,
     resized_at: Option<std::time::Instant>,
     released_once: bool,
+    /// When the memory the window's start used once goes back to Windows,
+    /// and whether it has since the window was last minimised.
+    settle_at: Option<std::time::Instant>,
+    minimized_at: Option<std::time::Instant>,
+    minimized_released: bool,
     /// Closing waits for full screen to end, so the window's size and
     /// place are saved as a window's.
     close_when_windowed: bool,
 }
+
+/// How long after the window opens, and after it is minimised, the memory
+/// the window used once goes back to Windows (see `Window::logic`).
+const SETTLE: std::time::Duration = std::time::Duration::from_secs(15);
+const MINIMIZED_SETTLE: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// A screenshot taken on its own and saved, for checking the interface
 /// without a person at the screen: `NATIVE_YTM_SHOT=out.png`, optionally
@@ -448,6 +461,34 @@ impl eframe::App for Window {
             } else {
                 theme::repaint_in(ctx, if since < first { first - since } else { again - since });
             }
+        }
+        // The graphics driver (Intel's: some 80 MB) uses most of the memory
+        // the window starts with to start it, and then barely again: a
+        // while after the window opens, and a moment after it is minimised,
+        // that goes back to Windows, as after a resize. What is still used
+        // comes straight back (about 16 MB).
+        if let Some(at) = self.settle_at {
+            let left = at.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() && self.resized_at.is_none() {
+                self.settle_at = None;
+                platform::release_unused_memory();
+            } else {
+                theme::repaint_in(ctx, left.max(std::time::Duration::from_millis(100)));
+            }
+        }
+        if self.app.out_of_sight {
+            // Minimised: once, a moment after.
+            let since = *self.minimized_at.get_or_insert_with(std::time::Instant::now);
+            let left = MINIMIZED_SETTLE.saturating_sub(since.elapsed());
+            if !self.minimized_released && left.is_zero() {
+                self.minimized_released = true;
+                platform::release_unused_memory();
+            } else if !self.minimized_released {
+                theme::repaint_in(ctx, left);
+            }
+        } else {
+            self.minimized_at = None;
+            self.minimized_released = false;
         }
         let local = PLAY_LOCAL.load(Ordering::Relaxed);
         if local > 0 && !self.app.local.songs().is_empty() {

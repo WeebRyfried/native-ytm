@@ -4217,6 +4217,9 @@ impl fastframe_shell::Resident for App {
         self.hide = false;
         self.wants_show = false;
         self.save_session();
+        // The window's graphics are gone; what the app keeps running with
+        // is a fraction of what it touched: the rest back to Windows.
+        crate::platform::release_unused_memory();
     }
 
     fn headless_frame(&mut self, _ctx: &egui::Context) -> fastframe_shell::Headless {

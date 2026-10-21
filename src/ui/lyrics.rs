@@ -460,7 +460,10 @@ fn paint_sung(painter: &egui::Painter, at: Pos2, galley: &Arc<Galley>, upto: f32
     let edge_row = galley.rows.iter().position(|r| a.center().y >= r.rect().min.y - 0.5 && a.center().y <= r.rect().max.y + 0.5).unwrap_or(0);
     let b = galley.pos_from_cursor(egui::text::CCursor::new(whole + 1));
     let next_x = if (a.min.y - b.min.y).abs() < 1.0 { b.min.x } else { galley.rows[edge_row].rect().max.x };
-    let edge = a.min.x + (next_x - a.min.x) * upto.fract();
+    // In whole pixels: between, a frame (the pointer moving) is the same
+    // picture as the last, and need not be painted.
+    let ppp = painter.ctx().pixels_per_point();
+    let edge = ((a.min.x + (next_x - a.min.x) * upto.fract()) * ppp).round() / ppp;
     let mut swept = (**galley).clone();
     let (mut vertices, mut indices) = (0, 0);
     for (i, placed) in swept.rows.iter_mut().enumerate() {
@@ -1068,7 +1071,10 @@ fn sources(app: &mut App, ui: &mut Ui, area: Rect, video_id: &str, all: &[&Lyric
 
 /// Three dots that fill in turn over a break, breathing.
 fn dots(ui: &Ui, painter: &egui::Painter, rect: Rect, size: f32, progress: f64, playing: bool) {
-    let t = ui.input(|i| i.time);
+    // In steps of the twentieth of a second they are drawn at (and thirty
+    // steps a dot): a frame between is the same picture, not painted again.
+    let t = (ui.input(|i| i.time) * 20.0).floor() / 20.0;
+    let progress = (progress * 90.0).floor() / 90.0;
     let breath = 1.0 + 0.12 * ((t * 2.4).sin() as f32);
     let r = size * 0.13 * breath;
     let spacing = size * 0.48;

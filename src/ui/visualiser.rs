@@ -30,8 +30,18 @@ pub fn paint(app: &mut App, ui: &Ui, painter: &Painter, bar: Rect) {
         Mode::Mirror => (width / 32.0).round().clamp(14.0, 56.0),
         Mode::Aurora => (width / 34.0).round().clamp(14.0, 48.0),
     } as usize;
-    let dt = ctx.input(|i| i.stable_dt);
-    let moving = app.analyser.update(app.player.scope(), bands, live, dt, app.settings.visualiser_focus);
+    // Moved on thirty times a second, however many frames there are (a
+    // pointer moving draws more): between, the same picture, which need not
+    // be painted again.
+    let now = ctx.input(|i| i.time);
+    let stepped = egui::Id::new("visualiser-stepped");
+    let last: f64 = ctx.data(|d| d.get_temp(stepped)).unwrap_or(f64::NEG_INFINITY);
+    let moving = if now - last >= 0.95 / 30.0 {
+        ctx.data_mut(|d| d.insert_temp(stepped, now));
+        app.analyser.update(app.player.scope(), bands, live, (now - last).min(0.1) as f32, app.settings.visualiser_focus)
+    } else {
+        app.analyser.peaks().iter().any(|p| *p > 0.002)
+    };
     // Thirty frames a second: smooth enough for motion this soft, and each
     // frame redraws the whole window, so half the work of sixty.
     if shown > 0.0 || moving {

@@ -710,7 +710,9 @@ fn explicit_badge(ui: &mut Ui) {
 
 /// The three bars of what is playing, still while paused.
 fn equalizer(ui: &Ui, center: Pos2, playing: bool) {
-    let t = ui.input(|i| i.time) as f32;
+    // In steps of the tenth of a second it is drawn at: a frame between
+    // (the pointer moving) is the same picture, and need not be painted.
+    let t = ((ui.input(|i| i.time) * 10.0).floor() / 10.0) as f32;
     if playing {
         theme::repaint_in(ui.ctx(), std::time::Duration::from_millis(100));
     }

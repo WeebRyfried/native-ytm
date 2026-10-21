@@ -183,18 +183,26 @@ Measured with the release build on a laptop drawing on Intel UHD graphics:
 
 | | Memory | CPU (one core) | GPU |
 | --- | --- | --- | --- |
-| Open, idle | 101 MB | 0.2% | 0% |
-| Playing | 110 MB | 3% | 0.6% |
-| Lyrics beside the queue, word by word | 110 MB | 7% | 6% |
-| Full-window player, lyrics word by word | 105 MB | 8% | 7.5% |
-| Playing from the tray | 33 MB | 0.5% | none |
+| Open, idle | 4 MB | 0.1% | 0% |
+| Playing | 15 MB | 3% | 1.6% |
+| Lyrics beside the queue, word by word | 17 MB | 6% | 3.6% |
+| Full-window player, lyrics word by word | 14 MB | 4.4% | 4.2% |
+| Playing from the tray | 9 MB | 0.5% | none |
 
-The interface draws a frame only when something on screen changes, and
-never faster than the screen shows them; the system's Japanese, Chinese and
-Korean fonts are mapped rather than loaded; artwork stays within a budget.
-Resizing the window makes some graphics drivers (Intel's among them) hold
-on to a buffer for every size it passed through, hundreds of megabytes;
-the app hands that memory back to Windows a second after a resize ends.
+Memory is what Task Manager shows (the private working set), from 15
+seconds after the window opens. Most of what the window starts with is the
+graphics driver's, used to start it and then barely again (about 80 MB with
+Intel's); the app hands it back to Windows then, 3 seconds after the window
+is minimised, when it closes to the tray, and a second after a resize ends
+(when some drivers, Intel's among them, hold a buffer for every size passed
+through, hundreds of megabytes). What is still used comes straight back.
+
+The interface draws a frame only when something on screen changes, never
+faster than the screen shows them nor than 60 a second (30 while the pointer
+moves over things that stay as they are), and its animations hold still
+between their own steps, so a moving pointer costs next to nothing; the
+system's Japanese, Chinese and Korean fonts are mapped rather than loaded;
+artwork stays within a budget.
 
 ## Install
 
@@ -295,13 +303,18 @@ the signed-in player request, then the playback address it names.
 **Frames.** egui runs a frame for every pointer movement. The vendored
 eframe (`vendor/eframe`, search for "native-ytm patch") puts off a frame
 asked for before the screen could show the last, and neither draws nor
-presents a frame identical to the one on screen. The vendored egui_glow
+presents a frame identical to the one on screen; it holds frames to 60 a
+second (30 while they come out unchanged), and asks for a frame put off by
+pointer movement for when it may come, rather than having Windows send a
+paint for every movement. The vendored egui_glow
 (`vendor/egui_glow`) sends a frame to the GPU in one vertex buffer and one
 index buffer, rather than two made afresh for every mesh. Animations the app
 drives are held to 60 frames a second (`theme::repaint_in` makes up for egui
 shortening every delay by a frame); the line of lyrics being sung is one mesh,
 its glyphs cut and coloured where the singing has got to, drawn about a pixel
-of the singing at a time. The vendored fastframe-fonts maps the system's
+of the singing at a time. Animations step only as they are drawn (the seek
+bar in whole pixels, the playing bars ten times a second, the visualiser
+thirty), so a frame between them is identical and is not drawn. The vendored fastframe-fonts maps the system's
 fallback fonts instead of reading them in.
 
 **For development**, the app takes a few environment variables:

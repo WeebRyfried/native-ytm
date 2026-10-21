@@ -92,7 +92,7 @@ struct GlowWinitRunning<'app> {
     /// held back.
     paint_now: bool,
     /// The last frame drew what was already on screen: until one changes
-    /// something, frames come at most 60 times a second.
+    /// something, frames come at most 30 times a second.
     last_unchanged: bool,
 }
 
@@ -127,6 +127,19 @@ impl GlowWinitRunning<'_> {
         let period = Duration::from_secs_f64(1000.0 / f64::from(millihertz) * 0.97);
         self.frame_period = Some((period, Instant::now()));
         period
+    }
+
+    /// When the next frame may come, if that is still to come: no sooner
+    /// than the screen shows one, nor than 60 a second, nor than 30 while
+    /// nothing has been changing (native-ytm patch; the screen's rate as last
+    /// looked up).
+    fn next_frame_at(&self) -> Option<Instant> {
+        let mut period = self.frame_period.map_or(Duration::ZERO, |(period, _)| period).max(Duration::from_secs_f64(0.97 / 60.0));
+        if self.last_unchanged {
+            period = period.max(Duration::from_secs_f64(0.97 / 30.0));
+        }
+        let next = self.last_frame? + period;
+        (Instant::now() < next).then_some(next)
     }
 }
 
@@ -628,17 +641,21 @@ impl GlowWinitRunning<'_> {
             return Ok(EventResult::Wait);
         };
 
-        // native-ytm patch: no more frames than the screen shows. Pointer
+        // native-ytm patch: no more frames than the screen shows, and none
+        // faster than 60 a second, however fast the screen. Pointer
         // movement asks for a frame per event, and a mouse sends hundreds a
         // second; with the driver not holding the swap to the screen's
-        // rate, that kept a core busy. A frame asked for sooner is put off
-        // to the screen's next one, its input gathered meanwhile.
+        // rate, that kept a core busy, and on a 144 Hz screen a moving
+        // pointer had the whole window drawn 144 times a second whenever
+        // anything was moving. The app's own animations go no faster than
+        // 60. A frame asked for sooner is put off to the next one, its
+        // input gathered meanwhile.
         if viewport_id == ViewportId::ROOT && !std::mem::take(&mut self.paint_now) {
-            let mut period = self.frame_period(viewport_id);
+            let mut period = self.frame_period(viewport_id).max(Duration::from_secs_f64(0.97 / 60.0));
             if self.last_unchanged {
-                // Nothing has been changing: a pointer moving over the same
-                // things. Look again at 60 Hz rather than the screen's rate.
-                period = period.max(Duration::from_secs_f64(0.97 / 60.0));
+                // Nothing has been changing: a pointer moving over things
+                // that stay as they are. Look again 30 times a second.
+                period = period.max(Duration::from_secs_f64(0.97 / 30.0));
             }
             if let Some(last) = self.last_frame {
                 let next = last + period;
@@ -1104,6 +1121,13 @@ impl GlowWinitRunning<'_> {
             if repaint_asap {
                 self.paint_now = true;
                 EventResult::RepaintNow(window_id)
+            } else if viewport_id == Some(ViewportId::ROOT)
+                && let Some(next) = self.next_frame_at()
+            {
+                // native-ytm patch: a frame that would be put off anyway is
+                // asked for when it may come, not now: each event of a moving
+                // pointer had Windows send a paint, only for it to be put off.
+                EventResult::RepaintAt(window_id, next)
             } else {
                 EventResult::RepaintNext(window_id)
             }

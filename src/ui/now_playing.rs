@@ -434,6 +434,8 @@ fn quality_chip(ui: &mut Ui, quality: Option<&str>, upgrade: Option<&Upgrade>) {
     if working {
         // A soft band of light sweeping across while the better stream comes.
         let band = 46.0;
+        // Thirty steps a second, as it is drawn.
+        let now = (now * 30.0).floor() / 30.0;
         let x = rect.left() - band + ((now * 0.55).fract() as f32) * (rect.width() + band * 2.0);
         let mut mesh = Mesh::default();
         let clear = Color32::TRANSPARENT;

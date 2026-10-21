@@ -4,6 +4,13 @@ What changed in each version of Native YTM, newest first. After an update,
 the app shows what is new since the version it had; this file is built into
 it for that (src/changelog.rs).
 
+## 0.3.13 — 21 October 2026
+
+A fraction of the memory, and the pointer costs nothing to move.
+
+- **About 15 MB of memory instead of about 95.** Most of what the window starts with is the graphics driver's, used to start it and then barely again: 15 seconds after the window opens, 3 seconds after it is minimised, and when it closes to the taskbar's corner, that goes back to Windows. Task Manager now shows about 15 MB while playing, 4 MB open and idle. What is still in use comes straight back.
+- **Moving the pointer no longer works the graphics card.** On a 144 Hz screen, a moving pointer had the whole window drawn up to 144 times a second whenever anything moved (even the seek bar's creep). Now no frame comes faster than 60 a second, or 30 while the pointer moves over things that stay as they are; animations hold still between their own steps (the seek bar moves in whole pixels, the playing bars ten times a second, the visualiser thirty, the lyrics' sweep a pixel at a time), so the frames between are not drawn; and each movement of the pointer no longer has Windows send a paint. Over empty space while a song plays, the graphics card goes from 9% to 3% and the processor from 21% to 5%.
+
 ## 0.3.12 — 21 October 2026
 
 Lighter lyrics, and quicker fades.
