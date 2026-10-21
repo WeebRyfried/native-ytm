@@ -44,8 +44,8 @@ pub struct Settings {
     pub shuffle: bool,
     /// Closing the window keeps the music playing in the tray.
     pub close_to_tray: bool,
-    /// With the window out of sight, a note at the top right of the screen
-    /// as one song gives way to the next.
+    /// With the window out of sight, the island at the top of the screen as
+    /// one song gives way to the next.
     pub song_note: bool,
     /// The interface language YouTube Music answers in.
     pub language: String,

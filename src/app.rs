@@ -32,6 +32,10 @@ const TRAY_NEXT: &str = "next";
 const TRAY_PREVIOUS: &str = "previous";
 const TRAY_QUIT: &str = "quit";
 
+/// The size the song playing's artwork is fetched at for the media overlay,
+/// which the island at the top of the screen shows too.
+const MEDIA_ART: u32 = 512;
+
 /// Why a watch request was made, so its answer goes to the right place.
 #[derive(Clone, Debug)]
 enum WatchPurpose {
@@ -319,10 +323,12 @@ pub struct App {
     ticking: Arc<AtomicBool>,
     tray: Option<fastframe_tray::Tray>,
     tray_playing: Option<bool>,
-    /// The note at the corner of the screen as songs change, and the song
-    /// it last knew of.
+    /// The island at the top of the screen as songs change; the song it
+    /// last knew of, with its artwork's address; and the artwork of the
+    /// song coming in, still to come when its change was shown.
     overlay: crate::overlay::Overlay,
-    note_last: Option<(u64, crate::overlay::Song)>,
+    note_last: Option<(u64, crate::overlay::Song, Option<String>)>,
+    note_art: Option<(u64, String, Instant)>,
     /// The window is minimised, or there is none (closed to the tray).
     pub out_of_sight: bool,
     waker: fastframe_shell::Waker,
@@ -539,6 +545,7 @@ impl App {
             tray_playing: None,
             overlay: crate::overlay::Overlay::default(),
             note_last: None,
+            note_art: None,
             out_of_sight: false,
             waker,
             quit: false,
@@ -4003,7 +4010,7 @@ impl App {
         let art_file = track
             .as_ref()
             .and_then(|t| t.thumbnail.clone())
-            .and_then(|url| self.images.file(&url, 512));
+            .and_then(|url| self.images.file(&url, MEDIA_ART));
         let uid = self.current_uid.unwrap_or(0);
         let duration = self.duration().map(Duration::from_secs_f64);
         let state = State {
@@ -4151,24 +4158,45 @@ impl App {
         }
     }
 
-    /// One song giving way to another with the window out of sight: a note
-    /// at the corner of the screen, when chosen (Settings, Window).
+    /// One song giving way to another with the window out of sight: the
+    /// island at the top of the screen, when chosen (Settings, Window).
     fn note_tick(&mut self) {
+        // The song coming in's artwork, sent on once it is on disk (the
+        // media overlay fetches it as the song starts), for a few seconds.
+        if let Some((uid, url, since)) = self.note_art.take()
+            && since.elapsed() < Duration::from_secs(5)
+        {
+            match self.images.file(&url, MEDIA_ART) {
+                Some(file) => self.overlay.art(uid, file),
+                None => self.note_art = Some((uid, url, since)),
+            }
+        }
         let uid = self.current().and(self.current_uid);
-        if uid == self.note_last.as_ref().map(|(uid, _)| *uid) {
+        if uid == self.note_last.as_ref().map(|(uid, ..)| *uid) {
             return;
         }
-        let song = self.current().map(|t| crate::overlay::Song {
-            title: self.shown_title(t).to_owned(),
-            artist: t.artist_line(),
+        let song = self.current().map(|t| {
+            let song = crate::overlay::Song {
+                id: uid.unwrap_or(0),
+                title: self.shown_title(t).to_owned(),
+                artist: t.artist_line(),
+                art: None,
+            };
+            (song, t.thumbnail.clone())
         });
-        let last = std::mem::replace(&mut self.note_last, uid.zip(song));
-        if let (Some((_, from)), Some((_, to))) = (last, &self.note_last)
-            && self.settings.song_note
-            && self.out_of_sight
-        {
-            self.overlay.show(crate::overlay::Change { from, to: to.clone() });
+        let last = std::mem::replace(&mut self.note_last, uid.zip(song).map(|(uid, (song, url))| (uid, song, url)));
+        let Some(((_, mut from, from_url), (uid, mut to, to_url))) = last.zip(self.note_last.clone()) else {
+            return;
+        };
+        if !self.settings.song_note || !self.out_of_sight {
+            return;
         }
+        // The same artwork the media overlay shows, so nothing more is
+        // fetched for the island.
+        from.art = from_url.and_then(|url| self.images.file(&url, MEDIA_ART));
+        to.art = to_url.as_deref().and_then(|url| self.images.file(url, MEDIA_ART));
+        self.note_art = if to.art.is_none() { to_url.map(|url| (uid, url, Instant::now())) } else { None };
+        self.overlay.show(crate::overlay::Change { from, to });
     }
 
     pub fn tray_shown(&self) -> bool {

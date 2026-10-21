@@ -143,11 +143,12 @@ sounds as good as your account allows.
 - The media keys and the volume flyout, with the song's name and artwork.
 - Closes to the tray and keeps playing. One copy at a time. Starts with
   Windows if you like, straight to the tray.
-- **Song changes at the corner of the screen**, if you like: with the window
-  minimised or in the tray, a small note at the top right shows the song
-  ending with an arrow, then the next one, for a few seconds. It never takes
-  a click or the focus, stays away from games and videos in full screen,
-  and costs nothing in between (Settings, Window).
+- **Song changes in an island at the top of the screen**, if you like: with
+  the window minimised or in the tray, a black pill comes down from above
+  the screen and springs open to the song ending, its artwork beside its
+  title, slides on to the next one, and a few seconds later goes back up. It
+  never takes a click or the focus, stays away from games and videos in full
+  screen, and costs nothing in between (Settings, Window).
 - **Your YouTube Music history** gets what you play, as on the web.
 - **Discord**: "Listening to" the artist, with the artwork, the song and a
   progress bar on your profile. Songs on this PC show their album's
@@ -275,7 +276,7 @@ cargo build --release
 | Audio | `src/player/` | range downloader (or a file read as it plays), symphonia (MP4, WebM, AAC, and MP3, FLAC, Vorbis, ALAC, WAV for local files), libopus for Opus, rubato resampler, the smart crossfade (`smart.rs`: where the songs go quiet), the equaliser (`eq.rs`, in the audio callback), fastframe-audio output |
 | Music on this PC | `src/local.rs` | the folder scan (a thread at background priority), tags and pictures read once into an index, search (with readings of Japanese names), artwork found online |
 | Updates | `src/update.rs`, `src/changelog.rs` | the latest GitHub release, the download checked against its SHA-256 digest, the running program renamed aside for the new one; CHANGELOG.md built in, for what is new after an update |
-| Song note | `src/overlay.rs` | a layered window on a thread of its own, both made for a song change and gone once it fades; the words drawn once with GDI, each frame put together from them only while something moves |
+| Song island | `src/overlay.rs` | a layered window on a thread of its own, both made for a song change and gone once it has gone back up; each song's words drawn once with GDI and its artwork read once from the file the media overlay fetched; each frame (under a millisecond) put together from them only while something moves, on springs |
 | Lyric readings | `src/readings.rs` | Japanese words read longest match first from a table made from JMdict, then put in romaji or hiragana |
 | Songs on disk | `src/cache.rs`, `src/lyrics.rs`, `src/kept_pages.rs` | downloads, and whole files kept from plays (the best quality heard, the least recently played going first); lyrics once found; Home and the library's pages as they last loaded |
 | Stats | `src/stats.rs`, `src/ui/stats.rs` | the plays the app hears (one line of JSON each), summed over a stretch; Last.fm's own over the same |

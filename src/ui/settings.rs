@@ -640,7 +640,7 @@ fn appearance(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
         toggle_row(
             ui,
             "Show song changes",
-            "With the window minimised or in the taskbar's corner, a small note at the top right of the screen shows the song ending and the one coming in, for a few seconds. It never takes a click, and stays away from games and videos in full screen.",
+            "With the window minimised or in the taskbar's corner, an island comes down at the top of the screen as one song gives way to the next: its artwork and title, then the next song's, for a few seconds. It never takes a click, and stays away from games and videos in full screen.",
             &mut draft.song_note,
         );
         divider(ui);
