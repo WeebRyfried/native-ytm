@@ -261,23 +261,22 @@ pub fn show(app: &mut App, ui: &mut Ui, big: bool) {
             let area = ui.available_rect_before_wrap();
             let shown = all[chosen];
             if shown.lines.is_empty() {
+                ui.vertical(|ui| sync_button(app, ui, &video_id, "Sync to the song"));
+                ui.add_space(8.0);
                 plain(app, ui, &video_id, shown, big);
             } else {
+                // Syncing word by word, from the sources' menu: its steps above.
+                if app.lyric_sync.songs.contains_key(&video_id) {
+                    ui.vertical(|ui| sync_button(app, ui, &video_id, ""));
+                    ui.add_space(8.0);
+                }
                 synced(app, ui, &video_id, shown, &all, big);
             }
             let pointed = ui.ctx().pointer_hover_pos().is_some_and(|p| area.contains(p));
             sources(app, ui, area, &video_id, &all, chosen, pointed);
         }
-        Some(Loadable::Failed(_)) => {
-            if message_with_retry(ui, "Couldn't look up the lyrics just now") {
-                app.actions.push(Action::RetryLyrics);
-            }
-        }
-        Some(Loadable::Ready(None)) => {
-            if message_with_retry(ui, "No lyrics for this song") {
-                app.actions.push(Action::RetryLyrics);
-            }
-        }
+        Some(Loadable::Failed(_)) => missing(app, ui, &video_id, "Couldn't look up the lyrics just now"),
+        Some(Loadable::Ready(None)) => missing(app, ui, &video_id, "No lyrics for this song"),
         Some(Loadable::Loading) | None => widgets::spinner(ui),
     }
 }
@@ -287,11 +286,109 @@ fn message(ui: &mut Ui, text: &str) {
     ui.vertical_centered(|ui| ui.label(RichText::new(text).color(theme::text_dim())));
 }
 
-/// A message, and under it a button that looks again: whether it was clicked.
-fn message_with_retry(ui: &mut Ui, text: &str) -> bool {
+/// No lyrics to show: why, a button that looks again, and one that writes
+/// them down from the song.
+fn missing(app: &mut App, ui: &mut Ui, video_id: &str, text: &str) {
     message(ui, text);
     ui.add_space(12.0);
-    ui.vertical_centered(|ui| widgets::pill(ui, Some(Icon::Refresh), "Try again", false).clicked()).inner
+    ui.vertical_centered(|ui| {
+        if widgets::pill(ui, Some(Icon::Refresh), "Try again", false).clicked() {
+            app.actions.push(Action::RetryLyrics);
+        }
+        ui.add_space(8.0);
+        sync_button(app, ui, video_id, "Write them down from the song");
+    });
+}
+
+/// The button that times plain lyrics to the song by listening to it (or,
+/// with none, writes them down from it); once pressed, the four steps it
+/// goes through, and why it stopped if it did, with a button to try again.
+/// Only ever on a click: each listen costs the service the song's length.
+fn sync_button(app: &mut App, ui: &mut Ui, video_id: &str, label: &str) {
+    match app.lyric_sync.songs.get(video_id).cloned() {
+        None => {
+            let busy = app.syncing_lyrics();
+            let response = widgets::pill(ui, Some(Icon::Mix), label, false)
+                .on_hover_text("Fish Audio listens to the song and times each word to it. Kept for next time.");
+            if response.clicked() && !busy {
+                app.actions.push(Action::SyncLyrics);
+            }
+        }
+        Some(state) => {
+            let again = sync_steps(ui, &state);
+            if again && !app.syncing_lyrics() {
+                app.actions.push(Action::SyncLyrics);
+            }
+        }
+    }
+}
+
+/// While a song's lyrics sync (and a moment after, or once it stopped): its
+/// four steps as small icons joined by lines, a check on each one done, and
+/// under them a line saying what it is doing. Quiet: nothing moves but the
+/// steps filling in. Whether "Try again" was clicked, after a failure.
+fn sync_steps(ui: &mut Ui, state: &crate::app::SyncState) -> bool {
+    use crate::app::SyncState;
+    use crate::lyrics_sync::STEPS;
+    let (step, running, failed) = match state {
+        SyncState::Running(progress) => (progress.get(), true, None),
+        SyncState::Done(_, step) => (step.clone(), false, None),
+        SyncState::Failed(step, error) => (step.clone(), false, Some(error.as_str())),
+    };
+    let done = matches!(state, SyncState::Done(..));
+    let width = ui.available_width().min(360.0);
+    let radius = 10.0;
+    let (rect, _) = ui.allocate_exact_size(vec2(width, radius * 2.0 + 18.0), Sense::hover());
+    let painter = ui.painter_at(rect.expand(2.0));
+    let icons = [Icon::Download, Icon::Visualiser, Icon::Lyrics, Icon::Mix];
+    let inner = rect.shrink2(vec2(24.0, 0.0));
+    let y = rect.top() + radius + 1.0;
+    let centre = |i: usize| pos2(inner.left() + inner.width() * i as f32 / (STEPS.len() - 1) as f32, y);
+    let red = Color32::from_rgb(0xd9, 0x3f, 0x34);
+    for i in 0..STEPS.len() - 1 {
+        let (a, b) = (centre(i) + vec2(radius + 3.0, 0.0), centre(i + 1) - vec2(radius + 3.0, 0.0));
+        let filled = done || i < step.step;
+        painter.line_segment([a, b], egui::Stroke::new(1.0, if filled { theme::accent().gamma_multiply(0.8) } else { theme::divider() }));
+    }
+    for (i, icon) in icons.iter().enumerate() {
+        let c = centre(i);
+        let is_done = done || i < step.step;
+        let is_now = !done && i == step.step;
+        let (fill, tint) = if failed.is_some() && is_now {
+            (red, Color32::WHITE)
+        } else if is_done {
+            (theme::accent(), Color32::WHITE)
+        } else if is_now {
+            (theme::surface_active(), theme::text())
+        } else {
+            (theme::surface(), theme::text_faint())
+        };
+        painter.circle_filled(c, radius, fill);
+        let shown = if is_done { Icon::Check } else { *icon };
+        shown.image(tint, 11.0).paint_at(ui, Rect::from_center_size(c, egui::Vec2::splat(11.0)));
+        let label = if is_now || is_done { theme::text_dim() } else { theme::text_faint() };
+        painter.text(c + vec2(0.0, radius + 4.0), egui::Align2::CENTER_TOP, STEPS[i], theme::regular(10.5), label);
+    }
+    // What it is doing, in a line.
+    let (said, colour) = match (failed, done) {
+        (Some(error), _) => (format!("{error}."), theme::accent_text()),
+        (None, true) => ("Synced: the lyrics follow the song.".to_owned(), theme::text_dim()),
+        (None, false) => (step.log.last().cloned().unwrap_or_default(), theme::text_faint()),
+    };
+    ui.add_space(4.0);
+    ui.add(egui::Label::new(RichText::new(said).color(colour).font(theme::regular(12.0))).wrap());
+    if running {
+        // The line changes as the task goes: a look twice a second.
+        theme::repaint_in(ui.ctx(), std::time::Duration::from_millis(500));
+    } else if let SyncState::Done(at, _) = state {
+        let left = crate::app::DONE_SHOWN_SECS - at.elapsed().as_secs_f32();
+        theme::repaint_in(ui.ctx(), std::time::Duration::from_secs_f32(left.max(0.0) + 0.05));
+    }
+    if failed.is_some() {
+        ui.add_space(6.0);
+        return widgets::pill(ui, Some(Icon::Refresh), "Try again", false).clicked();
+    }
+    false
 }
 
 /// Readings for these lyrics, when they are wanted and Japanese: the
@@ -1079,6 +1176,13 @@ fn sources(app: &mut App, ui: &mut Ui, area: Rect, video_id: &str, all: &[&Lyric
             }
         }
         ui.separator();
+        if !all[chosen].by_word()
+            && !app.syncing_lyrics()
+            && ui.button("Sync word by word").on_hover_text("Fish Audio listens to the song and times each word to it").clicked()
+        {
+            app.actions.push(Action::SyncLyrics);
+            ui.close();
+        }
         if ui.button("Look again").on_hover_text("Ask every source for this song's lyrics again").clicked() {
             app.actions.push(Action::RetryLyrics);
             ui.close();

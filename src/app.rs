@@ -24,8 +24,10 @@ use crate::settings::{self, Paths, Repeat, Session, Settings};
 use crate::{discord, lastfm, local, net, update};
 
 mod art_theme;
+mod lyric_sync;
 mod tools;
 
+pub use lyric_sync::{DONE_SHOWN_SECS, SyncState};
 pub use tools::Job;
 
 /// Set by another launch of the app, which asks for the window.
@@ -287,6 +289,8 @@ pub struct App {
     pub sign_in: Option<SignInDialog>,
     /// yt-dlp: installing, updating, and signing in from a browser.
     pub tools: tools::Tools,
+    /// Songs whose lyrics are being timed by listening, or could not be.
+    pub lyric_sync: lyric_sync::LyricSync,
     /// The look that follows the artwork.
     art_theme: art_theme::ArtTheme,
     pub picker: Option<Vec<Track>>,
@@ -538,6 +542,7 @@ impl App {
             playlists: Vec::new(),
             sign_in: None,
             tools: tools::Tools::default(),
+            lyric_sync: lyric_sync::LyricSync::default(),
             art_theme: art_theme::ArtTheme::default(),
             picker: None,
             new_playlist: None,
@@ -751,6 +756,7 @@ impl App {
         }
         self.art_tick();
         self.tools_tick();
+        self.lyric_sync_tick();
         self.art_theme_tick();
         while let Ok(picked) = self.folder_picked.1.try_recv() {
             self.picking_folder = false;
@@ -3792,6 +3798,7 @@ impl App {
                 self.save_settings();
             }
             Action::RetryQuality => self.retry_quality(),
+            Action::SyncLyrics => self.sync_lyrics(),
             Action::RetryLyrics => {
                 self.lyrics_retry.remove(&self.current().map(|t| t.video_id.clone()).unwrap_or_default());
                 if let Some(id) = self.current().map(|t| t.video_id.clone())

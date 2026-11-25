@@ -57,13 +57,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let open = ctx.animate_bool_with_time(egui::Id::new("full-view-open"), app.full_view, 0.22);
     if theme::washed() && !fullscreen {
         wash(app, ui, open);
+    } else if !fullscreen && open > 0.0 {
+        under_title_bar(app, ui, open);
     }
     if !fullscreen {
         egui::Panel::top("titlebar")
             .exact_size(titlebar::HEIGHT)
             .resizable(false)
             .show_separator_line(false)
-            .frame(Frame::new().fill(titlebar::fill()))
+            .frame(Frame::new().fill(titlebar::fill(theme::ease_out(open))))
             .show(ui, |ui| titlebar::show(app, ui));
         egui::Panel::bottom("player")
             .exact_size(theme::PLAYER_HEIGHT)
@@ -133,6 +135,17 @@ fn wash(app: &mut App, ui: &mut egui::Ui, open: f32) {
             now_playing::backdrop(app, ui, screen, strip, url.as_deref(), None, levels);
         }
     }
+}
+
+/// With the full view open, its picture carries on under the title bar,
+/// which clears as the view comes in, so the two read as one.
+fn under_title_bar(app: &mut App, ui: &mut egui::Ui, open: f32) {
+    let screen = ui.max_rect();
+    let strip = Rect::from_min_max(screen.min, pos2(screen.right(), screen.top() + titlebar::HEIGHT));
+    let url = app.current().and_then(|t| t.thumbnail.clone());
+    let mut layer = ui.new_child(egui::UiBuilder::new().id_salt("under-title-bar").max_rect(screen));
+    layer.multiply_opacity(theme::ease_out(open));
+    now_playing::backdrop(app, &layer, screen, strip, url.as_deref(), None, now_playing::FULL_VIEW_LEVELS);
 }
 
 /// How much of the floating bar shows in full screen, from 0 to 1: all of

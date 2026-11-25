@@ -261,6 +261,10 @@ impl Simulate {
 /// `download` in NATIVE_YTM_ROUTE: download the song playing, once one is.
 static DOWNLOAD_PLAYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// `sync` in NATIVE_YTM_ROUTE: sync the song's lyrics by listening, once it
+/// plays (as the button in the lyrics does).
+static SYNC_PLAYING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// `update` in NATIVE_YTM_ROUTE: install an update as soon as one is
 /// found (with NATIVE_YTM_VERSION, an older version to be).
 static UPDATE_WHEN_FOUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -301,6 +305,10 @@ fn dev_route(app: &mut App) {
             "cached" => Action::Navigate(Route::Library(LibraryTab::Cached)),
             "download" => {
                 DOWNLOAD_PLAYING.store(true, std::sync::atomic::Ordering::Relaxed);
+                continue;
+            }
+            "sync" => {
+                SYNC_PLAYING.store(true, std::sync::atomic::Ordering::Relaxed);
                 continue;
             }
             "update" => {
@@ -525,6 +533,11 @@ impl eframe::App for Window {
         {
             DOWNLOAD_PLAYING.store(false, Ordering::Relaxed);
             self.app.actions.push(native_ytm::model::Action::SaveOffline(vec![track]));
+        }
+        let lyrics_here = self.app.current().is_some_and(|t| matches!(self.app.lyrics.get(&t.video_id), Some(native_ytm::model::Loadable::Ready(_))));
+        if SYNC_PLAYING.load(Ordering::Relaxed) && self.app.playing() && self.app.position() > 1.0 && lyrics_here {
+            SYNC_PLAYING.store(false, Ordering::Relaxed);
+            self.app.actions.push(native_ytm::model::Action::SyncLyrics);
         }
         if self.seek.is_some() && self.app.playing() && self.app.position() > 0.5 {
             let to = self.seek.take().unwrap_or_default();

@@ -1,6 +1,6 @@
 [package]
 name = "native-ytm"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
@@ -35,7 +35,6 @@ fastframe-fonts = { git = "https://github.com/crmne/fastframe", rev = "bb79dbdde
 fastframe-icons = { git = "https://github.com/crmne/fastframe", rev = "bb79dbddef01e660f9cfc37ccd9dff1c299a8d47" }
 fastframe-log = { git = "https://github.com/crmne/fastframe", rev = "bb79dbddef01e660f9cfc37ccd9dff1c299a8d47" }
 fastframe-now-playing = { git = "https://github.com/crmne/fastframe", rev = "bb79dbddef01e660f9cfc37ccd9dff1c299a8d47" }
-fastframe-scroll = { git = "https://github.com/crmne/fastframe", rev = "bb79dbddef01e660f9cfc37ccd9dff1c299a8d47" }
 fastframe-shell = { git = "https://github.com/crmne/fastframe", rev = "bb79dbddef01e660f9cfc37ccd9dff1c299a8d47" }
 fastframe-instance = { git = "https://github.com/crmne/fastframe", rev = "bb79dbddef01e660f9cfc37ccd9dff1c299a8d47" }
 fastframe-tray = { git = "https://github.com/crmne/fastframe", rev = "bb79dbddef01e660f9cfc37ccd9dff1c299a8d47" }
@@ -43,7 +42,7 @@ fastframe-text = { git = "https://github.com/crmne/fastframe", rev = "bb79dbddef
 raw-window-handle = "0.6"
 # InnerTube requests, stream downloads and artwork. rustls, so the build
 # needs no OpenSSL.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "gzip", "http2", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "json", "gzip", "http2", "stream", "multipart"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "process"] }
 # Demuxing and AAC: YouTube's MP4 (itag 140) and WebM (Opus) audio; and
 # for the songs in the person's own folders, MP3, FLAC, Ogg Vorbis, WAV,

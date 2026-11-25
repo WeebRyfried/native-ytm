@@ -316,9 +316,11 @@ fn sign_in(app: &mut App, ctx: &egui::Context) {
     }
     if close {
         if app.sign_in.as_ref().is_some_and(|d| d.busy) {
-            // Cancelled mid-check: forget the cookie being checked.
+            // Cancelled mid-check: forget the cookie being checked, and the
+            // browser's answer should it still come.
             app.backend.send(crate::backend::Request::SetAuth(None));
             app.signed_in = false;
+            app.tools.cancel_sign_in();
         }
         app.sign_in = None;
     }

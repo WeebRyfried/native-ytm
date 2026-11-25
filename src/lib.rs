@@ -14,6 +14,7 @@ pub mod lastfm;
 pub mod local;
 pub mod lyrics;
 pub mod lyrics_check;
+pub mod lyrics_sync;
 pub mod model;
 pub mod net;
 pub mod overlay;

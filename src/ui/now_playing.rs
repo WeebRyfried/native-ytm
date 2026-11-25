@@ -18,7 +18,10 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect, rise: f32, foot: f32, chrome
     let track = app.current().cloned();
     let deck = track.as_ref().map(|t| deal(app, ui, t.thumbnail.clone()));
     let turning = deck.as_ref().and_then(|d| d.swap.as_ref()).map(|s| smooth(s.t));
-    backdrop(app, ui, rect, rect, track.as_ref().and_then(|t| t.thumbnail.as_deref()), turning, FULL_VIEW_LEVELS);
+    // Laid over the whole window, drawn in this view's part: the title
+    // bar above carries on the same picture.
+    let canvas = ui.ctx().content_rect();
+    backdrop(app, ui, canvas, rect, track.as_ref().and_then(|t| t.thumbnail.as_deref()), turning, FULL_VIEW_LEVELS);
 
     if chrome > 0.0 {
         let close = Rect::from_min_size(rect.min + vec2(20.0, 16.0 + rise), vec2(40.0, 40.0));

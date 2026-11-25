@@ -4,6 +4,18 @@ What changed in each version of Native YTM, newest first. After an update,
 the app shows what is new since the version it had; this file is built into
 it for that (src/changelog.rs).
 
+## 0.4.1 — 25 November 2026
+
+Lyrics synced by listening to the song, and a title bar that blends in on every theme.
+
+- **Sync to the song.** Lyrics that come as plain text now have a **Sync to the song** button: Fish Audio's speech recognition listens to the song and each word takes the time it was sung at, so they sweep word by word like the rest. Lyrics timed only by the line can be synced word by word from the sources' menu. Tried on a song LRCLIB has timed, the lines landed within about half a second of LRCLIB's on average.
+- **Lyrics for songs that have none.** Where no source has the song, **Write them down from the song** turns what is heard into timed lyrics of its own (it may mishear).
+- **What it is doing, as it goes:** four small steps under the button (fetch, prepare, listen, sync) tick off as each is done, with a line saying what is happening; if it stops, it says why, with Try again.
+- **Only on a click,** for the song showing, one song at a time, so the service is never asked on its own. A song takes ten to twenty seconds, and what is found is kept with the song's other lyrics, there next time and offline. Settings, Advanced takes a Fish Audio key of your own.
+- **The title bar blends in on every theme.** It was the sidebar's colour, darker than the page beneath it, so its lower half read as a black band; it is the page's colour now. With the full-window player open, the artwork's colours carry on up through it, as they do in the Artwork theme.
+- **Cancelling a sign-in from the browser** now really cancels it: an answer that arrives after Cancel is let go rather than signing you in.
+- An unused library is no longer built in.
+
 ## 0.4.0 — 25 November 2026
 
 Sign in from your browser, a title bar of its own, and a theme from the artwork.

@@ -1644,14 +1644,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fastframe-scroll"
-version = "0.4.1"
-source = "git+https://github.com/crmne/fastframe?rev=bb79dbddef01e660f9cfc37ccd9dff1c299a8d47#bb79dbddef01e660f9cfc37ccd9dff1c299a8d47"
-dependencies = [
- "egui",
-]
-
-[[package]]
 name = "fastframe-shell"
 version = "0.4.1"
 source = "git+https://github.com/crmne/fastframe?rev=bb79dbddef01e660f9cfc37ccd9dff1c299a8d47#bb79dbddef01e660f9cfc37ccd9dff1c299a8d47"
@@ -2769,6 +2761,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
+name = "mime_guess"
+version = "2.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7c44f8e672c00fe5308fa235f821cb4198414e1c77935c1ab6948d3fd78550e"
+dependencies = [
+ "mime",
+ "unicase",
+]
+
+[[package]]
 name = "mime_guess2"
 version = "2.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2892,7 +2894,7 @@ dependencies = [
 
 [[package]]
 name = "native-ytm"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "directories",
@@ -2905,7 +2907,6 @@ dependencies = [
  "fastframe-instance",
  "fastframe-log",
  "fastframe-now-playing",
- "fastframe-scroll",
  "fastframe-shell",
  "fastframe-text",
  "fastframe-tray",
@@ -4040,6 +4041,7 @@ dependencies = [
  "hyper-util",
  "js-sys",
  "log",
+ "mime_guess",
  "percent-encoding",
  "pin-project-lite",
  "quinn",

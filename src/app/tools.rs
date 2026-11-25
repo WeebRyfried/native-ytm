@@ -30,6 +30,8 @@ pub struct Tools {
     pub job: Option<Job>,
     /// A browser is being asked for its sign-in.
     pub signing: bool,
+    /// The sign-in being asked for was cancelled: its answer is let go.
+    cancelled: bool,
     /// What the last check or update said, and whether it went wrong.
     pub said: Option<(String, bool)>,
     /// Signed out by hand: not signed back in from the browser by itself
@@ -45,6 +47,15 @@ pub struct Tools {
     done: (Sender<Event>, Receiver<Event>),
 }
 
+impl Tools {
+    /// The sign-in from a browser under way is not wanted any more.
+    pub fn cancel_sign_in(&mut self) {
+        if self.signing {
+            self.cancelled = true;
+        }
+    }
+}
+
 impl Default for Tools {
     fn default() -> Self {
         Self {
@@ -52,6 +63,7 @@ impl Default for Tools {
             latest: None,
             job: None,
             signing: false,
+            cancelled: false,
             said: None,
             paused: false,
             sign_in_after_install: false,
@@ -131,6 +143,7 @@ impl App {
             dialog.busy = true;
         }
         self.tools.signing = true;
+        self.tools.cancelled = false;
         let browser = browser.unwrap_or_else(|| self.settings.sign_in_browser.clone());
         let scratch = self.paths.scratch();
         let (tx, wake) = self.send_tool();
@@ -267,6 +280,9 @@ impl App {
                         self.tools.said = Some((error, true));
                     }
                 }
+            }
+            Event::Cookies { .. } if std::mem::take(&mut self.tools.cancelled) => {
+                log::info!("a sign-in from the browser came after it was cancelled: let go");
             }
             Event::Cookies { auto, result } => match result {
                 Ok((browser, header)) => {

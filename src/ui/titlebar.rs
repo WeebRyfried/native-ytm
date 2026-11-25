@@ -1,5 +1,5 @@
 //! The window's own title bar, in place of Windows': the logo and the name
-//! on a strip of the sidebar's colour lit by the theme's accent, the
+//! on a strip of the page's colour lit by the theme's accent, the
 //! window's three buttons on the right. It moves the window when dragged,
 //! and a double-click maximises it. Also the window's edges, which resize
 //! it, as a window without Windows' frame has none of its own.
@@ -13,9 +13,12 @@ use crate::ui::widgets;
 pub const HEIGHT: f32 = 34.0;
 const BUTTON_W: f32 = 46.0;
 
-/// The bar's colour: the sidebar's, so the two read as one.
-pub fn fill() -> Color32 {
-    theme::panel(theme::sidebar())
+/// The bar's colour: the page's, so the bar runs into the window beneath
+/// (the sidebar's darker colour made a black band of its lower half), and
+/// clear as the full view comes in (`open`), whose picture carries on under
+/// it. Clear over the Artwork theme's wash.
+pub fn fill(open: f32) -> Color32 {
+    theme::panel(theme::bg()).gamma_multiply(1.0 - open)
 }
 
 pub fn show(_app: &mut App, ui: &mut Ui) {
