@@ -88,10 +88,15 @@ pub fn key(own: &str) -> String {
     if !own.is_empty() {
         return own.to_owned();
     }
-    let n = SEALED.len();
+    // Through black_box, so the compiler cannot unseal it ahead of time and
+    // keep the answer in the program as text (it did, in a release build).
+    let sealed: &[u8] = std::hint::black_box(&SEALED[..]);
+    let pad: &[u8] = std::hint::black_box(&PAD[..]);
+    let (step, start) = std::hint::black_box((73u32, 41u32));
+    let n = sealed.len().min(pad.len());
     let bytes: Vec<u8> = (0..n)
         .rev()
-        .map(|i| SEALED[i] ^ PAD[i] ^ ((i as u32 * 73 + 41) & 0xff) as u8)
+        .map(|i| sealed[i] ^ pad[i] ^ ((i as u32 * step + start) & 0xff) as u8)
         .collect();
     String::from_utf8(bytes).unwrap_or_default()
 }
