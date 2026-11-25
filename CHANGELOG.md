@@ -4,6 +4,12 @@ What changed in each version of Native YTM, newest first. After an update,
 the app shows what is new since the version it had; this file is built into
 it for that (src/changelog.rs).
 
+## 0.4.2 — 25 November 2026
+
+Syncing lyrics by listening, taken out again.
+
+- **No more Sync to the song.** Timing lyrics by sending the song to Fish Audio didn't come out well enough, so the buttons are gone, and so are the lyrics it saved: songs show their own lyrics again. The title bar's fix and the rest of 0.4.1 stay.
+
 ## 0.4.1 — 25 November 2026
 
 Lyrics synced by listening to the song, and a title bar that blends in on every theme.

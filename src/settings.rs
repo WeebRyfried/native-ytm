@@ -66,9 +66,6 @@ pub struct Settings {
     pub ytdlp_checked: u64,
     /// The offer to install yt-dlp, until hidden.
     pub ytdlp_prompt: bool,
-    /// A Fish Audio API key of the person's own, for syncing lyrics by
-    /// listening; empty uses the app's.
-    pub fish_key: String,
     /// Signed in, ask for Premium's 256 kb/s streams (through yt-dlp).
     pub premium_quality: bool,
     /// Songs kept on disk, at the best quality heard; 0 keeps none.
@@ -141,7 +138,6 @@ impl Default for Settings {
             ytdlp_auto_update: true,
             ytdlp_checked: 0,
             ytdlp_prompt: true,
-            fish_key: String::new(),
             premium_quality: true,
             cached_songs: 100,
             synced_lyrics: true,

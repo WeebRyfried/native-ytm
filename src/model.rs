@@ -352,9 +352,6 @@ pub enum Action {
     RetryQuality,
     /// The lyrics, asked of every source again.
     RetryLyrics,
-    /// The lyrics timed by listening to the song (or, with none, written
-    /// down from it): on a click only.
-    SyncLyrics,
     SignOut,
     ApplySettings(Box<Settings>),
     CopyLink(String),

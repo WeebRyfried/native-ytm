@@ -908,10 +908,6 @@ fn advanced(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
         row(ui, "Discord application", "Its name shows in your status.", 260.0, |ui| {
             ui.add(egui::TextEdit::singleline(&mut draft.discord_client_id).desired_width(240.0).hint_text("YouTube Music"));
         });
-        divider(ui);
-        row(ui, "Fish Audio API key", "Your own, for syncing lyrics. Empty uses the app's.", 260.0, |ui| {
-            ui.add(egui::TextEdit::singleline(&mut draft.fish_key).desired_width(240.0).password(true).hint_text("the app's"));
-        });
         if app.lastfm.status() == crate::lastfm::Status::Disconnected {
             divider(ui);
             let mut create = false;

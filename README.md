@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="../../releases/latest"><img src="https://img.shields.io/badge/download-v0.4.1-ff0033?style=flat-square" alt="Download v0.4.1"></a>
+  <a href="../../releases/latest"><img src="https://img.shields.io/badge/download-v0.4.2-ff0033?style=flat-square" alt="Download v0.4.2"></a>
   <img src="https://img.shields.io/badge/Windows-x64-0078D4?style=flat-square&logo=windows11&logoColor=white" alt="Windows x64">
   <img src="https://img.shields.io/badge/Rust-2024-B7410E?style=flat-square&logo=rust&logoColor=white" alt="Rust 2024">
   <img src="https://img.shields.io/badge/UI-egui%20%2B%20OpenGL-1f1f1f?style=flat-square" alt="egui and OpenGL">
@@ -59,9 +59,6 @@ sounds as good as your account allows.
   offline. The next song's are looked up while one plays. A later look adds
   any source found since and never takes away what was found, even when a
   source is down.
-- **Lyrics synced by listening**, on a click: plain lyrics timed word by
-  word to the song by Fish Audio's speech recognition, or, for a song with
-  none, written down from it. Kept like the rest.
 - **What it all takes**, in Settings: one bar of a colour per kind
   (downloads, songs kept, artwork, lyrics…) and the space left on the
   drive.

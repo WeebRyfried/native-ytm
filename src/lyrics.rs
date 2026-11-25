@@ -77,7 +77,9 @@ impl LyricsCache {
 
     fn read(&self, video_id: &str, synced: bool) -> Option<Kept> {
         let bytes = std::fs::read(self.path(video_id, synced)).ok()?;
-        serde_json::from_slice(&bytes).ok()
+        let mut kept: Kept = serde_json::from_slice(&bytes).ok()?;
+        kept.lyrics = kept.lyrics.and_then(without_withdrawn);
+        Some(kept)
     }
 
     /// The song's lyrics as last found. None when they have not been
@@ -141,6 +143,27 @@ impl LyricsCache {
     }
 }
 
+/// Sources no longer offered: lyrics 0.4.1 timed by sending the song to
+/// Fish Audio. Kept files may still hold them; they are let go when read.
+const WITHDRAWN: [&str; 1] = ["Fish Audio"];
+
+/// The lyrics without any from a withdrawn source; none if that was all.
+fn without_withdrawn(lyrics: Lyrics) -> Option<Lyrics> {
+    let gone = |l: &Lyrics| l.provider.as_deref().is_some_and(|p| WITHDRAWN.contains(&p));
+    if !gone(&lyrics) && !lyrics.others.iter().any(gone) {
+        return Some(lyrics);
+    }
+    let translated = lyrics.translated.clone();
+    let mut all = lyrics;
+    let others = std::mem::take(&mut all.others);
+    let kept: Vec<Lyrics> = std::iter::once(all).chain(others).filter(|l| !gone(l)).collect();
+    let mut best = crate::api::betterlyrics::gather(kept)?;
+    if best.translated.is_empty() {
+        best.translated = translated;
+    }
+    Some(best)
+}
+
 fn unix_now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
@@ -161,6 +184,19 @@ mod tests {
             ],
             ..Lyrics::default()
         }
+    }
+
+    #[test]
+    fn lyrics_from_a_withdrawn_source_are_let_go() {
+        let mut fish = timed("Fish Audio");
+        fish.others = vec![timed("LRCLIB")];
+        let kept = without_withdrawn(fish).expect("LRCLIB stays");
+        assert_eq!(kept.provider.as_deref(), Some("LRCLIB"));
+        assert!(kept.others.is_empty());
+        assert_eq!(without_withdrawn(timed("Fish Audio")), None);
+        let mut lrclib = timed("LRCLIB");
+        lrclib.others = vec![timed("Fish Audio")];
+        assert!(without_withdrawn(lrclib).expect("kept").others.is_empty());
     }
 
     #[test]
