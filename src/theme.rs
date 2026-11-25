@@ -196,9 +196,9 @@ pub fn artwork_palette(seed: Color32) -> Palette {
     let accent_l = if warm { 0.80 } else { 0.70 } + 0.12 * (1.0 - vivid);
     Palette {
         bg: surface(0.150),
-        // The sidebar, side panel and title bar: as light as the page and
-        // more tinted, in the artwork's colour rather than near black.
-        sidebar: lch(0.17, tint * 1.6, hue),
+        // The sidebar, side panel and title bar: the page's own colour, so
+        // the window reads as one wash of the artwork's, without seams.
+        sidebar: surface(0.150),
         player: surface(0.205),
         surface: surface(0.232),
         surface_hover: surface(0.282),

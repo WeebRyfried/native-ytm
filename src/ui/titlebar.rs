@@ -23,14 +23,14 @@ pub fn show(_app: &mut App, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
     let (maximized, focused) = ctx.input(|i| (i.viewport().maximized.unwrap_or(false), i.viewport().focused.unwrap_or(true)));
     let painter = ui.painter().clone();
-    // The accent, glowing in from the left and fading out across.
-    let glow = Rect::from_min_max(rect.min, pos2(rect.left() + rect.width() * 0.55, rect.bottom()));
+    // A glow of the accent along the top edge, gone by the bar's foot, so
+    // the bar runs into the window beneath without a line.
     let mut mesh = egui::Mesh::default();
-    let strength = if focused { 0.20 } else { 0.10 };
-    for (x, alpha) in [(glow.left(), strength), (glow.right(), 0.0)] {
+    let strength = if focused { 0.16 } else { 0.08 };
+    for (y, alpha) in [(rect.top(), strength), (rect.bottom(), 0.0)] {
         let colour = theme::accent().gamma_multiply(alpha);
-        mesh.colored_vertex(pos2(x, glow.top()), colour);
-        mesh.colored_vertex(pos2(x, glow.bottom()), colour);
+        mesh.colored_vertex(pos2(rect.left(), y), colour);
+        mesh.colored_vertex(pos2(rect.right(), y), colour);
     }
     mesh.add_triangle(0, 1, 2);
     mesh.add_triangle(1, 2, 3);
