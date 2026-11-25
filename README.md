@@ -160,10 +160,12 @@ sounds as good as your account allows.
   downloads it, checks it against the digest GitHub publishes, and restarts
   into it, the music carrying on where it was, and says what is new since
   the version you had ([CHANGELOG.md](CHANGELOG.md)).
-- **Four themes**, all dark: Classic (YouTube Music's black and red),
-  Midnight, Sakura and Matcha, picked from little pictures of each in
-  Settings, and taken on at once. The logo takes the theme's colour too, in
-  the sidebar, on the taskbar and in the tray.
+- **Five themes**, all dark: Classic (YouTube Music's black and red),
+  Midnight, Sakura, Matcha, and Artwork, which puts the song's artwork,
+  blurred and darkened, behind the whole window as the full-window player
+  does, and takes its colour for the accent. Picked from little pictures of
+  each in Settings, and taken on at once. The logo takes the theme's colour
+  too, in the title bar, on the taskbar and in the tray.
 - **A visualiser** rising from the top of the player bar as the music
   plays, in the theme's colours: Bars, Wave, Mirror or Aurora. It follows
   every hit in the music, or mostly the drums, or mostly the voice. A
@@ -215,19 +217,22 @@ artwork stays within a budget.
 2. **Sign in**, if you like (browsing, search and playback need no
    account). Google does not let third-party apps sign in to YouTube Music
    directly, so the app uses your browser's session, as
-   [ytmusicapi](https://github.com/sigma67/ytmusicapi) does:
-   - Open <https://music.youtube.com>, signed in, and press **F12**.
-   - In **Network**, filter for `browse` and pick a request to
-     `music.youtube.com`.
-   - Copy its `cookie` request header (or *Copy as cURL*, or a
-     `cookies.txt` export), and paste it into **Sign in** in the app.
+   [ytmusicapi](https://github.com/sigma67/ytmusicapi) does. Sign in at
+   <https://music.youtube.com> in your browser, then press **Sign in** in
+   the app: it takes the sign-in from the browser through
+   [yt-dlp](https://github.com/yt-dlp/yt-dlp) (which it offers to install
+   if you don't have it), and can do so by itself whenever you're signed
+   out. Firefox works; Chrome and Edge lock their sign-in away from other
+   apps, so for those copy the `cookie` header of a `music.youtube.com`
+   request from the developer tools (**F12**, **Network**) and choose
+   *Paste a cookie instead*.
 
    It is stored encrypted for your Windows account.
-3. **Premium quality** wants [yt-dlp](https://github.com/yt-dlp/yt-dlp) and
-   a JavaScript runtime it can use:
+3. **Premium quality** wants yt-dlp (installed from Settings, yt-dlp, and
+   kept up to date there) and a JavaScript runtime it can use:
 
    ```bash
-   winget install yt-dlp.yt-dlp OpenJS.NodeJS.LTS
+   winget install OpenJS.NodeJS.LTS
    ```
 
 **Discord** works with the Discord app running. **Last.fm** asks for an API
@@ -266,7 +271,7 @@ cargo build --release
 | Part | Where | What |
 | --- | --- | --- |
 | Interface | `src/ui/` | egui views; they emit `Action`s, which `src/app.rs` applies after each frame |
-| Themes | `src/theme.rs` | four palettes; the colours are read from the one chosen, so a change shows on the next frame; the logo turned to the theme's hue in OKLab, each pixel as light and as colourful as it was |
+| Themes | `src/theme.rs`, `src/app/art_theme.rs` | four palettes, and one made in OKLCh from the artwork's colour; the colours are read from the one chosen, so a change shows on the next frame; the logo turned to the theme's hue in OKLab, each pixel as light and as colourful as it was |
 | Visualiser | `src/visualiser.rs`, `src/ui/visualiser.rs` | the audio callback's last moments in a lock-free ring (the middle of the stereo picture and its sides), an FFT into bands by octaves under a scale that follows the music, each band's loudness and its hits (how far it jumps above its own recent level), weighted for the drums or the voice, drawn as meshes |
 | App state | `src/app.rs`, `src/queue.rs` | navigation, the queue, what plays next, preloading, the switch to Premium |
 | Deck of artwork | `src/ui/now_playing.rs` | the next song's card out from behind once it is a few seconds off, and the turn timed by the song coming in: where the crossfade has it start and for how long the two overlap, which the player records as it joins them |
