@@ -4,6 +4,20 @@ What changed in each version of Native YTM, newest first. After an update,
 the app shows what is new since the version it had; this file is built into
 it for that (src/changelog.rs).
 
+## 0.4.0 — 25 November 2026
+
+Sign in from your browser, a title bar of its own, and a theme from the artwork.
+
+- **Sign in from your browser.** No more copying a cookie out of the developer tools: Sign in takes your YouTube Music sign-in straight from your browser, through yt-dlp. On the first start the app asks whether to do this by itself, now and whenever you're signed out. Firefox works; Chrome and Edge lock their sign-in away from other apps, so for those a cookie can still be pasted.
+- **yt-dlp in a click.** Without yt-dlp, a small card in the corner offers to install it (the × puts it away for good). Settings, yt-dlp shows its version, checks for a newer one and updates it, and keeps it up to date by itself, checked once a day.
+- **A title bar of its own.** Windows' title bar is gone: the app's own carries the logo, the name and the version in the middle, on the sidebar's colour lit by the theme's accent, with its own minimise, maximise and close. The sidebar no longer repeats them, and starts with Home. Drag it to move the window, double-click it to maximise, and the window's edges still resize it.
+- **The Artwork theme.** A fifth theme in the colours of the song playing, as the full-window player has them, turning to each new song's over a moment: the page, the sidebar, the side panel and the title bar all take it. The logo, the taskbar and the tray follow too.
+- **When Premium quality doesn't come.** A small warning beside the bitrate says why the better stream couldn't be had; a click tries again (or switches to it at once, when it was found but couldn't take over mid-song).
+- **Lyrics, again.** Lyrics that couldn't be found can be looked for again, from the sources' menu or the Try again button.
+- **The timing control fades.** The lyrics' earlier and later buttons now come and go with the pointer, as the sources' pill does, rather than staying on screen when moved.
+- **A song queued twice** lights up only where it is playing, not at both places in the queue.
+- **Shorter settings.** Every setting says what it does in a few words.
+
 ## 0.3.14 — 22 October 2026
 
 The next song in an island at the top of the screen, and a new logo.

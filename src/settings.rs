@@ -55,6 +55,17 @@ pub struct Settings {
     pub use_ytdlp: bool,
     /// yt-dlp's path, when it is not on PATH.
     pub ytdlp_path: String,
+    /// Sign in from the browser's YouTube sign-in (through yt-dlp) when
+    /// signed out; None until asked, on the first start.
+    pub browser_sign_in: Option<bool>,
+    /// The browser to take it from; empty tries each.
+    pub sign_in_browser: String,
+    /// Keep yt-dlp up to date by itself, checked once a day.
+    pub ytdlp_auto_update: bool,
+    /// When yt-dlp was last checked for an update, in seconds since 1970.
+    pub ytdlp_checked: u64,
+    /// The offer to install yt-dlp, until hidden.
+    pub ytdlp_prompt: bool,
     /// Signed in, ask for Premium's 256 kb/s streams (through yt-dlp).
     pub premium_quality: bool,
     /// Songs kept on disk, at the best quality heard; 0 keeps none.
@@ -122,6 +133,11 @@ impl Default for Settings {
             region: String::new(),
             use_ytdlp: true,
             ytdlp_path: String::new(),
+            browser_sign_in: None,
+            sign_in_browser: String::new(),
+            ytdlp_auto_update: true,
+            ytdlp_checked: 0,
+            ytdlp_prompt: true,
             premium_quality: true,
             cached_songs: 100,
             synced_lyrics: true,
@@ -239,6 +255,11 @@ impl Paths {
 
     pub fn logs(&self) -> PathBuf {
         self.cache.join("logs")
+    }
+
+    /// Programs the app keeps for itself: its own yt-dlp.
+    pub fn tools(&self) -> PathBuf {
+        self.cache.parent().map_or_else(|| self.cache.join("bin"), |p| p.join("bin"))
     }
 
     /// Short-lived files: yt-dlp's cookie file while it runs.

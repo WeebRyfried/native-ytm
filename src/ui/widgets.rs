@@ -21,6 +21,8 @@ pub struct Cx<'a> {
     pub images: &'a mut Images,
     pub actions: &'a mut Vec<Action>,
     pub current: Option<&'a str>,
+    /// The queue entry playing, so a song queued twice lights only once.
+    pub current_uid: Option<u64>,
     pub playing: bool,
     pub signed_in: bool,
     /// Songs on this PC and downloading, by video id.
@@ -465,7 +467,10 @@ pub fn track_row(
     if !ui.is_rect_visible(rect) {
         return RowResponse { play, response };
     }
-    let current = cx.current == Some(track.video_id.as_str());
+    let current = match place {
+        RowPlace::Queue(uid) => cx.current_uid == Some(uid),
+        _ => cx.current == Some(track.video_id.as_str()),
+    };
     // Where the pointer is, not which widget has it: the artwork and the
     // menu button sit over the row and would take its hover away.
     let hovered = response.contains_pointer() || response.context_menu_opened();
@@ -1379,4 +1384,23 @@ pub fn tab_header(ui: &mut Ui, current: crate::model::SideTab, close: bool) -> (
         }
     });
     (picked, closed)
+}
+
+/// The logo in the look's colour, `size` points square, made at the
+/// screen's own pixels (again when the look, its colour or the scale
+/// changes).
+pub fn app_logo(ui: &Ui, size: f32) -> egui::TextureHandle {
+    let px = (size * ui.ctx().pixels_per_point()).round().max(1.0) as usize;
+    let made_for = (theme::logo_key(), px);
+    let id = Id::new(("app-logo", px));
+    let kept = ui.ctx().data_mut(|d| d.get_temp::<((u32, usize), egui::TextureHandle)>(id));
+    match kept {
+        Some((made, texture)) if made == made_for => texture,
+        _ => {
+            let image = egui::ColorImage::from_rgba_unmultiplied([px, px], &theme::app_icon_rgba(px));
+            let texture = ui.ctx().load_texture("app-logo", image, egui::TextureOptions::LINEAR);
+            ui.ctx().data_mut(|d| d.insert_temp(id, (made_for, texture.clone())));
+            texture
+        }
+    }
 }

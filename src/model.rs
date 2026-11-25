@@ -336,6 +336,22 @@ pub enum Action {
     },
     OpenSignIn,
     SignIn(String),
+    /// The sign-in from a browser, through yt-dlp: the one chosen in
+    /// Settings, or `browser` for this once; `auto` keeps quiet unless it
+    /// works.
+    SignInFromBrowser { browser: Option<String>, auto: bool },
+    /// The first start's question: sign in from the browser by itself?
+    AnswerBrowserSignIn(bool),
+    InstallYtDlp,
+    CheckYtDlp,
+    UpdateYtDlp,
+    /// The offer to install yt-dlp, put away for good.
+    HideYtDlpPrompt,
+    /// The better stream, looked for again (or switched to at once, when
+    /// it was found but could not join mid-song).
+    RetryQuality,
+    /// The lyrics, asked of every source again.
+    RetryLyrics,
     SignOut,
     ApplySettings(Box<Settings>),
     CopyLink(String),

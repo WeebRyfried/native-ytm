@@ -23,6 +23,11 @@ use crate::queue::{Queue, Source};
 use crate::settings::{self, Paths, Repeat, Session, Settings};
 use crate::{discord, lastfm, local, net, update};
 
+mod art_theme;
+mod tools;
+
+pub use tools::Job;
+
 /// Set by another launch of the app, which asks for the window.
 pub static SHOW_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -140,6 +145,9 @@ pub struct Upgrade {
     /// The quick stream failed (a Premium members' song): the better one
     /// is all there is.
     quick_failed: bool,
+    /// Why the better stream is not playing, once it is not: for the
+    /// warning beside the quality.
+    pub reason: Option<String>,
 }
 
 pub struct SearchState {
@@ -170,6 +178,22 @@ pub struct SignInDialog {
     pub text: String,
     pub error: Option<String>,
     pub busy: bool,
+    /// Signing in from a browser by itself: nothing shows unless it works.
+    pub silent: bool,
+    /// The browser the sign-in came from.
+    pub from: Option<String>,
+    /// Pasting a cookie by hand rather than taking it from a browser.
+    pub paste: bool,
+}
+
+impl SignInDialog {
+    pub fn new() -> Self {
+        Self { text: String::new(), error: None, busy: false, silent: false, from: None, paste: false }
+    }
+
+    pub fn silent() -> Self {
+        Self { silent: true, ..Self::new() }
+    }
 }
 
 pub struct App {
@@ -261,6 +285,10 @@ pub struct App {
     pub account: Option<Account>,
     pub playlists: Vec<Item>,
     pub sign_in: Option<SignInDialog>,
+    /// yt-dlp: installing, updating, and signing in from a browser.
+    pub tools: tools::Tools,
+    /// The look that follows the artwork.
+    art_theme: art_theme::ArtTheme,
     pub picker: Option<Vec<Track>>,
     pub new_playlist: Option<(String, Vec<Track>)>,
     /// A playlist being renamed (its id, the name being typed), or about
@@ -373,6 +401,7 @@ impl App {
             let waker = waker.clone();
             Arc::new(move || waker.wake())
         };
+        crate::ytdlp::set_managed_dir(&paths.tools());
         let ytdlp = (!settings.ytdlp_path.trim().is_empty())
             .then(|| std::path::PathBuf::from(settings.ytdlp_path.trim()));
         crate::stream::clean_scratch(&paths.scratch());
@@ -508,6 +537,8 @@ impl App {
             account: None,
             playlists: Vec::new(),
             sign_in: None,
+            tools: tools::Tools::default(),
+            art_theme: art_theme::ArtTheme::default(),
             picker: None,
             new_playlist: None,
             rename_playlist: None,
@@ -587,6 +618,7 @@ impl App {
             }
         }
         app.backend.send(Request::Bootstrap);
+        app.auto_sign_in();
         app.request_page(&Route::Home, false);
         app.check_autostart();
         let folders = app.settings.local_folders.clone();
@@ -718,6 +750,8 @@ impl App {
             self.local_hits = None;
         }
         self.art_tick();
+        self.tools_tick();
+        self.art_theme_tick();
         while let Ok(picked) = self.folder_picked.1.try_recv() {
             self.picking_folder = false;
             if let Some(folder) = picked {
@@ -1284,24 +1318,33 @@ impl App {
             } => self.on_resolved(token, video_id, purpose, start, result),
             Response::Account(result) => match result {
                 Ok(account) => {
-                    if let Some(dialog) = &mut self.sign_in {
+                    if let Some(dialog) = self.sign_in.as_mut().filter(|d| d.busy) {
                         dialog.busy = false;
+                        let from = dialog.from.clone();
                         if let Err(_) = self.save_cookie_from_dialog() {
                             return;
                         }
                         self.sign_in = None;
-                        self.toast(format!("Signed in as {}", account.name), ToastKind::Info);
+                        let from = from.map(|b| format!(" from {b}")).unwrap_or_default();
+                        self.toast(format!("Signed in as {}{from}", account.name), ToastKind::Info);
                         self.pages.clear();
                         self.request_page(&self.route.clone(), false);
                     }
                     self.account = Some(account);
                 }
                 Err(error) => {
-                    if let Some(dialog) = &mut self.sign_in {
+                    if let Some(dialog) = self.sign_in.as_mut().filter(|d| d.busy) {
                         dialog.busy = false;
-                        dialog.error = Some(format!(
-                            "YouTube Music did not accept that cookie ({error}). Copy it again from a signed-in tab."
-                        ));
+                        let said = match &dialog.from {
+                            Some(browser) => format!("YouTube Music turned down the sign-in from {browser}. Sign in again at music.youtube.com there."),
+                            None => format!("YouTube Music didn't accept that cookie ({error}). Copy it again from a signed-in tab."),
+                        };
+                        if dialog.silent {
+                            self.sign_in = None;
+                            log::info!("sign-in from a browser turned down: {error}");
+                        } else {
+                            dialog.error = Some(said);
+                        }
                         self.backend.send(Request::SetAuth(None));
                         self.signed_in = false;
                     } else if error.contains("not signed in") {
@@ -1315,6 +1358,8 @@ impl App {
                             "Your YouTube Music sign-in has ended. Sign in again to see your library.",
                             ToastKind::Error,
                         );
+                        // Taken again from the browser, when that is on.
+                        self.auto_sign_in();
                     } else {
                         // Most likely offline: keep the sign-in for later.
                         log::warn!("account: {error}");
@@ -1539,6 +1584,7 @@ impl App {
                     from: Some(stream.quality.clone()),
                     to: None,
                     quick_failed: false,
+                    reason: None,
                 });
                 self.backend.send(Request::Resolve {
                     token,
@@ -1561,6 +1607,7 @@ impl App {
                 from: Some(stream.quality.clone()),
                 to: None,
                 quick_failed: false,
+                reason: None,
             });
             self.backend.send(Request::Resolve {
                 token,
@@ -1578,6 +1625,7 @@ impl App {
                 from: None,
                 to: None,
                 quick_failed: false,
+                reason: None,
             });
             for (purpose, how) in [(Purpose::Load, How::Native), (Purpose::Upgrade, How::Account)] {
                 self.backend.send(Request::Resolve {
@@ -1797,6 +1845,71 @@ impl App {
         Some((entry.uid, None, &entry.track))
     }
 
+    /// Why the song playing is not at the better quality it could be: for
+    /// the warning beside the quality, whose click tries again.
+    pub fn quality_warning(&self) -> Option<String> {
+        let track = self.current()?;
+        if track.is_local() || !self.signed_in || !self.settings.premium_quality {
+            return None;
+        }
+        if self.backend.ytdlp_found().is_none() {
+            return Some("Premium quality needs yt-dlp, which isn't installed".into());
+        }
+        self.upgrade
+            .as_ref()
+            .filter(|u| u.token == self.current_token && u.phase == UpgradePhase::Unavailable)
+            .and_then(|u| u.reason.clone())
+    }
+
+    /// The better stream, again: switched to at once when it was found
+    /// but could not join mid-song, else looked for once more.
+    fn retry_quality(&mut self) {
+        if self.backend.ytdlp_found().is_none() {
+            self.install_ytdlp();
+            return;
+        }
+        let Some(video_id) = self.current().filter(|t| !t.is_local()).map(|t| t.video_id.clone()) else {
+            return;
+        };
+        let token = self.current_token;
+        let position = self.position();
+        let better = self
+            .streams
+            .get(&video_id)
+            .filter(|(_, at)| at.elapsed() < STREAM_FRESH)
+            .map(|(stream, _)| stream.clone());
+        if let (Some(stream), Some((t, loaded))) = (better, &self.loaded)
+            && *t == token
+            && stream.kbps.unwrap_or(0) >= loaded.kbps.unwrap_or(0) + 40
+        {
+            let playing = self.playing();
+            self.loaded = Some((token, stream.clone()));
+            self.player.load(token, stream, Duration::from_secs_f64(position), playing);
+            if let Some(upgrade) = self.upgrade.as_mut().filter(|u| u.token == token) {
+                upgrade.phase = UpgradePhase::Done(Instant::now());
+                upgrade.reason = None;
+            }
+            return;
+        }
+        self.streams.remove(&video_id);
+        let from = self.loaded.as_ref().filter(|(t, _)| *t == token).map(|(_, s)| s.quality.clone());
+        self.upgrade = Some(Upgrade {
+            token,
+            phase: UpgradePhase::Finding,
+            from,
+            to: None,
+            quick_failed: false,
+            reason: None,
+        });
+        self.backend.send(Request::Resolve {
+            token,
+            video_id,
+            purpose: Purpose::Upgrade,
+            start: position,
+            how: How::Account,
+        });
+    }
+
     /// A switch to the better stream is heard once playback reaches it.
     fn upgrade_tick(&mut self) {
         let position = self.position();
@@ -1986,10 +2099,17 @@ impl App {
                     // Playing the quick stream: switch, if the two are
                     // alike enough to join without a jump.
                     Some((t, quick)) if *t == token => {
-                        if quick.mime == stream.mime && quick.quality != stream.quality {
+                        // About the same rate is no better: an account
+                        // without Premium gets the standard streams.
+                        let better = stream.kbps.unwrap_or(0) >= quick.kbps.unwrap_or(0) + 40;
+                        if !better {
+                            upgrade.phase = UpgradePhase::Unavailable;
+                            upgrade.reason = Some("No higher quality for this song on your account (256 kb/s needs YouTube Music Premium)".into());
+                        } else if quick.mime == stream.mime {
                             self.player.upgrade(token, stream);
                         } else {
                             upgrade.phase = UpgradePhase::Unavailable;
+                            upgrade.reason = Some("The higher quality stream couldn't take over mid-song".into());
                         }
                     }
                     // Nothing playing yet: this one starts it.
@@ -2009,6 +2129,7 @@ impl App {
                     return;
                 };
                 upgrade.phase = UpgradePhase::Unavailable;
+                upgrade.reason = Some(quality_failure(&error));
                 if upgrade.quick_failed && token == self.current_token {
                     self.cannot_play(&video_id, &error);
                 } else {
@@ -2377,6 +2498,7 @@ impl App {
             player::Event::UpgradeFailed(token) => {
                 if let Some(upgrade) = self.upgrade.as_mut().filter(|u| u.token == token) {
                     upgrade.phase = UpgradePhase::Unavailable;
+                    upgrade.reason = Some("The higher quality stream wouldn't load".into());
                 }
             }
             player::Event::Failed {
@@ -3647,11 +3769,38 @@ impl App {
                 self.save_settings();
             }
             Action::OpenSignIn => {
-                self.sign_in = Some(SignInDialog {
-                    text: String::new(),
-                    error: None,
-                    busy: false,
-                });
+                self.sign_in = Some(SignInDialog::new());
+            }
+            Action::SignInFromBrowser { browser, auto } => {
+                if !auto {
+                    self.tools.paused = false;
+                }
+                self.sign_in_from_browser(browser, auto);
+            }
+            Action::AnswerBrowserSignIn(yes) => {
+                self.settings.browser_sign_in = Some(yes);
+                self.save_settings();
+                if yes && !self.signed_in {
+                    self.sign_in_from_browser(None, false);
+                }
+            }
+            Action::InstallYtDlp => self.install_ytdlp(),
+            Action::CheckYtDlp => self.check_ytdlp(false),
+            Action::UpdateYtDlp => self.update_ytdlp(),
+            Action::HideYtDlpPrompt => {
+                self.settings.ytdlp_prompt = false;
+                self.save_settings();
+            }
+            Action::RetryQuality => self.retry_quality(),
+            Action::RetryLyrics => {
+                self.lyrics_retry.remove(&self.current().map(|t| t.video_id.clone()).unwrap_or_default());
+                if let Some(id) = self.current().map(|t| t.video_id.clone())
+                    && !matches!(self.lyrics.get(&id), Some(Loadable::Ready(Some(_))))
+                {
+                    self.lyrics.remove(&id);
+                }
+                self.ask_lyrics(true);
+                self.toast("Looking for the lyrics again", ToastKind::Info);
             }
             Action::SignIn(text) => {
                 let cookies = parse_cookies(&text);
@@ -3662,6 +3811,10 @@ impl App {
                 let Some(dialog) = &mut self.sign_in else {
                     return;
                 };
+                if !auth.is_usable() && dialog.silent {
+                    self.sign_in = None;
+                    return;
+                }
                 if !auth.is_usable() {
                     dialog.error = Some(
                         "That does not look like a signed-in YouTube Music cookie: it has no SAPISID. Copy the whole cookie header from a request to music.youtube.com.".into(),
@@ -3677,6 +3830,8 @@ impl App {
                 self.backend.send(Request::Account);
             }
             Action::SignOut => {
+                // Signed out by hand: not straight back in from the browser.
+                self.tools.paused = true;
                 self.kept_pages.clear();
                 self.backend.send(Request::SetAuth(None));
                 crate::platform::forget_cookie(&self.paths.account());
@@ -3761,8 +3916,13 @@ impl App {
                         tray.set_icon(crate::theme::app_icon_rgba, None);
                     }
                 }
+                let browser_on = new.browser_sign_in == Some(true) && self.settings.browser_sign_in != Some(true);
                 self.settings = new;
                 self.settings_dirty = Some(Instant::now());
+                if browser_on && !self.signed_in {
+                    self.tools.paused = false;
+                    self.sign_in_from_browser(None, false);
+                }
             }
             Action::CopyLink(url) => {
                 self.ctx.copy_text(url);
@@ -4291,5 +4451,30 @@ fn tray_config() -> fastframe_tray::Config {
             MenuItem::Separator,
             MenuItem::action(TRAY_QUIT, "Quit"),
         ],
+    }
+}
+
+/// Why the account's better stream could not be had, in a few words.
+fn quality_failure(error: &str) -> String {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("not installed") {
+        "yt-dlp isn't installed".into()
+    } else if lower.contains("not signed in") {
+        "Not signed in".into()
+    } else if lower.contains("sign in to confirm") || lower.contains("bot") {
+        "YouTube asked to confirm you're not a bot. Sign in again in your browser".into()
+    } else if lower.contains("timed out") || lower.contains("took too long") {
+        "yt-dlp took too long".into()
+    } else if lower.contains("javascript") || lower.contains("js runtime") || lower.contains("challenge") {
+        "yt-dlp needs a JavaScript runtime (Deno or Node.js)".into()
+    } else if lower.contains("refused past the start") || lower.contains("http 403") {
+        "YouTube refused the stream. Updating yt-dlp may help".into()
+    } else if lower.contains("requested format") || lower.contains("premium") {
+        "No Premium stream for this song".into()
+    } else if lower.contains("error sending request") || lower.contains("dns") || lower.contains("connect") {
+        "Couldn't reach YouTube".into()
+    } else {
+        let short: String = error.chars().take(90).collect();
+        format!("yt-dlp: {short}")
     }
 }

@@ -66,6 +66,8 @@ pub struct Images {
     permits: Arc<tokio::sync::Semaphore>,
     ctx: egui::Context,
     last_evict: Instant,
+    /// Each backdrop's colour, for the Artwork look, by its key.
+    seeds: Arc<parking_lot::Mutex<HashMap<String, egui::Color32>>>,
 }
 
 impl Images {
@@ -97,6 +99,7 @@ impl Images {
             permits: Arc::new(tokio::sync::Semaphore::new(6)),
             ctx,
             last_evict: Instant::now(),
+            seeds: Arc::default(),
         }
     }
 
@@ -130,6 +133,22 @@ impl Images {
             }
             _ => None,
         })
+    }
+
+    /// The artwork's colour, once its backdrop is made (which this asks
+    /// for).
+    pub fn seed(&mut self, url: &str) -> Option<egui::Color32> {
+        let source = sized_thumbnail(url, 128);
+        let key = format!("backdrop:{source}");
+        if let Some(seed) = self.seeds.lock().get(&key) {
+            return Some(*seed);
+        }
+        // Made before its colour was kept (or since forgotten): made again.
+        if matches!(self.entries.get(&key), Some(Entry::Ready { .. })) {
+            self.entries.remove(&key);
+        }
+        self.entry(key, source, 128, Make::Blurred);
+        None
     }
 
     /// The artwork blurred to a wash of its colours, for a backdrop.
@@ -205,6 +224,7 @@ impl Images {
         let path = self.path_of(&source);
         let permits = self.permits.clone();
         let ctx = self.ctx.clone();
+        let seeds = self.seeds.clone();
         self.runtime.spawn(async move {
             let local = source.strip_prefix("file:").map(PathBuf::from);
             let bytes = match local {
@@ -245,7 +265,7 @@ impl Images {
                     let name = key.clone();
                     let ctx = ctx.clone();
                     tokio::task::spawn_blocking(move || {
-                        if make == Make::Blurred { decode_blurred(&ctx, &name, &bytes) } else { decode(&ctx, &name, &bytes, px) }
+                        if make == Make::Blurred { decode_blurred(&ctx, &name, &bytes, &seeds) } else { decode(&ctx, &name, &bytes, px) }
                     })
                         .await
                         .ok()
@@ -375,12 +395,21 @@ fn decode(ctx: &egui::Context, name: &str, bytes: &[u8], px: u32) -> Option<Text
 
 /// The image shrunk to 32 by 32 and blurred: drawn stretched across a
 /// window, the GPU's smoothing turns it into soft fields of its colours.
-fn decode_blurred(ctx: &egui::Context, name: &str, bytes: &[u8]) -> Option<TextureHandle> {
+fn decode_blurred(ctx: &egui::Context, name: &str, bytes: &[u8], seeds: &parking_lot::Mutex<HashMap<String, egui::Color32>>) -> Option<TextureHandle> {
     const N: usize = 32;
     let image = image::load_from_memory(bytes).ok()?;
     let small = image
         .resize_exact(N as u32, N as u32, image::imageops::FilterType::Triangle)
         .to_rgb8();
+    // Its colour, before the blur greys it.
+    let seed = crate::theme::seed_of(small.pixels().map(|p| p.0));
+    {
+        let mut seeds = seeds.lock();
+        if seeds.len() > 400 {
+            seeds.clear();
+        }
+        seeds.insert(name.to_owned(), seed);
+    }
     let mut pixels: Vec<[f32; 3]> = small
         .pixels()
         .map(|p| [f32::from(p[0]), f32::from(p[1]), f32::from(p[2])])

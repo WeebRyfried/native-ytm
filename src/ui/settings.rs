@@ -21,7 +21,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let width = ui.available_width().min(860.0);
     ui.allocate_ui_with_layout(vec2(width, 0.0), Layout::top_down(Align::Min), |ui| {
         ui.set_width(width);
-        account(app, ui);
+        account(app, ui, &mut draft);
         playback(ui, &mut draft);
         quality(app, ui, &mut draft);
         your_music(app, ui, &mut draft);
@@ -29,6 +29,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         connections(app, ui, &mut draft);
         appearance(app, ui, &mut draft);
         updates(app, ui, &mut draft);
+        ytdlp(app, ui, &mut draft);
         keyboard(ui);
         advanced(app, ui, &mut draft);
         about(ui);
@@ -41,7 +42,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     }
 }
 
-fn account(app: &mut App, ui: &mut Ui) {
+fn account(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
     card(ui, "Account", |ui| {
         if app.signed_in {
             let name = app.account.as_ref().map_or("Your YouTube Music account".to_owned(), |a| match &a.handle {
@@ -49,7 +50,7 @@ fn account(app: &mut App, ui: &mut Ui) {
                 None => a.name.clone(),
             });
             let mut sign_out = false;
-            row(ui, &name, "Signed in. Your library, likes and playlists are here; the sign-in stays on this PC, encrypted.", 120.0, |ui| {
+            row(ui, &name, "Signed in. Kept encrypted on this PC.", 120.0, |ui| {
                 sign_out = widgets::pill(ui, Some(Icon::SignOut), "Sign out", false).clicked();
             });
             if sign_out {
@@ -57,30 +58,51 @@ fn account(app: &mut App, ui: &mut Ui) {
             }
         } else {
             let mut sign_in = false;
-            row(ui, "Not signed in", "Everything plays without an account. Sign in for your library, likes, playlists, history and Premium quality.", 110.0, |ui| {
+            row(ui, "Not signed in", "Sign in for your library, likes and Premium quality.", 110.0, |ui| {
                 sign_in = widgets::pill(ui, Some(Icon::SignIn), "Sign in", true).clicked();
             });
             if sign_in {
                 app.actions.push(Action::OpenSignIn);
             }
         }
+        divider(ui);
+        let mut auto = draft.browser_sign_in == Some(true);
+        toggle_row(ui, "Sign in from your browser", "Whenever you're signed out, through yt-dlp.", &mut auto);
+        if auto != (draft.browser_sign_in == Some(true)) {
+            draft.browser_sign_in = Some(auto);
+        }
+        if auto {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                if widgets::chip(ui, "Any browser", draft.sign_in_browser.is_empty()).clicked() {
+                    draft.sign_in_browser.clear();
+                }
+                for id in crate::ytdlp::installed_browsers() {
+                    if widgets::chip(ui, crate::ytdlp::browser_name(id), draft.sign_in_browser == id).clicked() {
+                        draft.sign_in_browser = id.to_owned();
+                    }
+                }
+            });
+            ui.add_space(8.0);
+            note(ui, Icon::Info, "Chrome and Edge lock their sign-in away from other apps; Firefox works.");
+        }
     });
 }
 
 fn playback(ui: &mut Ui, draft: &mut Settings) {
     card(ui, "Playback", |ui| {
-        toggle_row(ui, "Keep the music going", "When the queue ends, play similar songs.", &mut draft.autoplay);
+        toggle_row(ui, "Keep the music going", "Play similar songs when the queue ends.", &mut draft.autoplay);
         divider(ui);
-        toggle_row(ui, "Even out loudness", "Loud songs are turned down to match the rest, as YouTube Music does.", &mut draft.normalize);
+        toggle_row(ui, "Even out loudness", "Keep every song at the same volume.", &mut draft.normalize);
         divider(ui);
-        toggle_row(ui, "Pick up where you left off", "Open with the last queue, at the same moment of the same song.", &mut draft.restore_session);
+        toggle_row(ui, "Pick up where you left off", "Reopen with the last queue.", &mut draft.restore_session);
         divider(ui);
-        toggle_row(ui, "Gapless playback", "Songs follow one another without a pause. Off, a moment of silence between songs.", &mut draft.gapless);
+        toggle_row(ui, "Gapless playback", "No silence between songs.", &mut draft.gapless);
         divider(ui);
         toggle_row(
             ui,
             "Smart crossfade",
-            "Each song fades into the next where it goes quiet: its fade-out, or the next one's soft intro, with the silence between them cut. Songs of the same album still follow without one, as they were made to.",
+            "Blend songs where they go quiet. Albums play as made.",
             &mut draft.crossfade,
         );
         if draft.crossfade {
@@ -106,15 +128,15 @@ fn quality(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
     let runtime = app.js_runtime_found();
     let playing = app.stream_quality().map(str::to_owned);
     card(ui, "Sound quality", |ui| {
-        let detail = "With YouTube Music Premium: 256 kb/s instead of about 130. A song starts at once and switches up mid-song, without a gap.";
+        let detail = "256 kb/s with YouTube Music Premium, instead of about 130.";
         toggle_row(ui, "Premium quality", detail, &mut draft.premium_quality);
         if draft.premium_quality {
             let status = if !app.signed_in {
-                Some("Sign in with a Premium account to hear it.".to_owned())
+                Some("Sign in with a Premium account.".to_owned())
             } else if !ytdlp {
-                Some("It needs yt-dlp. Install it with: winget install yt-dlp.yt-dlp".to_owned())
+                Some("Needs yt-dlp: install it under yt-dlp, below.".to_owned())
             } else if !runtime {
-                Some("yt-dlp needs a JavaScript runtime. Install one with: winget install OpenJS.NodeJS.LTS".to_owned())
+                Some("yt-dlp needs Deno or Node.js: winget install OpenJS.NodeJS.LTS".to_owned())
             } else {
                 None
             };
@@ -124,7 +146,7 @@ fn quality(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
         }
         if let Some(quality) = playing {
             divider(ui);
-            row(ui, "Playing now", "The stream heard: its codec and bitrate.", 180.0, |ui| {
+            row(ui, "Playing now", "", 180.0, |ui| {
                 ui.label(RichText::new(quality).font(theme::medium(13.5)).color(theme::text_dim()));
             });
         }
@@ -132,7 +154,7 @@ fn quality(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
         toggle_row(
             ui,
             "Synced lyrics",
-            "Lyrics that follow the song, word by word where they can, from the sources Better Lyrics uses (Musixmatch, QQ Music, KuGou, BiniLyrics, Better Lyrics' own) and LRCLIB. Otherwise YouTube Music's own.",
+            "Word by word, from Better Lyrics' sources and LRCLIB.",
             &mut draft.synced_lyrics,
         );
         if draft.synced_lyrics {
@@ -140,7 +162,7 @@ fn quality(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
             toggle_row(
                 ui,
                 "Translations",
-                "What each line means, under it: the lyrics' own translation, or another source's, or else Unison's (Better Lyrics' community service, made by machine).",
+                "Show what each line means under it.",
                 &mut draft.lyric_translations,
             );
         }
@@ -148,7 +170,7 @@ fn quality(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
         toggle_row(
             ui,
             "Readings over Japanese lyrics",
-            "In the full-window player, how each word sounds, set small over it: romaji, or furigana over the kanji.",
+            "Romaji or furigana, in the full-window player.",
             &mut draft.lyric_readings,
         );
         if draft.lyric_readings {
@@ -163,7 +185,7 @@ fn quality(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
             ui.add_space(16.0);
         }
         divider(ui);
-        toggle_row(ui, "Equalizer", "Shape the sound: more bass, clearer voices, or a curve of your own.", &mut draft.eq);
+        toggle_row(ui, "Equalizer", "", &mut draft.eq);
         if draft.eq {
             equalizer(ui, draft);
         }
@@ -227,12 +249,12 @@ fn your_music(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
     let picking = app.picking_folder;
     card(ui, "Music on this PC", |ui| {
         let detail = if draft.local_folders.is_empty() {
-            "Play your own MP3, FLAC, M4A, Ogg and WAV files beside YouTube Music. Their songs show in Library, On this PC, and come first in search. Add a folder here, or drop one on the window. Nothing leaves this PC.".to_owned()
+            "Play your own MP3, FLAC, M4A, Ogg and WAV files. Add a folder, or drop one on the window.".to_owned()
         } else {
             match scanning {
                 Some(seen) => format!("Looking through your folders\u{2026} {seen} files so far."),
                 None => format!(
-                    "{} in {}, in Library, On this PC, and first in search.",
+                    "{} in {}.",
                     widgets::songs(songs),
                     if albums == 1 { "1 album".to_owned() } else { format!("{albums} albums") }
                 ),
@@ -295,13 +317,13 @@ fn updates(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
     card(ui, "Updates", |ui| {
         let version = env!("CARGO_PKG_VERSION");
         let (title, detail) = match &state {
-            State::Idle => (format!("Native YTM {version}"), "Look for a newer version on GitHub.".to_owned()),
-            State::Checking => (format!("Native YTM {version}"), "Looking for a newer version\u{2026}".to_owned()),
-            State::UpToDate => (format!("Native YTM {version}"), "You have the latest version.".to_owned()),
+            State::Idle => (format!("Native YTM {version}"), "".to_owned()),
+            State::Checking => (format!("Native YTM {version}"), "Checking\u{2026}".to_owned()),
+            State::UpToDate => (format!("Native YTM {version}"), "Up to date.".to_owned()),
             State::Available(release) => (
                 format!("Version {} is out", release.version),
                 format!(
-                    "{}{}Updating takes a few seconds: the app restarts and the music carries on where it was.",
+                    "{}{}The music carries on through the restart.",
                     release.summary,
                     if release.summary.is_empty() { "" } else { " " }
                 ),
@@ -342,8 +364,71 @@ fn updates(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
             app.actions.push(action);
         }
         divider(ui);
-        toggle_row(ui, "Look for updates on its own", "Now and then, and a few seconds after the app starts. Nothing downloads until you choose Update.", &mut draft.check_updates);
+        toggle_row(ui, "Check for updates automatically", "Nothing downloads until you choose Update.", &mut draft.check_updates);
     });
+}
+
+/// yt-dlp: whether it is here and up to date, installed or updated in a
+/// click.
+fn ytdlp(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
+    use crate::app::Job;
+    let found = app.backend.ytdlp_found();
+    let job = app.tools.job;
+    card(ui, "yt-dlp", |ui| {
+        let newer = match (&app.tools.version, &app.tools.latest) {
+            (Some(have), Some(latest)) if crate::ytdlp::newer(latest, have) => Some(latest.clone()),
+            _ => None,
+        };
+        let detail = match (&found, job) {
+            (None, Some(Job::Installing)) => "Installing\u{2026}".to_owned(),
+            (None, _) => "Not installed. Needed for browser sign-in and Premium quality.".to_owned(),
+            (Some(_), Some(Job::Checking)) => "Checking\u{2026}".to_owned(),
+            (Some(_), Some(Job::Updating)) => "Updating\u{2026}".to_owned(),
+            (Some(_), _) => match (&newer, &app.tools.said, &app.tools.version) {
+                (Some(latest), _, _) => format!("Version {latest} is out."),
+                (None, Some((said, _)), _) => said.clone(),
+                (None, None, Some(version)) => format!("Version {version}."),
+                (None, None, None) => "Installed.".to_owned(),
+            },
+        };
+        let title = match &app.tools.version {
+            Some(version) if found.is_some() => format!("yt-dlp {version}"),
+            _ => "yt-dlp".to_owned(),
+        };
+        let mut clicked = None;
+        row(ui, &title, &detail, 220.0, |ui| {
+            if job.is_some() {
+                widgets::spinner_of(ui, 18.0, theme::text_dim());
+            } else if found.is_none() {
+                if widgets::pill(ui, Some(Icon::Download), "Install", true).clicked() {
+                    clicked = Some(Action::InstallYtDlp);
+                }
+            } else if newer.is_some() {
+                if widgets::pill(ui, Some(Icon::Update), "Update", true).clicked() {
+                    clicked = Some(Action::UpdateYtDlp);
+                }
+            } else if widgets::pill(ui, Some(Icon::Refresh), "Check for update", false).clicked() {
+                clicked = Some(Action::CheckYtDlp);
+            }
+        });
+        if let Some(action) = clicked {
+            app.actions.push(action);
+        }
+        if let Some((said, true)) = &app.tools.said
+            && found.is_none()
+        {
+            note(ui, Icon::Alert, said);
+        }
+        divider(ui);
+        toggle_row(ui, "Update automatically", "Checked once a day.", &mut draft.ytdlp_auto_update);
+        divider(ui);
+        toggle_row(ui, "Use yt-dlp when a stream fails", "", &mut draft.use_ytdlp);
+    });
+    // Its version, the first time this is seen.
+    if found.is_some() && app.tools.version.is_none() && job.is_none() && !ui.data(|d| d.get_temp::<bool>(egui::Id::new("ytdlp-asked")).unwrap_or(false)) {
+        ui.data_mut(|d| d.insert_temp(egui::Id::new("ytdlp-asked"), true));
+        app.actions.push(Action::CheckYtDlp);
+    }
 }
 
 fn storage(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
@@ -353,9 +438,9 @@ fn storage(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
         storage_bar(ui, sizes);
         divider(ui);
         let detail = if usage.saved == 0 {
-            "Nothing yet. Download a song, an album or a playlist from its menu or its page.".to_owned()
+            "None yet. Download from any song, album or playlist menu.".to_owned()
         } else {
-            format!("{}, {}. They play without the network.", widgets::songs(usage.saved), megabytes(usage.saved_bytes))
+            format!("{}, {}. Play offline.", widgets::songs(usage.saved), megabytes(usage.saved_bytes))
         };
         let mut open = false;
         row(ui, "Downloaded songs", &detail, 120.0, |ui| {
@@ -366,7 +451,7 @@ fn storage(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
         }
         divider(ui);
         let detail = format!(
-            "Songs you play are kept on this PC, so they start at once and play offline too; the oldest make way. Now {}, {}.",
+            "Kept so they start at once and play offline. Now {}, {}.",
             widgets::songs(usage.kept),
             megabytes(usage.kept_bytes)
         );
@@ -387,7 +472,7 @@ fn storage(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
         divider(ui);
         let measured = |bytes: fn(&crate::app::Storage) -> u64| sizes.as_ref().map_or_else(|| "measuring\u{2026}".to_owned(), |s| megabytes(bytes(s)));
         let mut clear = false;
-        row(ui, "Artwork", &format!("Album art saved for quick loading: {}.", measured(|s| s.artwork)), 120.0, |ui| {
+        row(ui, "Artwork", &format!("{}.", measured(|s| s.artwork)), 120.0, |ui| {
             clear = widgets::pill(ui, Some(Icon::Trash), "Clear", false).clicked();
         });
         if clear {
@@ -395,7 +480,7 @@ fn storage(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
         }
         divider(ui);
         let mut clear = false;
-        row(ui, "Lyrics", &format!("Lyrics found before, kept so they show at once, and offline: {}.", measured(|s| s.lyrics)), 120.0, |ui| {
+        row(ui, "Lyrics", &format!("{}.", measured(|s| s.lyrics)), 120.0, |ui| {
             clear = widgets::pill(ui, Some(Icon::Trash), "Clear", false).clicked();
         });
         if clear {
@@ -542,12 +627,12 @@ fn connections(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
         toggle_row(
             ui,
             "Show it on Discord",
-            "Your Discord status reads \u{201c}Listening to\u{201d} the artist, with the artwork, the song and a progress bar. Nothing while paused. Needs the Discord app.",
+            "Show what you're listening to in your Discord status.",
             &mut draft.discord,
         );
         if app.signed_in {
             divider(ui);
-            toggle_row(ui, "Add songs to your YouTube history", "Songs you play show in your YouTube Music history and shape its recommendations, as on the web.", &mut draft.history);
+            toggle_row(ui, "Add songs to your YouTube history", "Songs you play shape your recommendations.", &mut draft.history);
         }
         divider(ui);
         match app.lastfm.status() {
@@ -558,7 +643,7 @@ fn connections(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
                 let detail = if waiting > 0 {
                     format!("Connected as {user}. {waiting} plays wait to be sent.")
                 } else {
-                    format!("Connected as {user}. The player shows how often you've played the song and the artist.")
+                    format!("Connected as {user}.")
                 };
                 row(ui, "Last.fm", &detail, 130.0, |ui| {
                     disconnect = widgets::pill(ui, Some(Icon::SignOut), "Disconnect", false).clicked();
@@ -567,17 +652,17 @@ fn connections(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
                     app.actions.push(Action::LastFmDisconnect);
                 }
                 divider(ui);
-                toggle_row(ui, "Scrobble", "Send each song you play to Last.fm, once you've heard half of it.", &mut draft.scrobble);
+                toggle_row(ui, "Scrobble", "Send songs to Last.fm once half played.", &mut draft.scrobble);
             }
             Status::Authorising => {
-                row(ui, "Last.fm", "Waiting for you to allow access on Last.fm, in your browser\u{2026}", 40.0, |ui| {
+                row(ui, "Last.fm", "Allow access in your browser\u{2026}", 40.0, |ui| {
                     widgets::spinner_of(ui, 18.0, theme::text_dim());
                 });
             }
             Status::Disconnected => {
                 let mut connect = false;
                 let ready = !app.lastfm_form.0.trim().is_empty() && !app.lastfm_form.1.trim().is_empty();
-                row(ui, "Last.fm", "Scrobble what you play, and see your play counts in the player. Connecting takes a free Last.fm API account: see Advanced, below.", 120.0, |ui| {
+                row(ui, "Last.fm", "Scrobble and see play counts. Needs a free Last.fm API key (Advanced).", 120.0, |ui| {
                     connect = widgets::pill(ui, None, "Connect", ready).clicked();
                 });
                 if connect {
@@ -597,12 +682,17 @@ fn appearance(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
     card(ui, "Theme", |ui| {
         ui.add_space(18.0);
         themes(ui, draft);
-        ui.add_space(18.0);
+        ui.add_space(14.0);
+        if draft.theme == crate::theme::Theme::Artwork {
+            note(ui, Icon::Info, "Follows the colours of the song playing.");
+        } else {
+            ui.add_space(4.0);
+        }
     });
     card(ui, "Visualiser", |ui| {
-        toggle_row(ui, "Visualiser", "The music, drawn rising from the top of the player bar as it plays.", &mut draft.visualiser);
+        toggle_row(ui, "Visualiser", "Above the player bar.", &mut draft.visualiser);
         divider(ui);
-        row(ui, "Style", "Right-click the visualiser button in the player bar to change it there too.", 330.0, |ui| {
+        row(ui, "Style", "", 330.0, |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             for mode in crate::visualiser::Mode::ALL.iter().rev() {
                 if widgets::chip(ui, mode.name(), draft.visualiser && draft.visualiser_mode == *mode).clicked() {
@@ -613,9 +703,9 @@ fn appearance(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
         });
         divider(ui);
         let detail = match draft.visualiser_focus {
-            crate::visualiser::Focus::All => "The whole mix, every hit in it leaping out.",
-            crate::visualiser::Focus::Drums => "The beat: kicks, snares and cymbals leap, held notes stay low.",
-            crate::visualiser::Focus::Vocals => "The voice: the middle of the range, and what is mixed in the centre, where singers are.",
+            crate::visualiser::Focus::All => "The whole mix.",
+            crate::visualiser::Focus::Drums => "The beat.",
+            crate::visualiser::Focus::Vocals => "The voice.",
         };
         row(ui, "Reacts to", detail, 300.0, |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
@@ -631,16 +721,16 @@ fn appearance(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
         toggle_row(
             ui,
             "Titles in Latin letters",
-            "Japanese, Chinese and Korean titles as YouTube Music's player shows them: \u{201c}Tsubasa\u{201d} rather than \u{201c}ツバサ - Tsubasa\u{201d}. The original shows when you point at one.",
+            "\u{201c}Tsubasa\u{201d} rather than \u{201c}ツバサ - Tsubasa\u{201d}.",
             &mut draft.romanized_titles,
         );
         divider(ui);
-        toggle_row(ui, "Keep playing when closed", "Closing the window leaves the music playing, from the icon in the taskbar's corner.", &mut draft.close_to_tray);
+        toggle_row(ui, "Keep playing when closed", "Closing the window keeps the music on, in the tray.", &mut draft.close_to_tray);
         divider(ui);
         toggle_row(
             ui,
             "Show song changes",
-            "With the window minimised or in the taskbar's corner, an island comes down at the top of the screen as one song gives way to the next: its artwork and title, then the next song's, for a few seconds. It never takes a click, and stays away from games and videos in full screen.",
+            "An island at the top of the screen when the song changes and the window is hidden.",
             &mut draft.song_note,
         );
         divider(ui);
@@ -648,14 +738,14 @@ fn appearance(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
         toggle_row(
             ui,
             "Start with Windows",
-            "Opens in the taskbar's corner when you sign in to Windows, ready for the media keys; the window is a click on its icon away.",
+            "Opens in the tray when you sign in to Windows.",
             &mut autostart,
         );
         if autostart != app.autostart {
             app.actions.push(Action::SetAutostart(autostart));
         }
         divider(ui);
-        row(ui, "Interface size", "Everything larger or smaller.", 230.0, |ui| {
+        row(ui, "Interface size", "", 230.0, |ui| {
             ui.spacing_mut().slider_width = 150.0;
             ui.add(
                 egui::Slider::new(&mut draft.zoom, 0.8..=1.6)
@@ -665,11 +755,11 @@ fn appearance(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
             );
         });
         divider(ui);
-        row(ui, "Language", "The language YouTube Music answers in: en, de, ja, ms\u{2026}", 120.0, |ui| {
+        row(ui, "Language", "Such as en, de, ja.", 120.0, |ui| {
             ui.add(egui::TextEdit::singleline(&mut draft.language).desired_width(90.0).hint_text("en"));
         });
         divider(ui);
-        row(ui, "Region", "Whose charts and suggestions: two letters, such as US or MY. Empty follows your connection.", 120.0, |ui| {
+        row(ui, "Region", "Such as US or MY. Empty: automatic.", 120.0, |ui| {
             ui.add(egui::TextEdit::singleline(&mut draft.region).desired_width(90.0).hint_text("auto"));
         });
     });
@@ -691,7 +781,12 @@ fn themes(ui: &mut Ui, draft: &mut Settings) {
                 draft.theme = theme;
             }
             let picked = draft.theme == theme;
-            let p = theme.palette();
+            // The Artwork look not yet on: shown in an artwork's violet.
+            let p = if theme == crate::theme::Theme::Artwork && crate::theme::current() != theme {
+                crate::theme::artwork_palette(Color32::from_rgb(0x8f, 0x6b, 0xff))
+            } else {
+                theme.palette()
+            };
             let preview = Rect::from_min_size(rect.min, vec2(tile_w, preview_h));
             let painter = ui.painter();
             let round = CornerRadius::same(10);
@@ -803,26 +898,20 @@ fn advanced(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
     }
     let found = app.backend.ytdlp_found();
     card_body(ui, |ui| {
-        toggle_row(
-            ui,
-            "Fall back to yt-dlp",
-            "When YouTube refuses the app's own stream request, have yt-dlp find the stream instead.",
-            &mut draft.use_ytdlp,
-        );
-        row(ui, "yt-dlp", &match &found {
-            Some(path) => format!("Using {}", path.display()),
-            None => "Not found. Install it (winget install yt-dlp.yt-dlp) or give its path.".to_owned(),
+        row(ui, "yt-dlp's location", &match &found {
+            Some(path) => path.display().to_string(),
+            None => "Not found.".to_owned(),
         }, 260.0, |ui| {
             ui.add(egui::TextEdit::singleline(&mut draft.ytdlp_path).desired_width(240.0).hint_text("found on PATH"));
         });
         divider(ui);
-        row(ui, "Discord application", "Another Discord application's id, whose name your status then shows. Empty: YouTube Music.", 260.0, |ui| {
+        row(ui, "Discord application", "Its name shows in your status.", 260.0, |ui| {
             ui.add(egui::TextEdit::singleline(&mut draft.discord_client_id).desired_width(240.0).hint_text("YouTube Music"));
         });
         if app.lastfm.status() == crate::lastfm::Status::Disconnected {
             divider(ui);
             let mut create = false;
-            row(ui, "Last.fm API account", "Last.fm asks each app user for an API account of their own: create one (any name will do), paste its key and secret here, then Connect under Sharing. You allow access on last.fm; your password never passes through the app.", 130.0, |ui| {
+            row(ui, "Last.fm API account", "Create one (any name), paste its key and secret, then Connect under Sharing.", 130.0, |ui| {
                 create = widgets::pill(ui, Some(Icon::External), "Create one", false).clicked();
             });
             if create {
@@ -848,7 +937,7 @@ fn advanced(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
             crate::platform::open_folder(&app.paths.config);
         }
         divider(ui);
-        row(ui, "Connection", if app.online() { "Online." } else { "Offline: downloaded songs play; the rest waits for the connection." }, 40.0, |_| {});
+        row(ui, "Connection", if app.online() { "Online" } else { "Offline: downloads still play" }, 40.0, |_| {});
     });
 }
 
@@ -857,7 +946,7 @@ fn about(ui: &mut Ui) {
     ui.vertical_centered(|ui| {
         ui.label(RichText::new(format!("Native YTM {}", env!("CARGO_PKG_VERSION"))).font(theme::medium(13.5)).color(theme::text_dim()));
         ui.label(
-            RichText::new("A lightweight YouTube Music player for Windows. Not affiliated with Google or YouTube.")
+            RichText::new("Not affiliated with Google or YouTube.")
                 .font(theme::regular(12.5))
                 .color(theme::text_faint()),
         );

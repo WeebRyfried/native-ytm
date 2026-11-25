@@ -8,6 +8,7 @@ use egui::{Color32, CornerRadius, FontFamily, FontId, Stroke, TextStyle, Visuals
 use serde::{Deserialize, Serialize};
 
 /// One look of the app.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Palette {
     pub bg: Color32,
     pub sidebar: Color32,
@@ -43,10 +44,13 @@ pub enum Theme {
     Sakura,
     /// Green-black, with mint.
     Matcha,
+    /// The colours of the artwork playing, as the full-window player has
+    /// them.
+    Artwork,
 }
 
 impl Theme {
-    pub const ALL: [Theme; 4] = [Theme::Classic, Theme::Midnight, Theme::Sakura, Theme::Matcha];
+    pub const ALL: [Theme; 5] = [Theme::Classic, Theme::Midnight, Theme::Sakura, Theme::Matcha, Theme::Artwork];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -54,11 +58,15 @@ impl Theme {
             Theme::Midnight => "Midnight",
             Theme::Sakura => "Sakura",
             Theme::Matcha => "Matcha",
+            Theme::Artwork => "Artwork",
         }
     }
 
-    pub fn palette(self) -> &'static Palette {
-        &PALETTES[self as usize]
+    pub fn palette(self) -> Palette {
+        match self {
+            Theme::Artwork => *ARTWORK.read().unwrap_or_else(std::sync::PoisonError::into_inner),
+            _ => PALETTES[self as usize],
+        }
     }
 }
 
@@ -131,16 +139,123 @@ const PALETTES: [Palette; 4] = [
 
 static CURRENT: AtomicU8 = AtomicU8::new(0);
 
+/// The Artwork look as it stands, made from the artwork playing.
+static ARTWORK: std::sync::RwLock<Palette> = std::sync::RwLock::new(PALETTES[0]);
+
+/// The accent the logo was last drawn in, packed: the Artwork look's
+/// changes with each song, and the logo is drawn again once it settles.
+static LOGO: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 /// Takes on `theme`; `apply` then redoes egui's own colours.
 pub fn set(theme: Theme) {
     CURRENT.store(theme as u8, Ordering::Relaxed);
+    settle_logo();
+}
+
+/// The Artwork look, made from `seed`, the artwork's colour.
+pub fn set_artwork(seed: Color32) {
+    *ARTWORK.write().unwrap_or_else(std::sync::PoisonError::into_inner) = artwork_palette(seed);
+}
+
+/// The logo is to take the accent as it is now.
+pub fn settle_logo() {
+    let [r, g, b, _] = accent().to_array();
+    LOGO.store(u32::from_be_bytes([current() as u8, r, g, b]), Ordering::Relaxed);
+}
+
+/// What the logo is drawn for: a new one when this changes.
+pub fn logo_key() -> u32 {
+    LOGO.load(Ordering::Relaxed)
+}
+
+/// `l`ightness, `c`hroma and `h`ue (radians) in OKLCh, with less chroma
+/// where a screen cannot show that much.
+fn lch(l: f32, c: f32, h: f32) -> Color32 {
+    use egui::ecolor::gamma_u8_from_linear_f32;
+    let mut c = c.max(0.0);
+    let mut rgb = linear_from_oklab([l, c * h.cos(), c * h.sin()]);
+    while c > 0.0 && rgb.iter().any(|v| !(-1e-4..=1.0001).contains(v)) {
+        c = (c - 0.004).max(0.0);
+        rgb = linear_from_oklab([l, c * h.cos(), c * h.sin()]);
+    }
+    Color32::from_rgb(gamma_u8_from_linear_f32(rgb[0]), gamma_u8_from_linear_f32(rgb[1]), gamma_u8_from_linear_f32(rgb[2]))
+}
+
+/// A dark look in the colour of `seed`: surfaces faintly tinted with its
+/// hue, the accent and its glow in it; from a grey cover, a quiet grey.
+pub fn artwork_palette(seed: Color32) -> Palette {
+    use egui::ecolor::linear_f32_from_gamma_u8;
+    let [_, a, b] = oklab([seed.r(), seed.g(), seed.b()].map(linear_f32_from_gamma_u8));
+    let hue = b.atan2(a);
+    // 0 for a grey cover, 1 for a colourful one.
+    let vivid = ((a * a + b * b).sqrt() / 0.06).clamp(0.0, 1.0);
+    let tint = 0.03 * vivid;
+    let surface = |l: f32| lch(l, tint, hue);
+    // Yellows and oranges are muddy dark: lighter.
+    let warm = (1.2..2.2).contains(&hue);
+    let accent_l = if warm { 0.80 } else { 0.70 } + 0.12 * (1.0 - vivid);
+    Palette {
+        bg: surface(0.150),
+        // The sidebar, side panel and title bar: as light as the page and
+        // more tinted, in the artwork's colour rather than near black.
+        sidebar: lch(0.17, tint * 1.6, hue),
+        player: surface(0.205),
+        surface: surface(0.232),
+        surface_hover: surface(0.282),
+        surface_active: surface(0.322),
+        popup: surface(0.250),
+        text: lch(0.955, 0.008 * vivid, hue),
+        text_dim: lch(0.745, 0.03 * vivid, hue),
+        text_faint: lch(0.555, 0.03 * vivid, hue),
+        accent: lch(accent_l.min(0.86), 0.19 * vivid, hue),
+        accent_text: lch(0.81, 0.14 * vivid, hue),
+        divider: surface(0.268),
+        glow: lch(0.82, 0.13 * vivid, hue + 0.6),
+    }
+}
+
+/// The colour of a picture, from its pixels: the hue its colourful,
+/// mid-light pixels share most. Grey when it has hardly any colour.
+pub fn seed_of(pixels: impl Iterator<Item = [u8; 3]>) -> Color32 {
+    use egui::ecolor::linear_f32_from_gamma_u8;
+    const BINS: usize = 24;
+    // Weight, and weighted lightness, a and b, by hue.
+    let mut bins = [[0f32; 4]; BINS];
+    for pixel in pixels {
+        let [l, a, b] = oklab(pixel.map(linear_f32_from_gamma_u8));
+        let c = (a * a + b * b).sqrt();
+        if c < 0.03 || !(0.2..=0.95).contains(&l) {
+            continue;
+        }
+        let weight = c * (1.0 - (l - 0.62).abs());
+        let turn = (b.atan2(a) + std::f32::consts::PI) / std::f32::consts::TAU;
+        let bin = ((turn * BINS as f32) as usize).min(BINS - 1);
+        for (slot, v) in bins[bin].iter_mut().zip([1.0, l, a, b]) {
+            *slot += v * weight;
+        }
+    }
+    let around = |i: usize| [(i + BINS - 1) % BINS, i, (i + 1) % BINS];
+    let score = |i: usize| around(i).iter().map(|&j| bins[j][0]).sum::<f32>();
+    let best = (0..BINS).max_by(|&x, &y| score(x).total_cmp(&score(y))).unwrap_or(0);
+    let total = score(best);
+    if total < 1.5 {
+        return Color32::from_gray(150);
+    }
+    let mut sum = [0f32; 3];
+    for j in around(best) {
+        for k in 0..3 {
+            sum[k] += bins[j][k + 1];
+        }
+    }
+    let [l, a, b] = sum.map(|v| v / total);
+    lch(l, (a * a + b * b).sqrt(), b.atan2(a))
 }
 
 pub fn current() -> Theme {
     Theme::ALL[usize::from(CURRENT.load(Ordering::Relaxed)).min(Theme::ALL.len() - 1)]
 }
 
-fn palette() -> &'static Palette {
+fn palette() -> Palette {
     current().palette()
 }
 

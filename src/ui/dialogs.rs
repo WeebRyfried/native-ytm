@@ -28,6 +28,9 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     if app.whats_new.is_some() {
         whats_new(app, ctx);
     }
+    if app.browser_question_shown() {
+        browser_question(app, ctx);
+    }
 }
 
 /// What changed: after an update, in each version since the one before;
@@ -196,70 +199,107 @@ fn frame() -> egui::Frame {
 }
 
 fn sign_in(app: &mut App, ctx: &egui::Context) {
+    if app.sign_in.as_ref().is_some_and(|d| d.silent) {
+        return;
+    }
     let mut close = false;
     let mut submit = None;
+    let mut from_browser = None;
+    let mut install = false;
+    let ytdlp = app.backend.ytdlp_found().is_some();
+    let installing = app.tools.job == Some(crate::app::Job::Installing);
+    let browsers = crate::ytdlp::installed_browsers();
     let response = egui::Modal::new(Id::new("sign-in"))
         .frame(frame())
         .backdrop_color(theme::SCRIM)
         .show(ctx, |ui| {
-            ui.set_width(560.0);
+            ui.set_width(480.0);
             ui.label(RichText::new("Sign in to YouTube Music").font(theme::bold(22.0)));
-            ui.add_space(10.0);
-            ui.label(RichText::new(
-                "This app signs in with your browser's YouTube Music cookie, the way ytmusicapi does. Nothing leaves this computer except to YouTube.",
-            ).color(theme::text_dim()));
-            ui.add_space(12.0);
-            for (n, step) in [
-                "Open music.youtube.com in your browser, signed in.",
-                "Press F12, open the Network tab, and filter for \u{201c}browse\u{201d}. Click anything on the page if the list is empty.",
-                "Select a request to music.youtube.com, and under Request Headers copy the whole value of \u{201c}cookie\u{201d}. (Copy as cURL, or a cookies.txt export, also works.)",
-                "Paste it below.",
-            ]
-            .iter()
-            .enumerate()
-            {
-                ui.horizontal_top(|ui| {
-                    ui.label(RichText::new(format!("{}.", n + 1)).font(theme::semibold(14.0)));
-                    ui.add(egui::Label::new(RichText::new(*step).font(theme::regular(14.0))).wrap());
+            ui.add_space(8.0);
+            ui.label(RichText::new("Sign in at music.youtube.com in your browser, then bring that sign-in here.").color(theme::text_dim()));
+            ui.add_space(4.0);
+            let open = ui.add(egui::Label::new(RichText::new("Open music.youtube.com").color(theme::accent_text()).font(theme::regular(13.5))).sense(Sense::click()));
+            if open.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                crate::platform::open_url("https://music.youtube.com");
+            }
+            ui.add_space(16.0);
+            let dialog = app.sign_in.as_mut().expect("shown");
+            if !dialog.paste {
+                // Which browser: each tried in turn, or one.
+                let mut chosen = app.settings.sign_in_browser.clone();
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                    if widgets::chip(ui, "Any browser", chosen.is_empty()).clicked() {
+                        chosen.clear();
+                    }
+                    for id in &browsers {
+                        if widgets::chip(ui, crate::ytdlp::browser_name(id), chosen == *id).clicked() {
+                            chosen = (*id).to_owned();
+                        }
+                    }
+                });
+                if chosen != app.settings.sign_in_browser {
+                    let mut settings = app.settings.clone();
+                    settings.sign_in_browser = chosen;
+                    app.actions.push(Action::ApplySettings(Box::new(settings)));
+                }
+                ui.add_space(10.0);
+                ui.label(
+                    RichText::new("Chrome and Edge lock their sign-in away from other apps. Firefox works, or paste a cookie.")
+                        .color(theme::text_faint())
+                        .font(theme::regular(12.5)),
+                );
+            } else {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new("In the browser's developer tools (F12, Network), copy the cookie header of a music.youtube.com request and paste it here.")
+                            .color(theme::text_dim())
+                            .font(theme::regular(13.0)),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(8.0);
+                egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut dialog.text)
+                            .desired_rows(4)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("SAPISID=...; __Secure-3PSID=...; ...")
+                            .font(egui::FontId::monospace(12.0)),
+                    );
                 });
             }
-            ui.add_space(12.0);
-            let dialog = app.sign_in.as_mut().expect("shown");
-            egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
-                ui.add(
-                    egui::TextEdit::multiline(&mut dialog.text)
-                        .desired_rows(5)
-                        .desired_width(f32::INFINITY)
-                        .password(false)
-                        .hint_text("SAPISID=...; __Secure-3PSID=...; ...")
-                        .font(egui::FontId::monospace(12.0)),
-                );
-            });
             if let Some(error) = &dialog.error {
-                ui.add_space(8.0);
-                ui.label(RichText::new(error).color(theme::accent_text()));
+                ui.add_space(10.0);
+                ui.add(egui::Label::new(RichText::new(error).color(theme::accent_text())).wrap());
             }
-            ui.add_space(8.0);
-            ui.label(
-                RichText::new("The cookie is kept encrypted with Windows (DPAPI) for your account only. Signing out of YouTube in that browser ends this sign-in too.")
-                    .color(theme::text_faint())
-                    .font(theme::regular(12.5)),
-            );
-            ui.add_space(16.0);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 10.0;
-                let busy = dialog.busy;
-                if busy {
-                    widgets::spinner_of(ui, 20.0, theme::text());
-                } else if widgets::pill(ui, None, "Sign in", true).clicked() {
-                    submit = Some(dialog.text.clone());
+            ui.add_space(18.0);
+            ui.horizontal(|ui| {
+                let toggle = if dialog.paste { "Get it from a browser instead" } else { "Paste a cookie instead" };
+                let link = ui.add(egui::Label::new(RichText::new(toggle).color(theme::text_dim()).font(theme::regular(13.0))).sense(Sense::click()));
+                if link.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                    dialog.paste = !dialog.paste;
+                    dialog.error = None;
                 }
-                if widgets::pill(ui, None, "Cancel", false).clicked() {
-                    close = true;
-                }
-                if widgets::pill(ui, Some(Icon::External), "Open YouTube Music", false).clicked() {
-                    crate::platform::open_url("https://music.youtube.com");
-                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    if dialog.busy || installing {
+                        widgets::spinner_of(ui, 20.0, theme::text());
+                    } else if dialog.paste {
+                        if widgets::pill(ui, None, "Sign in", true).clicked() {
+                            submit = Some(dialog.text.clone());
+                        }
+                    } else if !ytdlp {
+                        if widgets::pill(ui, Some(Icon::Download), "Install yt-dlp, sign in", true).clicked() {
+                            install = true;
+                        }
+                    } else if widgets::pill(ui, None, "Sign in", true).clicked() {
+                        from_browser = Some(app.settings.sign_in_browser.clone());
+                    }
+                    if widgets::pill(ui, None, "Cancel", false).clicked() {
+                        close = true;
+                    }
+                });
             });
         });
     if response.should_close() && !app.sign_in.as_ref().is_some_and(|d| d.busy) {
@@ -268,6 +308,12 @@ fn sign_in(app: &mut App, ctx: &egui::Context) {
     if let Some(text) = submit {
         app.actions.push(Action::SignIn(text));
     }
+    if let Some(browser) = from_browser {
+        app.actions.push(Action::SignInFromBrowser { browser: (!browser.is_empty()).then_some(browser), auto: false });
+    }
+    if install {
+        app.actions.push(Action::SignInFromBrowser { browser: None, auto: false });
+    }
     if close {
         if app.sign_in.as_ref().is_some_and(|d| d.busy) {
             // Cancelled mid-check: forget the cookie being checked.
@@ -275,6 +321,93 @@ fn sign_in(app: &mut App, ctx: &egui::Context) {
             app.signed_in = false;
         }
         app.sign_in = None;
+    }
+}
+
+/// On the first start: whether to sign in from the browser by itself.
+fn browser_question(app: &mut App, ctx: &egui::Context) {
+    let mut answer = None;
+    egui::Modal::new(Id::new("browser-question"))
+        .frame(frame())
+        .backdrop_color(theme::SCRIM)
+        .show(ctx, |ui| {
+            ui.set_width(420.0);
+            ui.label(RichText::new("Sign in from your browser?").font(theme::bold(20.0)));
+            ui.add_space(8.0);
+            ui.add(
+                egui::Label::new(
+                    RichText::new("Get your YouTube Music sign-in from your browser automatically, now and whenever you're signed out.")
+                        .color(theme::text_dim()),
+                )
+                .wrap(),
+            );
+            if app.backend.ytdlp_found().is_none() {
+                ui.add_space(6.0);
+                ui.label(RichText::new("This installs yt-dlp (about 24 MB).").color(theme::text_faint()).font(theme::regular(12.5)));
+            }
+            ui.add_space(18.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                if widgets::pill(ui, None, "Yes", true).clicked() {
+                    answer = Some(true);
+                }
+                if widgets::pill(ui, None, "No thanks", false).clicked() {
+                    answer = Some(false);
+                }
+            });
+        });
+    if let Some(yes) = answer {
+        app.actions.push(Action::AnswerBrowserSignIn(yes));
+    }
+}
+
+/// The offer to install yt-dlp, small in the corner over the player bar,
+/// until it is installed or put away.
+pub fn ytdlp_prompt(app: &mut App, ctx: &egui::Context) {
+    if !app.ytdlp_prompt_shown() {
+        return;
+    }
+    let installing = app.tools.job == Some(crate::app::Job::Installing);
+    let screen = ctx.content_rect();
+    let width = 300.0;
+    let shown = theme::appear(ctx, Id::new("ytdlp-prompt"), 1, 0.3);
+    let mut action = None;
+    egui::Area::new(Id::new("ytdlp-prompt-area"))
+        .order(egui::Order::Foreground)
+        .anchor(egui::Align2::RIGHT_BOTTOM, vec2(-16.0, -(theme::PLAYER_HEIGHT + 16.0) + (1.0 - shown) * 12.0))
+        .show(ctx, |ui| {
+            ui.multiply_opacity(shown);
+            egui::Frame::new()
+                .fill(theme::popup())
+                .corner_radius(CornerRadius::same(10))
+                .stroke(egui::Stroke::new(1.0, theme::divider()))
+                .inner_margin(Margin::symmetric(14, 12))
+                .shadow(egui::Shadow { offset: [0, 4], blur: 18, spread: 0, color: Color32::from_black_alpha(110) })
+                .show(ui, |ui| {
+                    ui.set_width(width - 28.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Get yt-dlp").font(theme::semibold(14.0)));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if widgets::icon_button(ui, Icon::Close, 14.0, theme::text_dim(), "Don't show this again").clicked() {
+                                action = Some(Action::HideYtDlpPrompt);
+                            }
+                        });
+                    });
+                    ui.label(RichText::new("For browser sign-in and Premium quality.").color(theme::text_dim()).font(theme::regular(12.5)));
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if installing {
+                            widgets::spinner_of(ui, 16.0, theme::text_dim());
+                            ui.label(RichText::new("Installing\u{2026}").color(theme::text_dim()).font(theme::regular(12.5)));
+                        } else if widgets::pill(ui, Some(Icon::Download), "Install", true).clicked() {
+                            action = Some(Action::InstallYtDlp);
+                        }
+                    });
+                });
+        });
+    let _ = screen;
+    if let Some(action) = action {
+        app.actions.push(action);
     }
 }
 

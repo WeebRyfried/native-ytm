@@ -54,7 +54,7 @@ impl Resolver {
     pub fn new(ytdlp_override: Option<PathBuf>, use_ytdlp: bool, premium: bool, scratch: PathBuf) -> Self {
         Self {
             clients: PlayerClient::defaults(),
-            ytdlp: ytdlp_override.or_else(|| find_on_path("yt-dlp.exe").or_else(|| find_on_path("yt-dlp"))),
+            ytdlp: ytdlp_override.or_else(crate::ytdlp::find),
             use_ytdlp,
             premium,
             scratch,

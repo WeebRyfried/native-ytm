@@ -132,6 +132,29 @@ pub fn style_title_bar(hwnd: isize, caption: egui::Color32) {
 #[cfg(not(windows))]
 pub fn style_title_bar(_hwnd: isize, _caption: egui::Color32) {}
 
+/// A window without Windows' frame, drawn as one with it: its shadow, and
+/// on Windows 11 its rounded corners.
+#[cfg(windows)]
+pub fn frameless(hwnd: isize) {
+    use windows_sys::Win32::Graphics::Dwm::{DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute};
+    use windows_sys::Win32::UI::Controls::MARGINS;
+    let hwnd = hwnd as windows_sys::Win32::Foundation::HWND;
+    let corners = DWMWCP_ROUND;
+    // A frame a pixel into the window is enough for the shadow; the app's
+    // own drawing covers it.
+    let margins = MARGINS { cxLeftWidth: 1, cxRightWidth: 1, cyTopHeight: 1, cyBottomHeight: 1 };
+    // SAFETY: the window is the app's own, and each value lives through
+    // the call that reads it; an older Windows returns an error and draws
+    // as before.
+    unsafe {
+        DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE as u32, (&raw const corners).cast(), 4);
+        DwmExtendFrameIntoClientArea(hwnd, &raw const margins);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn frameless(_hwnd: isize) {}
+
 /// Opens a web address in the default browser. Only http and https: a
 /// link from YouTube's data never gets to start anything else.
 #[cfg(windows)]

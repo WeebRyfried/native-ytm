@@ -13,6 +13,7 @@ mod settings;
 mod side_panel;
 mod sidebar;
 mod stats;
+mod titlebar;
 mod topbar;
 mod visualiser;
 pub mod widgets;
@@ -29,6 +30,7 @@ impl App {
     /// The shared view context, alongside the parts of the app pages read.
     pub fn cx(&mut self) -> Cx<'_> {
         let current = self.queue.current_track().map(|t| t.video_id.as_str());
+        let current_uid = self.queue.current().map(|e| e.uid);
         let playing = matches!(
             self.player.status().state,
             crate::player::State::Playing | crate::player::State::Buffering
@@ -38,6 +40,7 @@ impl App {
             images: &mut self.images,
             actions: &mut self.actions,
             current,
+            current_uid,
             playing,
             signed_in: self.signed_in,
             offline: &self.offline,
@@ -52,6 +55,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     keys::handle(app, &ctx);
     let fullscreen = app.fullscreen;
     if !fullscreen {
+        egui::Panel::top("titlebar")
+            .exact_size(titlebar::HEIGHT)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(Frame::new().fill(titlebar::fill()))
+            .show(ui, |ui| titlebar::show(app, ui));
         egui::Panel::bottom("player")
             .exact_size(theme::PLAYER_HEIGHT)
             .resizable(false)
@@ -90,7 +99,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         floating_bar(app, &ctx, rest, bar);
     }
     dialogs::show(app, &ctx);
+    dialogs::ytdlp_prompt(app, &ctx);
     toasts(app, &ctx);
+    if !fullscreen {
+        titlebar::resize_edges(&ctx);
+    }
     if fullscreen && bar == 0.0 {
         // The mouse rests: the pointer goes with the bar.
         ctx.set_cursor_icon(CursorIcon::None);

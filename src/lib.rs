@@ -30,3 +30,4 @@ pub mod ui;
 pub mod update;
 pub mod visualiser;
 pub mod watch;
+pub mod ytdlp;

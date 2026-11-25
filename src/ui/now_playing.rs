@@ -99,15 +99,26 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect, rise: f32, foot: f32, chrome
     }
     let quality = app.stream_quality().map(str::to_owned);
     let upgrade = app.upgrade.clone().filter(|u| u.token == app.current_token());
+    let warning = app.quality_warning();
     let mut cx = app.cx();
     if links.is_empty() {
         widgets::clipped_label(&mut text, track.extra.as_deref().unwrap_or(""), theme::medium(17.0), theme::text_dim(), width, Sense::hover());
     } else {
         widgets::links(&mut text, &mut cx, &links, theme::medium(17.0), theme::text_dim(), width);
     }
-    if quality.is_some() || upgrade.is_some() {
+    if quality.is_some() || upgrade.is_some() || warning.is_some() {
         text.add_space(6.0);
-        quality_chip(&mut text, quality.as_deref(), upgrade.as_ref());
+        text.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if quality.is_some() || upgrade.is_some() {
+                quality_chip(ui, quality.as_deref(), upgrade.as_ref());
+            }
+            if let Some(reason) = &warning
+                && quality_warning(ui, reason).clicked()
+            {
+                cx.push(Action::RetryQuality);
+            }
+        });
     }
 
     // What plays next, or the words.
@@ -595,4 +606,23 @@ fn backdrop(app: &mut App, ui: &Ui, rect: Rect, url: Option<&str>, turning: Opti
             painter.rect_filled(rect, CornerRadius::ZERO, theme::bg());
         }
     }
+}
+
+/// Beside the quality, when the better stream could not be had: a small
+/// warning that says why when pointed at, and tries again when clicked.
+fn quality_warning(ui: &mut Ui, reason: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
+    let response = response
+        .on_hover_cursor(CursorIcon::PointingHand)
+        .on_hover_text(format!("{reason}. Click to try again."));
+    let shown = theme::appear(ui.ctx(), ui.id().with("quality-warning"), 1, 0.3);
+    let amber = Color32::from_rgb(0xf5, 0xa5, 0x24);
+    let colour = if response.hovered() { amber } else { amber.gamma_multiply(0.75) };
+    if response.hovered() {
+        ui.painter().circle_filled(rect.center(), 10.0, Color32::from_white_alpha(16));
+    }
+    Icon::Alert
+        .image(colour.gamma_multiply(shown), 14.0)
+        .paint_at(ui, Rect::from_center_size(rect.center(), vec2(14.0, 14.0)));
+    response
 }

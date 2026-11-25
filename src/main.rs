@@ -85,6 +85,8 @@ fn main() {
     let result = fastframe_shell::Shell::new(app, &waker).start_hidden(background).run(|lease| {
         let viewport = egui::ViewportBuilder::default()
             .with_title("Native YTM")
+            // The app draws its own title bar (src/ui/titlebar.rs).
+            .with_decorations(false)
             .with_app_id("native-ytm")
             .with_inner_size([1280.0, 820.0])
             .with_min_inner_size([880.0, 560.0])
@@ -108,6 +110,7 @@ fn main() {
                         && let RawWindowHandle::Win32(window) = handle.as_raw()
                     {
                         platform::style_title_bar(window.hwnd.get(), theme::sidebar());
+                        platform::frameless(window.hwnd.get());
                         platform::set_main_window(window.hwnd.get());
                     }
                 }

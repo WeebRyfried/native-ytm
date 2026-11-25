@@ -265,13 +265,19 @@ pub fn show(app: &mut App, ui: &mut Ui, big: bool) {
             } else {
                 synced(app, ui, &video_id, shown, &all, big);
             }
-            if all.len() > 1 {
-                let pointed = ui.ctx().pointer_hover_pos().is_some_and(|p| area.contains(p));
-                sources(app, ui, area, &video_id, &all, chosen, pointed);
+            let pointed = ui.ctx().pointer_hover_pos().is_some_and(|p| area.contains(p));
+            sources(app, ui, area, &video_id, &all, chosen, pointed);
+        }
+        Some(Loadable::Failed(_)) => {
+            if message_with_retry(ui, "Couldn't look up the lyrics just now") {
+                app.actions.push(Action::RetryLyrics);
             }
         }
-        Some(Loadable::Failed(_)) => message(ui, "The lyrics could not be looked up just now. Trying again in a minute"),
-        Some(Loadable::Ready(None)) => message(ui, "Lyrics are not available for this song"),
+        Some(Loadable::Ready(None)) => {
+            if message_with_retry(ui, "No lyrics for this song") {
+                app.actions.push(Action::RetryLyrics);
+            }
+        }
         Some(Loadable::Loading) | None => widgets::spinner(ui),
     }
 }
@@ -279,6 +285,13 @@ pub fn show(app: &mut App, ui: &mut Ui, big: bool) {
 fn message(ui: &mut Ui, text: &str) {
     ui.add_space(40.0);
     ui.vertical_centered(|ui| ui.label(RichText::new(text).color(theme::text_dim())));
+}
+
+/// A message, and under it a button that looks again: whether it was clicked.
+fn message_with_retry(ui: &mut Ui, text: &str) -> bool {
+    message(ui, text);
+    ui.add_space(12.0);
+    ui.vertical_centered(|ui| widgets::pill(ui, Some(Icon::Refresh), "Try again", false).clicked()).inner
 }
 
 /// Readings for these lyrics, when they are wanted and Japanese: the
@@ -944,9 +957,8 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
         let galley = painter.layout(said, theme::regular(12.5), theme::text_faint(), width);
         painter.galley(pos2(rect.left() + pad, footer_top), galley, theme::text_faint());
     }
-    if response.contains_pointer() || offset != 0.0 {
-        nudge(app, ui, rect, video_id, offset, response.contains_pointer());
-    }
+    let pointed = ui.ctx().pointer_hover_pos().is_some_and(|p| rect.contains(p));
+    nudge(app, ui, rect, video_id, offset, pointed);
     if let Some(time) = clicked_line {
         app.actions.push(Action::Seek((time + offset).max(0.0)));
         // Back to following, from the line clicked.
@@ -972,11 +984,11 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
 
 /// In the lyrics' corner: lines earlier or later by half a second, for a
 /// song whose lyrics run ahead of it or behind it; a click on the amount
-/// puts them back. Faint while the pointer is elsewhere, and only there
-/// at all then when the song's lyrics are moved.
+/// puts them back. It fades in with the pointer over the lyrics and out
+/// with it gone, as the sources' pill does.
 fn nudge(app: &mut App, ui: &mut Ui, area: Rect, video_id: &str, offset: f64, pointed: bool) {
     let id = ui.id().with(("lyrics-nudge", video_id));
-    let shown = ui.ctx().animate_bool_with_time(id, pointed, 0.2).max(if offset != 0.0 { 0.55 } else { 0.0 });
+    let shown = ui.ctx().animate_bool_with_time(id, pointed, 0.2);
     if shown <= 0.01 {
         return;
     }
@@ -1054,7 +1066,7 @@ fn sources(app: &mut App, ui: &mut Ui, area: Rect, video_id: &str, all: &[&Lyric
             theme::next_frame(ui.ctx());
         }
     }
-    let response = response.on_hover_text("Lyrics from another source");
+    let response = response.on_hover_text("Where the lyrics are from");
     egui::Popup::menu(&response).align(egui::RectAlign::TOP_START).show(|ui| {
         ui.set_min_width(220.0);
         for (i, lyrics) in all.iter().enumerate() {
@@ -1065,6 +1077,11 @@ fn sources(app: &mut App, ui: &mut Ui, area: Rect, video_id: &str, all: &[&Lyric
                 app.actions.push(Action::ChooseLyrics { video_id: video_id.to_owned(), choice });
                 ui.close();
             }
+        }
+        ui.separator();
+        if ui.button("Look again").on_hover_text("Ask every source for this song's lyrics again").clicked() {
+            app.actions.push(Action::RetryLyrics);
+            ui.close();
         }
     });
 }
