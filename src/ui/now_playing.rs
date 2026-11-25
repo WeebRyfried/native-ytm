@@ -18,7 +18,7 @@ pub fn show(app: &mut App, ui: &mut Ui, rect: Rect, rise: f32, foot: f32, chrome
     let track = app.current().cloned();
     let deck = track.as_ref().map(|t| deal(app, ui, t.thumbnail.clone()));
     let turning = deck.as_ref().and_then(|d| d.swap.as_ref()).map(|s| smooth(s.t));
-    backdrop(app, ui, rect, track.as_ref().and_then(|t| t.thumbnail.as_deref()), turning);
+    backdrop(app, ui, rect, rect, track.as_ref().and_then(|t| t.thumbnail.as_deref()), turning, FULL_VIEW_LEVELS);
 
     if chrome > 0.0 {
         let close = Rect::from_min_size(rect.min + vec2(20.0, 16.0 + rise), vec2(40.0, 40.0));
@@ -541,14 +541,20 @@ fn ease_out_back(t: f32) -> f32 {
     1.0 + c3 * (t - 1.0).powi(3) + c1 * (t - 1.0).powi(2)
 }
 
+/// How much of the artwork's brightness the full view's backdrop shows, at
+/// the top and the bottom.
+pub(super) const FULL_VIEW_LEVELS: [f32; 2] = [0.51, 0.22];
+
 /// The artwork's colours, blurred across the window and darkened so text
 /// reads on them, fading from the last song's when the song changes (as
 /// far as `turning` when the deck is turning to it, in time with the
 /// crossfade). One textured pass per image: the darkening, and the
 /// deepening toward the player bar, are the mesh's vertex colours rather
 /// than layers on top.
-fn backdrop(app: &mut App, ui: &Ui, rect: Rect, url: Option<&str>, turning: Option<f32>) {
-    let painter = ui.painter_at(rect);
+/// Drawn within `clip`. `levels`: how much of the image's brightness shows at the top and the
+/// bottom. (The Artwork theme draws it behind the whole window too.)
+pub(super) fn backdrop(app: &mut App, ui: &Ui, rect: Rect, clip: Rect, url: Option<&str>, turning: Option<f32>, levels: [f32; 2]) {
+    let painter = ui.painter_at(clip.intersect(rect));
     let id = ui.id().with("np-backdrop");
     let (mut current, mut previous): (Option<String>, Option<String>) = ui.data(|d| d.get_temp(id)).unwrap_or_default();
     if current.as_deref() != url {
@@ -556,9 +562,7 @@ fn backdrop(app: &mut App, ui: &Ui, rect: Rect, url: Option<&str>, turning: Opti
         current = url.map(str::to_owned);
         ui.data_mut(|d| d.insert_temp(id, (current.clone(), previous.clone())));
     }
-    // How much of the image's brightness shows, at the top and the bottom.
-    const TOP: f32 = 0.51;
-    const BOTTOM: f32 = 0.22;
+    let [top, bottom] = levels;
     let paint = |texture: &egui::TextureHandle, alpha: f32| {
         // Cover the window, keeping the square's proportions.
         let aspect = rect.width() / rect.height().max(1.0);
@@ -575,10 +579,10 @@ fn backdrop(app: &mut App, ui: &Ui, rect: Rect, url: Option<&str>, turning: Opti
         };
         let mut mesh = Mesh::with_texture(texture.id());
         mesh.vertices.extend([
-            egui::epaint::Vertex { pos: rect.left_top(), uv: uv.left_top(), color: shade(TOP) },
-            egui::epaint::Vertex { pos: rect.right_top(), uv: uv.right_top(), color: shade(TOP) },
-            egui::epaint::Vertex { pos: rect.right_bottom(), uv: uv.right_bottom(), color: shade(BOTTOM) },
-            egui::epaint::Vertex { pos: rect.left_bottom(), uv: uv.left_bottom(), color: shade(BOTTOM) },
+            egui::epaint::Vertex { pos: rect.left_top(), uv: uv.left_top(), color: shade(top) },
+            egui::epaint::Vertex { pos: rect.right_top(), uv: uv.right_top(), color: shade(top) },
+            egui::epaint::Vertex { pos: rect.right_bottom(), uv: uv.right_bottom(), color: shade(bottom) },
+            egui::epaint::Vertex { pos: rect.left_bottom(), uv: uv.left_bottom(), color: shade(bottom) },
         ]);
         mesh.add_triangle(0, 1, 2);
         mesh.add_triangle(0, 2, 3);

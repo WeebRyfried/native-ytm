@@ -54,6 +54,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     keys::handle(app, &ctx);
     let fullscreen = app.fullscreen;
+    let open = ctx.animate_bool_with_time(egui::Id::new("full-view-open"), app.full_view, 0.22);
+    if theme::washed() && !fullscreen {
+        wash(app, ui, open);
+    }
     if !fullscreen {
         egui::Panel::top("titlebar")
             .exact_size(titlebar::HEIGHT)
@@ -65,13 +69,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             .exact_size(theme::PLAYER_HEIGHT)
             .resizable(false)
             .show_separator_line(false)
-            .frame(Frame::new().fill(theme::player()))
+            .frame(Frame::new().fill(if theme::washed() { theme::player().gamma_multiply(0.55) } else { theme::player() }))
             .show(ui, |ui| player_bar::show(app, ui));
     }
     // The full view fades in over the window and rises into place, and
     // fades out the same way. Fully open, the window beneath is not drawn.
     let rest = ui.available_rect_before_wrap();
-    let open = ctx.animate_bool_with_time(egui::Id::new("full-view-open"), app.full_view, 0.22);
     let bar = if fullscreen { floating_presence(app, &ctx, rest) } else { 1.0 };
     if open < 1.0 {
         windowed(app, ui);
@@ -107,6 +110,28 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     if fullscreen && bar == 0.0 {
         // The mouse rests: the pointer goes with the bar.
         ctx.set_cursor_icon(CursorIcon::None);
+    }
+}
+
+/// The Artwork look: the artwork playing, blurred and darkened behind the
+/// whole window, as the full-window player has it. One textured quad of a
+/// 32 px image; with the full view open over the middle, only the strips
+/// it leaves (the title bar and the player bar) are drawn.
+fn wash(app: &mut App, ui: &mut egui::Ui, open: f32) {
+    // egui fades a list's edges into the panel colour, which is not what
+    // shows here.
+    ui.spacing_mut().scroll.fade.strength = 0.0;
+    let screen = ui.max_rect();
+    let url = app.current().and_then(|t| t.thumbnail.clone());
+    let levels = now_playing::FULL_VIEW_LEVELS;
+    if open < 1.0 {
+        now_playing::backdrop(app, ui, screen, screen, url.as_deref(), None, levels);
+    } else {
+        let top = Rect::from_min_max(screen.min, pos2(screen.right(), screen.top() + titlebar::HEIGHT));
+        let bottom = Rect::from_min_max(pos2(screen.left(), screen.bottom() - theme::PLAYER_HEIGHT), screen.max);
+        for strip in [top, bottom] {
+            now_playing::backdrop(app, ui, screen, strip, url.as_deref(), None, levels);
+        }
     }
 }
 
@@ -173,7 +198,7 @@ fn windowed(app: &mut App, ui: &mut egui::Ui) {
             .exact_size(theme::SIDEBAR_WIDTH)
             .resizable(false)
             .show_separator_line(false)
-            .frame(Frame::new().fill(theme::sidebar()).inner_margin(Margin::symmetric(12, 0)))
+            .frame(Frame::new().fill(theme::panel(theme::sidebar())).inner_margin(Margin::symmetric(12, 0)))
             .show(ui, |ui| sidebar::show(app, ui));
     }
     if app.settings.side_panel {
@@ -184,7 +209,7 @@ fn windowed(app: &mut App, ui: &mut egui::Ui) {
             .show_separator_line(false)
             .frame(
                 Frame::new()
-                    .fill(theme::sidebar())
+                    .fill(theme::panel(theme::sidebar()))
                     .inner_margin(Margin::symmetric(12, 12)),
             )
             .show(ui, |ui| side_panel::show(app, ui));

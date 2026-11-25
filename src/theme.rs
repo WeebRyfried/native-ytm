@@ -255,6 +255,17 @@ pub fn current() -> Theme {
     Theme::ALL[usize::from(CURRENT.load(Ordering::Relaxed)).min(Theme::ALL.len() - 1)]
 }
 
+/// Whether the window shows the artwork playing blurred behind it all, as
+/// the full-window player does: the Artwork look. Panels are then clear.
+pub fn washed() -> bool {
+    current() == Theme::Artwork
+}
+
+/// A panel's fill: `fill`, or nothing over the artwork's wash.
+pub fn panel(fill: Color32) -> Color32 {
+    if washed() { Color32::TRANSPARENT } else { fill }
+}
+
 fn palette() -> Palette {
     current().palette()
 }

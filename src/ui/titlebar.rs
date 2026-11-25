@@ -15,7 +15,7 @@ const BUTTON_W: f32 = 46.0;
 
 /// The bar's colour: the sidebar's, so the two read as one.
 pub fn fill() -> Color32 {
-    theme::sidebar()
+    theme::panel(theme::sidebar())
 }
 
 pub fn show(_app: &mut App, ui: &mut Ui) {
