@@ -1,7 +1,8 @@
 //! Synced lyrics from LRCLIB (lrclib.net), an open lyrics database with a
 //! free API. YouTube Music keeps its own line timings to its mobile apps, so
-//! this is where timed lines come from; YouTube's plain lyrics remain the
-//! fallback.
+//! this is where timed lines come from (and, for songs LRCLIB has timed by
+//! the word, each word's time: its Lyricsfile, `lyricsfile.rs`); YouTube's
+//! plain lyrics remain the fallback.
 
 use std::time::Duration;
 
@@ -45,6 +46,12 @@ struct Record {
     plain_lyrics: Option<String>,
     #[serde(default)]
     synced_lyrics: Option<String>,
+    /// Lines with their words timed, for songs timed word by word (see
+    /// `lyricsfile`).
+    #[serde(default)]
+    lyricsfile: Option<String>,
+    #[serde(default)]
+    has_word_sync: bool,
 }
 
 /// The song's lyrics, synced if LRCLIB has them so (`None` when it has none
@@ -69,10 +76,24 @@ pub async fn find(http: &reqwest::Client, query: &Query) -> (Option<Lyrics>, Opt
     if let Some(duration) = query.duration {
         params.push(("duration", duration.to_string()));
     }
+    let fits = |r: &Record| match (query.duration, r.duration) {
+        (Some(want), Some(have)) => (f64::from(want) - have).abs() <= 3.0,
+        _ => true,
+    };
     let mut best: Option<Record> = None;
     match get(http, &format!("{API}/get"), &params).await {
         Ok(found) => {
             if let Some(record) = found.and_then(|v| serde_json::from_value::<Record>(v).ok()) {
+                if record.synced_lyrics.is_some() && !record.by_word() {
+                    // Timed by the line: LRCLIB often has a song twice, and
+                    // the other may be timed by the word.
+                    let params = [("track_name", query.title.clone()), ("artist_name", query.artist.clone())];
+                    if let Ok(Some(found)) = get(http, &format!("{API}/search"), &params).await
+                        && let Some(twin) = serde_json::from_value::<Vec<Record>>(found).unwrap_or_default().into_iter().find(|r| r.by_word() && fits(r))
+                    {
+                        return (to_lyrics(twin), None);
+                    }
+                }
                 if record.synced_lyrics.is_some() {
                     return (to_lyrics(record), None);
                 }
@@ -84,10 +105,6 @@ pub async fn find(http: &reqwest::Client, query: &Query) -> (Option<Lyrics>, Opt
     // Then a search, under each form of the title, for the closest length;
     // and last the whole of it as one search, which LRCLIB answers when the
     // named fields find nothing (by the same artist, then).
-    let fits = |r: &Record| match (query.duration, r.duration) {
-        (Some(want), Some(have)) => (f64::from(want) - have).abs() <= 3.0,
-        _ => true,
-    };
     let artist = crate::local::loose(&query.artist);
     let mut searches: Vec<Vec<(&str, String)>> =
         title_forms(&query.title).into_iter().map(|title| vec![("track_name", title), ("artist_name", query.artist.clone())]).collect();
@@ -103,7 +120,7 @@ pub async fn find(http: &reqwest::Client, query: &Query) -> (Option<Lyrics>, Opt
             }
         };
         let theirs = |r: &Record| !anywhere || r.artist_name.as_deref().is_some_and(|a| !artist.is_empty() && crate::local::loose(a).contains(&artist));
-        if let Some(record) = records.into_iter().filter(fits).filter(theirs).max_by_key(|r| (r.synced_lyrics.is_some(), r.plain_lyrics.is_some())) {
+        if let Some(record) = records.into_iter().filter(fits).filter(theirs).max_by_key(|r| (r.by_word(), r.synced_lyrics.is_some(), r.plain_lyrics.is_some())) {
             if record.synced_lyrics.is_some() {
                 return (to_lyrics(record), None);
             }
@@ -167,11 +184,22 @@ async fn get_now(http: &reqwest::Client, url: &str, params: &[(&str, String)]) -
     Ok(Some(response.json().await?))
 }
 
+impl Record {
+    fn by_word(&self) -> bool {
+        self.has_word_sync && self.lyricsfile.is_some()
+    }
+}
+
 fn to_lyrics(record: Record) -> Option<Lyrics> {
     if record.instrumental {
         return None;
     }
-    let mut lines = record.synced_lyrics.as_deref().map(parse_lrc).unwrap_or_default();
+    // Timed word by word where LRCLIB has it so; otherwise its LRC, by
+    // the line.
+    let mut lines = record.lyricsfile.as_deref().map(super::lyricsfile::lines).filter(|l| l.iter().any(|l| !l.words.is_empty())).unwrap_or_default();
+    if lines.is_empty() {
+        lines = record.synced_lyrics.as_deref().map(parse_lrc).unwrap_or_default();
+    }
     // Backing vocals written into their line, under it.
     for line in &mut lines {
         super::lyric_formats::split_backing(line);

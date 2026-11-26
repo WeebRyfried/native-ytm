@@ -4,6 +4,17 @@ What changed in each version of Native YTM, newest first. After an update,
 the app shows what is new since the version it had; this file is built into
 it for that (src/changelog.rs).
 
+## 0.4.3 — 26 November 2026
+
+LRCLIB's lyrics word by word, seeking in the middle of a crossfade, and Last.fm's stats when Last.fm is down.
+
+- **LRCLIB, word by word.** LRCLIB now times some songs by the word, and the app reads that: those songs sweep word by word, as with the other sources, where before they lit a line at a time. When LRCLIB has a song twice, timed by the line and by the word, the one timed by the word is taken. Lyrics kept from before are looked for again once, so songs already played pick it up.
+- **One LRCLIB in the sources' menu.** A source with lyrics timed by the word no longer also offers the same lyrics timed only by the line, and a newer answer from a source takes the place of what it gave before.
+- **Seeking during a crossfade.** In the last seconds of a song, once the next had been lined up to fade in, a seek (or Previous, back to the start) was lost and the next song took over all the same. The song playing now goes back to where you asked, and the next waits its turn again. Changing what comes next in those seconds now changes it too, rather than the old next song coming in anyway.
+- **Song changes whenever the window isn't in front.** With Show song changes on, the island now also comes down when the window is open but behind another window or on another screen; only the window in front (the one you're using) keeps it away.
+- **Last.fm's stats when Last.fm is down.** Last.fm's servers are failing to give out listening data for every account at the moment (error 8, "Operation failed"), which left the stats page with only that error. Last.fm's stats are now kept as they last came: they show at once while the latest are asked for, and stay, said to be from then, when Last.fm can't give them, with Try again. Without any kept yet, the page says the trouble is on Last.fm's side and offers Try again or this app's own stats. Scrobbles were never lost: they still go through, and wait their turn if Last.fm turns them away.
+- The stats page no longer copies its whole list of artists, songs and albums each time it is drawn.
+
 ## 0.4.2 — 25 November 2026
 
 Syncing lyrics by listening, taken out again.

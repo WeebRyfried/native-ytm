@@ -213,9 +213,10 @@ fn lyrics(args: &[String]) -> anyhow::Result<()> {
     }
     match found {
         Some(lyrics) => {
-            println!("{:?}: {} timed lines", lyrics.source, lyrics.lines.len());
+            println!("{:?}: {} timed lines, {}", lyrics.source, lyrics.lines.len(), lyrics.timing());
             for line in lyrics.lines.iter().take(6) {
-                println!("  {:>7.2}  {}", line.time, line.text);
+                let words: Vec<String> = line.words.iter().map(|w| format!("{:.2}:{}", w.start, w.text.trim())).collect();
+                println!("  {:>7.2}  {}  [{}]", line.time, line.text, words.join(" "));
             }
         }
         None => println!("none"),

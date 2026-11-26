@@ -730,7 +730,7 @@ fn appearance(app: &mut App, ui: &mut Ui, draft: &mut Settings) {
         toggle_row(
             ui,
             "Show song changes",
-            "An island at the top of the screen when the song changes and the window is hidden.",
+            "An island at the top of the screen when the song changes, unless this window is in front.",
             &mut draft.song_note,
         );
         divider(ui);

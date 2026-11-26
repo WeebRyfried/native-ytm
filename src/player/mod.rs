@@ -246,6 +246,7 @@ impl Player {
             crossfade: Duration::ZERO,
             gap: Duration::ZERO,
             incoming: None,
+            ending: None,
         };
         std::thread::Builder::new()
             .name("player".into())
@@ -516,6 +517,11 @@ struct Engine {
     crossfade: Duration,
     gap: Duration,
     incoming: Option<Incoming>,
+    /// The song still heard while the next is already decoded after it (a
+    /// crossfade joined, or a gapless switch), and whether the next was to
+    /// fade in: kept until the next is heard, so a seek (or Previous, back
+    /// to its start) goes back to it rather than being lost to the next.
+    ending: Option<(Decoding, bool)>,
 }
 
 impl Engine {
@@ -670,6 +676,7 @@ impl Engine {
                 self.current = None;
                 self.next = None;
                 self.incoming = None;
+                self.ending = None;
                 *self.shared.blend.lock() = None;
                 self.cut();
                 self.report.drained.store(false, Ordering::SeqCst);
@@ -734,6 +741,15 @@ impl Engine {
                 self.ended_sent = false;
             }
             Command::ClearPreload => {
+                let audible = self.report.audible.load(Ordering::SeqCst);
+                if self.ending.as_ref().is_some_and(|(ending, _)| ending.token == audible) {
+                    // Joined but not heard yet: the song playing goes on
+                    // alone, decoded again from where it is heard.
+                    self.back_to_ending(false);
+                    let at = Duration::from_nanos(self.report.position_ns.load(Ordering::SeqCst));
+                    self.seek(at);
+                    return;
+                }
                 if let Some(incoming) = &self.incoming {
                     if self.report.audible.load(Ordering::SeqCst) == incoming.token {
                         // Already heard: the app has moved on to it.
@@ -777,6 +793,7 @@ impl Engine {
                 self.current = None;
                 self.next = None;
                 self.incoming = None;
+                self.ending = None;
                 *self.shared.blend.lock() = None;
                 self.cut();
                 self.report.audible.store(0, Ordering::SeqCst);
@@ -819,6 +836,11 @@ impl Engine {
                     crossfade: true,
                 });
             }
+        }
+        // Joined already, the next decoded after it, but this one still
+        // heard: back to it.
+        if self.ending.as_ref().is_some_and(|(ending, _)| ending.token == audible) {
+            self.back_to_ending(true);
         }
         let (fade_out, fade_in, channels) = self.cut_params();
         let Some(decoding) = &mut self.current else {
@@ -879,6 +901,30 @@ impl Engine {
             }
         }
         *self.shared.seek_to.lock() = None;
+    }
+
+    /// The song still heard made the one decoded again, the next given up
+    /// (or, with `keep_next`, waiting its turn again, opened afresh).
+    fn back_to_ending(&mut self, keep_next: bool) {
+        let Some((ending, crossfade)) = self.ending.take() else {
+            return;
+        };
+        if let Some(next) = self.current.take()
+            && keep_next
+            && self.next.is_none()
+        {
+            self.next = Some(Next {
+                token: next.token,
+                stream: next.stream,
+                opened: None,
+                crossfade,
+            });
+        } else if !keep_next {
+            self.next = None;
+        }
+        *self.shared.source.lock() = Some(ending.source.clone());
+        *self.shared.blend.lock() = None;
+        self.current = Some(ending);
     }
 
     /// The bytes of a stream: read from a file on disk (the cache's, or
@@ -1327,7 +1373,7 @@ impl Engine {
         }
         *self.shared.source.lock() = Some(decoding.source.clone());
         let finished = decoding.finished;
-        self.current = Some(decoding);
+        self.ending = self.current.replace(decoding).map(|ending| (ending, true));
         if finished && self.next.is_none() {
             self.queue.lock().end_of_stream = true;
         }
@@ -1348,7 +1394,7 @@ impl Engine {
                     let frames = duration_to_frames(self.gap, rate) as usize;
                     self.queue.lock().push(0, Duration::ZERO, &vec![0.0; frames * channels], channels, rate);
                 }
-                self.current = Some(decoding);
+                self.ending = self.current.replace(decoding).map(|ending| (ending, next.crossfade));
                 true
             }
             Err(OpenError::Interrupted) => {
@@ -1373,6 +1419,10 @@ impl Engine {
         let audible = self.report.audible.load(Ordering::SeqCst);
         if audible != 0 && audible != self.last_audible {
             self.last_audible = audible;
+            if self.ending.as_ref().is_some_and(|(ending, _)| ending.token != audible) {
+                // The next is heard: there is no going back to the last.
+                self.ending = None;
+            }
             let duration = [self.current.as_ref(), self.incoming.as_ref().map(|i| &i.decoding)]
                 .into_iter()
                 .flatten()
@@ -1446,7 +1496,7 @@ impl Engine {
             // Another rate or channel count: what is queued was made for the
             // old one. Decode again from where the device is.
             let audible = self.report.audible.load(Ordering::SeqCst);
-            if self.current.as_ref().is_some_and(|d| d.token == audible) {
+            if self.current.as_ref().is_some_and(|d| d.token == audible) || self.ending.as_ref().is_some_and(|(d, _)| d.token == audible) {
                 let at = Duration::from_nanos(self.report.position_ns.load(Ordering::SeqCst));
                 self.seek(at);
             }

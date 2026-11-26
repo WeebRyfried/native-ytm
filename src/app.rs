@@ -171,7 +171,16 @@ pub struct StatsView {
     pub period: crate::stats::Period,
     /// The source has been chosen (Last.fm, when connected, the first time).
     chosen: bool,
-    pub summaries: HashMap<(crate::stats::Source, crate::stats::Period), (Loadable<crate::stats::Summary>, Instant, u64)>,
+    pub summaries: HashMap<(crate::stats::Source, crate::stats::Period), (Loadable<Arc<crate::stats::Summary>>, Instant, u64)>,
+    /// Last.fm's stats as they last came, kept on disk.
+    pub kept: crate::stats::Kept,
+    kept_path: std::path::PathBuf,
+    /// Last.fm's stats being asked for.
+    asking: std::collections::HashSet<crate::stats::Period>,
+    /// Last.fm's stats shown as they were kept, not as they are now: when
+    /// they came, and why Last.fm could not give them now (none while it
+    /// is still being asked).
+    pub stale: HashMap<crate::stats::Period, (i64, Option<String>)>,
 }
 
 pub struct SignInDialog {
@@ -359,6 +368,9 @@ pub struct App {
     note_art: Option<(u64, String, Instant)>,
     /// The window is minimised, or there is none (closed to the tray).
     pub out_of_sight: bool,
+    /// The window is in front, taking the keyboard: song changes are seen
+    /// there, so the island stays away.
+    pub window_focused: bool,
     waker: fastframe_shell::Waker,
     pub quit: bool,
     pub hide: bool,
@@ -578,6 +590,7 @@ impl App {
             note_last: None,
             note_art: None,
             out_of_sight: false,
+            window_focused: false,
             waker,
             quit: false,
             hide: false,
@@ -592,6 +605,10 @@ impl App {
                 period: crate::stats::Period::Month,
                 chosen: false,
                 summaries: HashMap::new(),
+                kept: crate::stats::load_kept(&paths.lastfm_stats()),
+                kept_path: paths.lastfm_stats(),
+                asking: Default::default(),
+                stale: HashMap::new(),
             },
             stats_done: std::sync::mpsc::channel(),
             folders_changed: Arc::new(AtomicBool::new(false)),
@@ -739,7 +756,7 @@ impl App {
         self.images.poll();
         while let Ok((period, summary)) = self.stats_done.1.try_recv() {
             let written = self.play_log.written;
-            self.stats.summaries.insert((crate::stats::Source::App, period), (Loadable::Ready(summary), Instant::now(), written));
+            self.stats.summaries.insert((crate::stats::Source::App, period), (Loadable::Ready(Arc::new(summary)), Instant::now(), written));
         }
         if self.folders_changed.swap(false, std::sync::atomic::Ordering::SeqCst) {
             log::info!("the folders of music changed: looking through them again");
@@ -832,10 +849,12 @@ impl App {
     fn load_stats(&mut self, force: bool) {
         use crate::stats::Source;
         let (source, period) = (self.stats.source, self.stats.period);
-        let fresh = self.stats.summaries.get(&(source, period)).is_some_and(|(loaded, at, written)| match (source, loaded) {
+        let troubled = self.stats.stale.get(&period).is_some_and(|(_, trouble)| trouble.is_some());
+        let fresh =self.stats.summaries.get(&(source, period)).is_some_and(|(loaded, at, written)| match (source, loaded) {
             (_, Loadable::Loading) => true,
             (Source::App, Loadable::Ready(_)) => *written == self.play_log.written && at.elapsed() < Duration::from_secs(600),
-            (Source::LastFm, Loadable::Ready(_)) => at.elapsed() < Duration::from_secs(600),
+            // Shown as kept because Last.fm had trouble: asked again sooner.
+            (Source::LastFm, Loadable::Ready(_)) => at.elapsed() < Duration::from_secs(if troubled { 60 } else { 600 }),
             (_, Loadable::Failed(_)) => at.elapsed() < Duration::from_secs(15),
         });
         if fresh && !force {
@@ -856,7 +875,27 @@ impl App {
             }
             Source::LastFm => match self.lastfm.reader().filter(|r| r.user().is_some()) {
                 Some(reader) => {
-                    self.stats.summaries.insert((source, period), (Loadable::Loading, Instant::now(), 0));
+                    if !self.stats.asking.insert(period) {
+                        return;
+                    }
+                    // What is showing stays while Last.fm is asked again;
+                    // otherwise what it gave last time shows at once.
+                    let showing = match self.stats.summaries.get(&(source, period)) {
+                        Some((Loadable::Ready(summary), ..)) => Some(summary.clone()),
+                        _ => None,
+                    };
+                    let shown = match (showing, self.stats.kept.get(&period)) {
+                        (Some(summary), _) => Loadable::Ready(summary),
+                        (None, Some((summary, at))) => {
+                            self.stats.stale.insert(period, (*at, None));
+                            Loadable::Ready(Arc::new(summary.clone()))
+                        }
+                        (None, None) => Loadable::Loading,
+                    };
+                    if let Some((_, trouble)) = self.stats.stale.get_mut(&period) {
+                        *trouble = None;
+                    }
+                    self.stats.summaries.insert((source, period), (shown, Instant::now(), 0));
                     self.backend.send(Request::LastFmStats { period, reader });
                 }
                 None => {
@@ -1254,9 +1293,23 @@ impl App {
                 }
             }
             Response::LastFmStats { period, result } => {
+                self.stats.asking.remove(&period);
                 let loaded = match result {
-                    Ok(summary) => Loadable::Ready(summary),
-                    Err(error) => Loadable::Failed(error),
+                    Ok(summary) => {
+                        self.stats.stale.remove(&period);
+                        self.stats.kept.insert(period, (summary.clone(), crate::stats::unix_now()));
+                        crate::stats::save_kept(&self.stats.kept_path, &self.stats.kept);
+                        Loadable::Ready(Arc::new(summary))
+                    }
+                    // Last.fm cannot give them now: what it gave last time
+                    // stays, said to be from then.
+                    Err(error) => match self.stats.kept.get(&period) {
+                        Some((summary, at)) => {
+                            self.stats.stale.insert(period, (*at, Some(error)));
+                            Loadable::Ready(Arc::new(summary.clone()))
+                        }
+                        None => Loadable::Failed(error),
+                    },
                 };
                 self.stats.summaries.insert((crate::stats::Source::LastFm, period), (loaded, Instant::now(), 0));
             }
@@ -3740,6 +3793,11 @@ impl App {
             }
             Action::LastFmDisconnect => {
                 self.lastfm.disconnect();
+                // Their stats go with the account.
+                self.stats.kept.clear();
+                self.stats.stale.clear();
+                self.stats.summaries.retain(|(source, _), _| *source != crate::stats::Source::LastFm);
+                crate::stats::save_kept(&self.stats.kept_path, &self.stats.kept);
                 self.toast("Disconnected from Last.fm", ToastKind::Info);
             }
             Action::ToggleSidePanel => {
@@ -3754,6 +3812,7 @@ impl App {
                 self.stats.period = period;
                 self.load_stats(false);
             }
+            Action::RefreshStats => self.load_stats(true),
             Action::SetAutostart(on) => {
                 if settings::profile().is_some() {
                     self.toast("A test profile does not start with Windows", ToastKind::Info);
@@ -4324,8 +4383,9 @@ impl App {
         }
     }
 
-    /// One song giving way to another with the window out of sight: the
-    /// island at the top of the screen, when chosen (Settings, Window).
+    /// One song giving way to another while the window is not in front
+    /// (minimised, in the tray, or behind another): the island at the top
+    /// of the screen, when chosen (Settings, Window).
     fn note_tick(&mut self) {
         // The song coming in's artwork, sent on once it is on disk (the
         // media overlay fetches it as the song starts), for a few seconds.
@@ -4354,7 +4414,7 @@ impl App {
         let Some(((_, mut from, from_url), (uid, mut to, to_url))) = last.zip(self.note_last.clone()) else {
             return;
         };
-        if !self.settings.song_note || !self.out_of_sight {
+        if !self.settings.song_note || self.window_focused {
             return;
         }
         // The same artwork the media overlay shows, so nothing more is
@@ -4408,6 +4468,7 @@ impl fastframe_shell::Resident for App {
 
     fn window_gone(&mut self) {
         self.out_of_sight = true;
+        self.window_focused = false;
         self.hide = false;
         self.wants_show = false;
         self.save_session();

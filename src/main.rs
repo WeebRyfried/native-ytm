@@ -404,6 +404,7 @@ impl eframe::App for Window {
 
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.app.out_of_sight = ctx.input(|i| i.viewport().minimized == Some(true));
+        self.app.window_focused = !self.app.out_of_sight && ctx.input(|i| i.viewport().focused == Some(true));
         self.app.background();
         if std::mem::take(&mut self.app.wants_show) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));

@@ -584,6 +584,12 @@ impl LastFm {
 
 fn describe(error: &ApiError) -> String {
     match error {
+        // "Operation failed", "Service offline", "Temporarily unavailable":
+        // Last.fm's own servers, for every account at once.
+        ApiError::Api(code @ (8 | 11 | 16), _) => {
+            format!("Last.fm's servers can't give this out right now; the trouble is on their side (error {code}). Try again in a while.")
+        }
+        ApiError::Api(29, _) => "Last.fm asked for fewer requests for a moment. Try again in a minute.".to_owned(),
         ApiError::Api(code, message) => format!("{message} ({code})"),
         ApiError::Network(message) => message.clone(),
     }

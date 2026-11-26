@@ -43,6 +43,31 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         Loadable::Failed(error) => Err(Some(error.clone())),
         Loadable::Loading => Err(None),
     });
+    // Last.fm's stats as they were kept: said to be from then.
+    if source == Source::LastFm
+        && let Some((at, trouble)) = app.stats.stale.get(&period).cloned()
+        && matches!(entry, Some(Ok(_)))
+    {
+        let when = crate::stats::ago(at, crate::stats::unix_now());
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+            Icon::LastFm.image(theme::text_dim(), 16.0).paint_at(ui, rect);
+            match &trouble {
+                Some(error) => {
+                    ui.label(RichText::new(format!("Last.fm can't give these out right now, so they're as they were {when}.")).color(theme::text_dim()))
+                        .on_hover_text(error);
+                    if widgets::pill(ui, None, "Try again", false).clicked() {
+                        app.actions.push(Action::RefreshStats);
+                    }
+                }
+                None => {
+                    ui.label(RichText::new(format!("As they were {when}; asking Last.fm for the latest…")).color(theme::text_dim()));
+                }
+            }
+        });
+        ui.add_space(16.0);
+    }
     match entry {
         Some(Ok(summary)) => body(app, ui, &summary, source, period),
         Some(Err(Some(error))) => {
@@ -53,18 +78,21 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 Icon::LastFm.image(theme::text_dim(), 18.0).paint_at(ui, rect);
                 ui.label(RichText::new(error).color(theme::text_dim()));
             });
-            if !connected(app) {
-                ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 10.0;
+            let connected = connected(app);
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                if !connected {
                     if widgets::pill(ui, Some(Icon::Settings), "Open Settings", false).clicked() {
                         app.actions.push(Action::Navigate(Route::Settings));
                     }
-                    if widgets::pill(ui, None, "See this app's instead", false).clicked() {
-                        app.actions.push(Action::ShowStats { source: Source::App, period });
-                    }
-                });
-            }
+                } else if widgets::pill(ui, None, "Try again", false).clicked() {
+                    app.actions.push(Action::RefreshStats);
+                }
+                if widgets::pill(ui, None, "See this app's instead", false).clicked() {
+                    app.actions.push(Action::ShowStats { source: Source::App, period });
+                }
+            });
         }
         _ => widgets::spinner(ui),
     }

@@ -74,7 +74,8 @@ sounds as good as your account allows.
   of the lyrics; it is kept for that song.
 - **Word by word**, from every source the [Better Lyrics](https://github.com/better-lyrics/better-lyrics)
   extension uses: Better Lyrics' own (Apple Music's timing), BiniLyrics,
-  Musixmatch, QQ Music, KuGou and Unison, then LRCLIB and YouTube's text.
+  Musixmatch, QQ Music, KuGou and Unison, and LRCLIB (its lyrics timed by
+  the word too, where it has them so), then YouTube's text.
   Each word lights up as it is sung, a soft edge sweeping through it;
   backing vocals sit small under their line (also when a source writes
   them into it in brackets), lit for as long as they are sung, and a
@@ -135,7 +136,8 @@ sounds as good as your account allows.
   Premium members can play.
 - **Your stats**: your top artists, songs and albums over 7 days to all
   time, the plays day by day, from Last.fm or from the app's own count
-  (which takes in the songs on this PC, and the time listened).
+  (which takes in the songs on this PC, and the time listened). Last.fm's
+  show at once as they last came, and stay while Last.fm can't give them.
 - A queue that does what you expect: play next, drag to reorder, shuffle,
   repeat, and radio that keeps going when it runs out.
 
@@ -144,7 +146,8 @@ sounds as good as your account allows.
 - Closes to the tray and keeps playing. One copy at a time. Starts with
   Windows if you like, straight to the tray.
 - **Song changes in an island at the top of the screen**, if you like: with
-  the window minimised or in the tray, a black pill comes down from above
+  the window minimised, in the tray or behind another (anything but in
+  front), a black pill comes down from above
   the screen and springs open to the song ending, its artwork beside its
   title, slides on to the next one, and a few seconds later goes back up. It
   never takes a click or the focus, stays away from games and videos in full
@@ -276,7 +279,7 @@ cargo build --release
 | App state | `src/app.rs`, `src/queue.rs` | navigation, the queue, what plays next, preloading, the switch to Premium |
 | Deck of artwork | `src/ui/now_playing.rs` | the next song's card out from behind once it is a few seconds off, and the turn timed by the song coming in: where the crossfade has it start and for how long the two overlap, which the player records as it joins them |
 | Network | `src/backend.rs` | a two-thread tokio runtime; the interface never waits on it |
-| API | `src/api/` | InnerTube (`WEB_REMIX`) requests and the parsers that turn renderers into the model; timed lyrics from Better Lyrics' sources (`betterlyrics.rs`: its server's stream of providers, and Unison) and LRCLIB, read from TTML, LRC timed by the word, and QRC (`lyric_formats.rs`); translations from Unison (`translate.rs`) |
+| API | `src/api/` | InnerTube (`WEB_REMIX`) requests and the parsers that turn renderers into the model; timed lyrics from Better Lyrics' sources (`betterlyrics.rs`: its server's stream of providers, and Unison) and LRCLIB, read from TTML, LRC timed by the word, and QRC (`lyric_formats.rs`), and LRCLIB's Lyricsfile (`lyricsfile.rs`); translations from Unison (`translate.rs`) |
 | Lyrics check | `src/lyrics_check.rs` | Better Lyrics' Cloudflare check page in WebView2 (through wry, on a plain window), in a process of its own; its token traded for a key that lasts a day |
 | Streams | `src/stream.rs` | finds a stream for a song (below) |
 | Audio | `src/player/` | range downloader (or a file read as it plays), symphonia (MP4, WebM, AAC, and MP3, FLAC, Vorbis, ALAC, WAV for local files), libopus for Opus, rubato resampler, the smart crossfade (`smart.rs`: where the songs go quiet), the equaliser (`eq.rs`, in the audio callback), fastframe-audio output |

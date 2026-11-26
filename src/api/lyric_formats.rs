@@ -164,7 +164,7 @@ fn gather(node: roxmltree::Node, words: &mut Vec<Word>, backing: &mut Vec<Word>,
 
 /// A word, its spaces kept as one after it (and one before it on the word
 /// before).
-fn push_word(words: &mut Vec<Word>, start: f64, end: f64, text: &str) {
+pub(super) fn push_word(words: &mut Vec<Word>, start: f64, end: f64, text: &str) {
     if text.trim().is_empty() {
         if !text.is_empty() {
             space_after(words);
@@ -190,7 +190,7 @@ fn space_after(words: &mut [Word]) {
 }
 
 /// A line's text made from its words, and its end from its last word.
-fn finish(line: &mut LyricLine) {
+pub(super) fn finish(line: &mut LyricLine) {
     for words in [&mut line.words, &mut line.backing] {
         if let Some(last) = words.last_mut() {
             last.text.truncate(last.text.trim_end().len());

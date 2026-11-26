@@ -334,6 +334,8 @@ pub enum Action {
         source: crate::stats::Source,
         period: crate::stats::Period,
     },
+    /// Asks for the stats showing again, now.
+    RefreshStats,
     OpenSignIn,
     SignIn(String),
     /// The sign-in from a browser, through yt-dlp: the one chosen in

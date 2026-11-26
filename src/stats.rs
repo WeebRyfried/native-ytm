@@ -24,7 +24,7 @@ pub enum Source {
 }
 
 /// The stretch of time the stats cover, up to now.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Period {
     Week,
     Month,
@@ -74,7 +74,8 @@ impl Period {
 }
 
 /// One of a top list: an artist, a song or an album.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Ranked {
     pub name: String,
     /// The artist, for a song or an album.
@@ -86,7 +87,7 @@ pub struct Ranked {
 }
 
 /// How the plays fall over the stretch, oldest first.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Bins {
     #[default]
     Days,
@@ -94,7 +95,8 @@ pub enum Bins {
     Months,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Summary {
     pub plays: Option<u64>,
     /// Time listened, in seconds (the app's own plays only).
@@ -337,6 +339,41 @@ pub fn summarize(plays: &[Play], period: Period, now: i64) -> Summary {
 
 pub fn unix_now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+}
+
+/// Last.fm's stats as they last came, by stretch, with when (Unix
+/// seconds): shown at once, and while Last.fm cannot give them.
+pub type Kept = HashMap<Period, (Summary, i64)>;
+
+pub fn load_kept(path: &Path) -> Kept {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Vec<(Period, i64, Summary)>>(&bytes).ok())
+        .map(|list| list.into_iter().map(|(period, at, summary)| (period, (summary, at))).collect())
+        .unwrap_or_default()
+}
+
+pub fn save_kept(path: &Path, kept: &Kept) {
+    if kept.is_empty() {
+        let _ = std::fs::remove_file(path);
+        return;
+    }
+    let list: Vec<(&Period, &i64, &Summary)> = kept.iter().map(|(period, (summary, at))| (period, at, summary)).collect();
+    if let Ok(json) = serde_json::to_vec(&list) {
+        crate::settings::write_atomic(path, &json);
+    }
+}
+
+/// How long ago a Unix time was, in a few words: "5 minutes ago".
+pub fn ago(at: i64, now: i64) -> String {
+    let secs = (now - at).max(0);
+    let (n, unit) = match secs {
+        0..60 => return "just now".to_owned(),
+        60..3600 => (secs / 60, "minute"),
+        3600..86_400 => (secs / 3600, "hour"),
+        _ => (secs / 86_400, "day"),
+    };
+    format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
 }
 
 #[cfg(test)]

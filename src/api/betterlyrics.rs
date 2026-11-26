@@ -47,6 +47,8 @@ pub fn rank(lyrics: &Lyrics) -> u8 {
         ("Better Lyrics", true, _) => 0,
         ("Unison", true, _) => 1,
         ("BiniLyrics", true, _) => 2,
+        // LRCLIB timed by the word: its Lyricsfile, timed by hand.
+        ("LRCLIB", true, _) => 3,
         ("QQ Music", true, _) => 4,
         ("Musixmatch", true, _) => 5,
         ("Better Lyrics", false, true) => 6,
@@ -124,7 +126,10 @@ pub fn gather(found: Vec<Lyrics>) -> Option<Lyrics> {
     let mut kept: Vec<Lyrics> = Vec::new();
     for lyrics in all {
         let same = |k: &Lyrics| k.provider == lyrics.provider && k.timing() == lyrics.timing();
-        if !kept.iter().any(same) {
+        // A source's lines timed by the word say all its lines by the line
+        // do: those are not offered beside them.
+        let finer = |k: &Lyrics| k.provider == lyrics.provider && k.by_word() && !lyrics.by_word() && !lyrics.lines.is_empty();
+        if !kept.iter().any(|k| same(k) || finer(k)) {
             kept.push(lyrics);
         }
     }
@@ -140,7 +145,14 @@ pub fn gather(found: Vec<Lyrics>) -> Option<Lyrics> {
 pub fn merge(before: Option<&Lyrics>, now: Option<Lyrics>) -> Option<Lyrics> {
     let translated = before.map(|b| b.translated.clone()).unwrap_or_default();
     let mut all: Vec<Lyrics> = now.into_iter().collect();
-    all.extend(before.cloned());
+    // A source found now stands for that source: what it gave before (by
+    // the line, say, where it now has the words) is let go.
+    let found: Vec<Option<String>> = all.iter().flat_map(|l| std::iter::once(l).chain(&l.others)).map(|l| l.provider.clone()).collect();
+    if let Some(before) = before {
+        let mut before = before.clone();
+        let others = std::mem::take(&mut before.others);
+        all.extend(std::iter::once(before).chain(others).filter(|l| !found.contains(&l.provider)));
+    }
     let mut merged = gather(all)?;
     // Translations made for the lines stay with them.
     if merged.translated.is_empty() {

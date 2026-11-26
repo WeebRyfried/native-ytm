@@ -44,8 +44,8 @@ pub struct Settings {
     pub shuffle: bool,
     /// Closing the window keeps the music playing in the tray.
     pub close_to_tray: bool,
-    /// With the window out of sight, the island at the top of the screen as
-    /// one song gives way to the next.
+    /// Unless the window is in front, the island at the top of the screen
+    /// as one song gives way to the next.
     pub song_note: bool,
     /// The interface language YouTube Music answers in.
     pub language: String,
@@ -242,6 +242,11 @@ impl Paths {
 
     pub fn lyrics(&self) -> PathBuf {
         self.cache.join("lyrics")
+    }
+
+    /// Last.fm's stats as they last came, shown while it cannot give them.
+    pub fn lastfm_stats(&self) -> PathBuf {
+        self.cache.join("lastfm-stats.json")
     }
 
     /// Pages as they last loaded, shown at once on the next start.
