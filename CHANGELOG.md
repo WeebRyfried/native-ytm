@@ -4,6 +4,13 @@ What changed in each version of Native YTM, newest first. After an update,
 the app shows what is new since the version it had; this file is built into
 it for that (src/changelog.rs).
 
+## 0.4.4 — 26 November 2026
+
+Premium quality again for the songs YouTube holds back a moment.
+
+- **Premium quality that comes.** YouTube now gives some songs' streams a few seconds before they can be played, and says how long; asked for sooner, it turns them away. The app asked at once, was turned away, and said yt-dlp needed updating, so those songs stayed at the usual quality. It now waits as long as YouTube asks (a few seconds, while the song plays on as it was) and then switches.
+- **Clearer words for the switch.** While it happens, the bitrate's note says "Transitioning to Premium quality…"; once done, "Switched to Premium quality seamlessly".
+
 ## 0.4.3 — 26 November 2026
 
 LRCLIB's lyrics word by word, seeking in the middle of a crossfade, and Last.fm's stats when Last.fm is down.
