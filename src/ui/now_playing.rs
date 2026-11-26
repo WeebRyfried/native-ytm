@@ -513,7 +513,7 @@ fn quality_chip(ui: &mut Ui, quality: Option<&str>, upgrade: Option<&Upgrade>) {
     let tip = match upgrade.map(|u| u.phase) {
         Some(UpgradePhase::Finding) => "Playing at once in standard quality while Premium quality is fetched",
         Some(UpgradePhase::Switching(_)) => "Premium quality is ready and takes over in a moment, without a break",
-        Some(UpgradePhase::Done(_)) if premium => "Switched to Premium quality without a break",
+        Some(UpgradePhase::Done(_)) if premium => "Switched to Premium quality seamlessly",
         _ => "The stream playing: its codec and bitrate",
     };
     response.on_hover_cursor(CursorIcon::Default).on_hover_text(tip);
