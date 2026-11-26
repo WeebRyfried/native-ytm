@@ -333,6 +333,17 @@ async fn ytdlp(
                 .collect()
         })
         .unwrap_or_default();
+    // YouTube now gives some stream addresses a moment before they work
+    // (yt-dlp says when, as `available_at`, and waits for it itself):
+    // asked for sooner, they are refused.
+    if let Some(at) = json["available_at"].as_f64() {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
+        let wait = (at - now + 0.25).clamp(0.0, 15.0);
+        if wait > 0.0 {
+            log::info!("the stream can be had in {wait:.1} s; waiting, as YouTube asks");
+            tokio::time::sleep(Duration::from_secs_f64(wait)).await;
+        }
+    }
     let content_length = match json["filesize"].as_u64() {
         Some(len) => len,
         None => probe_length(api, &url, &headers).await?,
