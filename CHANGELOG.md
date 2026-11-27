@@ -4,6 +4,12 @@ What changed in each version of Native YTM, newest first. After an update,
 the app shows what is new since the version it had; this file is built into
 it for that (src/changelog.rs).
 
+## 0.4.5 — 27 November 2026
+
+Lyrics that sweep smoothly from word to word.
+
+- **No more snapping between words.** Lyrics timed by the word lit each word at its own pace, so the sweep changed speed all at once from one word to the next, and a quick word (or one timed as taking no time at all, as some on LRCLIB and other sources are) jumped. The sweep now speeds up and slows down over a fifth of a second instead, gliding from word to word, and still keeps to the words' times. Seeking and the lyrics' earlier and later buttons still take effect at once.
+
 ## 0.4.4 — 26 November 2026
 
 Premium quality again for the songs YouTube holds back a moment.
