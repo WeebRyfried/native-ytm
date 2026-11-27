@@ -432,6 +432,7 @@ fn spans(words: &[Word], text: &str) -> Vec<Span> {
 
 /// How far through its text the singing is at `time`: a character index,
 /// with how far through that character.
+#[cfg(test)]
 fn sung(spans: &[Span], time: f64) -> f32 {
     let mut upto = 0.0;
     for &(start, end, from, to) in spans {
@@ -446,6 +447,52 @@ fn sung(spans: &[Span], time: f64) -> f32 {
         }
     }
     upto
+}
+
+/// Half of the stretch of time the sweep is smoothed over, in seconds.
+const SMOOTH: f64 = 0.1;
+
+/// The sweep as drawn: [`sung`] averaged over the [`SMOOTH`] either side of
+/// `time`. Followed word by word as given, the edge goes at each word's own
+/// speed and changes speed all at once between words, a quick word (or one
+/// timed as taking no time at all) a jump; averaged, it speeds up and slows
+/// down over a fifth of a second instead, and where it is on average stays
+/// as timed. Worked out exactly from the words, so nothing is kept between
+/// frames: seeking and the lyrics' timing nudge are followed at once.
+fn sung_smooth(spans: &[Span], time: f64) -> f32 {
+    let Some(&(_, _, _, total)) = spans.last() else {
+        return 0.0;
+    };
+    let mean = (sung_area(spans, time + SMOOTH) - sung_area(spans, time - SMOOTH)) / (2.0 * SMOOTH);
+    (mean as f32).clamp(0.0, total as f32)
+}
+
+/// [`sung`] summed over time (character-seconds), from the first word's
+/// start up to `time`.
+fn sung_area(spans: &[Span], time: f64) -> f64 {
+    let Some(&(first, ..)) = spans.first() else {
+        return 0.0;
+    };
+    let (mut area, mut level, mut at) = (0.0, 0.0, first);
+    for &(start, end, from, to) in spans {
+        let start = start.max(at);
+        // Held where the last word ended, until this one starts.
+        if time <= start {
+            return area + level * (time - at).max(0.0);
+        }
+        area += level * (start - at);
+        let (from, to) = (from as f64, to as f64);
+        let long = (end - start).max(0.0);
+        if time < end {
+            let into = time - start;
+            let now = from + (to - from) * into / long;
+            return area + (from + now) / 2.0 * into;
+        }
+        area += (from + to) / 2.0 * long;
+        level = to;
+        at = start + long;
+    }
+    area + level * (time - at).max(0.0)
 }
 
 /// Paints `galley` at `at` dim, and bright as far as `upto` (a character
@@ -553,11 +600,14 @@ fn cut_at_edge(visuals: &mut egui::epaint::text::RowVisuals, edge: f32, dim: Col
 /// next begins; never, once all are sung.
 fn sweep_wait(spans: &[Span], time: f64, per_char: f32) -> f64 {
     for &(start, end, from, to) in spans {
+        // Smoothed, the edge moves from a little before a word to a little
+        // after it (see `sung_smooth`).
+        let speed = (to - from) as f64 / (end - start).max(0.01) * f64::from(per_char);
+        let (start, end) = (start - SMOOTH, end + SMOOTH);
         if time < start {
             return start - time;
         }
         if time < end {
-            let speed = (to - from) as f64 / (end - start).max(0.01) * f64::from(per_char);
             return (1.0 / speed.max(1.0)).min(0.25);
         }
     }
@@ -888,7 +938,7 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
                     // Being sung (or just over), timed by the word: lit as far
                     // as the singing has come, the rest a little brighter
                     // than the lines around it.
-                    let upto = sung(&laid.timed, heard);
+                    let upto = sung_smooth(&laid.timed, heard);
                     let dim = ink(tone(0.32, 0.46, lit));
                     let bright = ink(tone(0.32, 1.0, lit));
                     paint_sung(&painter, line_rect.min, &laid.main.galley, upto, dim, bright);
@@ -917,7 +967,7 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
                     let level = |full: f32| ink(tone(0.32 * 0.7, full, glow));
                     // Swept as sung only when the line is timed by the word.
                     if !timed.is_empty() && !laid.timed.is_empty() {
-                        paint_sung(&painter, at, galley, sung(timed, heard), level(0.26), level(0.78));
+                        paint_sung(&painter, at, galley, sung_smooth(timed, heard), level(0.26), level(0.78));
                         if glow > 0.0 {
                             sweep = sweep.min(sweep_wait(timed, heard, per_char(galley)));
                         }
@@ -1273,9 +1323,10 @@ mod tests {
     fn frames_only_while_the_singing_moves() {
         // "ab " sung from 1 to 2, "cd" from 3 to 5: a pause between.
         let spans = spans(&[word(1.0, 2.0, "ab "), word(3.0, 5.0, "cd")], "ab cd");
-        // Before and between words, nothing until the next begins.
-        assert_eq!(sweep_wait(&spans, 0.5, 10.0), 0.5);
-        assert!((sweep_wait(&spans, 2.4, 10.0) - 0.6).abs() < 1e-9);
+        // Before and between words, nothing until the next begins to
+        // move (smoothed, a little before it).
+        assert!((sweep_wait(&spans, 0.5, 10.0) - 0.4).abs() < 1e-9);
+        assert!((sweep_wait(&spans, 2.4, 10.0) - 0.5).abs() < 1e-9);
         // While one is sung, about a pixel's travel: 3 characters a second
         // at 10 points is 30 points a second; slower, longer.
         assert!((sweep_wait(&spans, 1.5, 10.0) - 1.0 / 30.0).abs() < 1e-9);
@@ -1295,5 +1346,28 @@ mod tests {
         assert_eq!(sung(&spans, 9.0), 5.0);
         // Words that do not make up the text are not followed.
         assert!(super::spans(&words, "something else").is_empty());
+    }
+
+    #[test]
+    fn the_sweep_changes_speed_smoothly() {
+        // A slow word, then one timed as taking no time, then a quick one.
+        let words = [word(1.0, 3.0, "ab "), word(3.0, 3.0, "c "), word(3.0, 3.1, "de")];
+        let spans = spans(&words, "ab c de");
+        // Away from the changes, where it was timed.
+        assert_eq!(sung_smooth(&spans, 0.5), 0.0);
+        assert!((sung_smooth(&spans, 2.0) - 1.5).abs() < 1e-4);
+        assert!((sung_smooth(&spans, 9.0) - 7.0).abs() < 1e-4);
+        // No jump: from one frame (a 144th of a second) to the next, under
+        // half a character, where unsmoothed the word taking no time jumps
+        // two at once.
+        let mut last = sung_smooth(&spans, 0.0);
+        for i in 1..=600 {
+            let now = sung_smooth(&spans, f64::from(i) / 144.0);
+            assert!(now >= last - 1e-5, "never back");
+            assert!(now - last < 0.6, "at {i}: {last} to {now}");
+            last = now;
+        }
+        // Words not timed: nothing.
+        assert_eq!(sung_smooth(&[], 1.0), 0.0);
     }
 }
