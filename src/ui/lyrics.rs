@@ -416,14 +416,23 @@ fn paint_line(painter: &egui::Painter, at: Pos2, line: &LaidLine, color: Color32
 }
 
 /// The words' times and the characters each covers in their text; none
-/// when they do not make up the text.
-fn spans(words: &[Word], text: &str) -> Vec<Span> {
+/// when they do not make up the text. A word timed as taking no time (some
+/// sources give only when each starts) lasts until the next starts, the
+/// last until `until`, its line's end: lit all at once, it would snap.
+fn spans(words: &[Word], text: &str, until: Option<f64>) -> Vec<Span> {
     let mut out = Vec::with_capacity(words.len());
     let mut at = 0;
     let mut joined = String::with_capacity(text.len());
-    for word in words {
+    for (i, word) in words.iter().enumerate() {
         let chars = word.text.chars().count();
-        out.push((word.start, word.end, at, at + chars));
+        let mut end = word.end;
+        if end <= word.start + 0.01 {
+            let next = words.get(i + 1).map(|n| n.start).or(until);
+            if let Some(next) = next.filter(|&n| n > word.start) {
+                end = next;
+            }
+        }
+        out.push((word.start, end, at, at + chars));
         at += chars;
         joined.push_str(&word.text);
     }
@@ -757,14 +766,14 @@ fn synced(app: &mut App, ui: &mut Ui, video_id: &str, lyrics: &Lyrics, all: &[&L
                 let voice = if apart { line.singer() } else { Voice::First };
                 let at = across(voice);
                 let main = lay_line(&painter, &line.text, &font, width, readings, at);
-                let timed = spans(&line.words, &line.text);
+                let timed = spans(&line.words, &line.text, line.end);
                 let mut height = if line.text.is_empty() { 0.0 } else { main.galley.size().y };
                 let backing = (!line.backing.is_empty()).then(|| {
                     let text: String = line.backing.iter().map(|w| w.text.as_str()).collect();
                     let galley = lay_text(&painter, &text, backing_font.clone(), width, at);
                     let y = height + if height > 0.0 { size * 0.12 } else { 0.0 };
                     height = y + galley.size().y;
-                    let timed = spans(&line.backing, &text);
+                    let timed = spans(&line.backing, &text, line.end);
                     (galley, y, timed)
                 });
                 let said = if translations { translation_of(line, &others, &machine.lines) } else { None };
@@ -1322,7 +1331,7 @@ mod tests {
     #[test]
     fn frames_only_while_the_singing_moves() {
         // "ab " sung from 1 to 2, "cd" from 3 to 5: a pause between.
-        let spans = spans(&[word(1.0, 2.0, "ab "), word(3.0, 5.0, "cd")], "ab cd");
+        let spans = spans(&[word(1.0, 2.0, "ab "), word(3.0, 5.0, "cd")], "ab cd", None);
         // Before and between words, nothing until the next begins to
         // move (smoothed, a little before it).
         assert!((sweep_wait(&spans, 0.5, 10.0) - 0.4).abs() < 1e-9);
@@ -1338,21 +1347,30 @@ mod tests {
     #[test]
     fn singing_moves_through_the_words() {
         let words = [word(1.0, 2.0, "ab "), word(2.0, 4.0, "cd")];
-        let spans = spans(&words, "ab cd");
+        let spans = spans(&words, "ab cd", None);
         assert_eq!(spans, [(1.0, 2.0, 0, 3), (2.0, 4.0, 3, 5)]);
         assert_eq!(sung(&spans, 0.5), 0.0);
         assert!((sung(&spans, 1.5) - 1.5).abs() < 1e-5);
         assert!((sung(&spans, 3.0) - 4.0).abs() < 1e-5);
         assert_eq!(sung(&spans, 9.0), 5.0);
         // Words that do not make up the text are not followed.
-        assert!(super::spans(&words, "something else").is_empty());
+        assert!(super::spans(&words, "something else", None).is_empty());
+    }
+
+    #[test]
+    fn words_given_only_their_starts_last_until_the_next() {
+        let words = [word(1.0, 1.0, "my "), word(1.5, 1.5, "brain "), word(2.25, 2.25, "is")];
+        let spans = spans(&words, "my brain is", Some(3.0));
+        assert_eq!(spans, [(1.0, 1.5, 0, 3), (1.5, 2.25, 3, 9), (2.25, 3.0, 9, 11)]);
+        // Halfway through "brain", halfway through its letters.
+        assert!((sung(&spans, 1.875) - 6.0).abs() < 1e-5);
     }
 
     #[test]
     fn the_sweep_changes_speed_smoothly() {
         // A slow word, then one timed as taking no time, then a quick one.
         let words = [word(1.0, 3.0, "ab "), word(3.0, 3.0, "c "), word(3.0, 3.1, "de")];
-        let spans = spans(&words, "ab c de");
+        let spans = spans(&words, "ab c de", None);
         // Away from the changes, where it was timed.
         assert_eq!(sung_smooth(&spans, 0.5), 0.0);
         assert!((sung_smooth(&spans, 2.0) - 1.5).abs() < 1e-4);

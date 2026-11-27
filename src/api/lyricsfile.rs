@@ -37,10 +37,22 @@ pub fn lines(source: &str) -> Vec<LyricLine> {
     for item in doc.get("lines").map(Yaml::items).unwrap_or_default() {
         let text = item.get("text").and_then(Yaml::text).unwrap_or_default();
         let mut line = LyricLine { end: ms(item.get("end_ms")).map(|e| (e - offset).max(0.0)), ..LyricLine::default() };
-        for word in item.get("words").map(Yaml::items).unwrap_or_default() {
-            let Some(start) = ms(word.get("start_ms")) else { continue };
-            let end = ms(word.get("end_ms")).unwrap_or(start);
-            push_word(&mut line.words, (start - offset).max(0.0), (end - offset).max(0.0), word.get("text").and_then(Yaml::text).unwrap_or_default());
+        let words: Vec<(f64, Option<f64>, &str)> = item
+            .get("words")
+            .map(Yaml::items)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|word| Some((ms(word.get("start_ms"))?, ms(word.get("end_ms")), word.get("text").and_then(Yaml::text).unwrap_or_default())))
+            .collect();
+        for (i, &(start, end, text)) in words.iter().enumerate() {
+            // Some give each word only its start: it lasts until the next
+            // begins, the last until its line ends.
+            let end = end
+                .filter(|&end| end > start)
+                .or_else(|| words.get(i + 1).map(|next| next.0).filter(|&next| next > start))
+                .or_else(|| ms(item.get("end_ms")).filter(|&end| end > start))
+                .unwrap_or(start + 0.5);
+            push_word(&mut line.words, (start - offset).max(0.0), (end - offset).max(0.0), text);
         }
         let Some(start) = ms(item.get("start_ms")).map(|s| (s - offset).max(0.0)).or_else(|| line.words.first().map(|w| w.start)) else {
             continue;
@@ -441,6 +453,13 @@ plain: |
         assert!(lines[3].words.is_empty());
         assert_eq!(lines[3].text, "A line timed only as a whole");
         assert_eq!(lines[3].end, Some(43.0));
+    }
+
+    #[test]
+    fn words_given_only_their_starts() {
+        let lines = lines("lines:\n- text: My brain is\n  start_ms: 9640\n  end_ms: 11000\n  words:\n  - text: 'My '\n    start_ms: 9640\n  - text: 'brain '\n    start_ms: 9800\n  - text: is\n    start_ms: 10250\n");
+        let ends: Vec<f64> = lines[0].words.iter().map(|w| w.end).collect();
+        assert_eq!(ends, [9.8, 10.25, 11.0]);
     }
 
     #[test]
