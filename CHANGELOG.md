@@ -4,6 +4,12 @@ What changed in each version of Native YTM, newest first. After an update,
 the app shows what is new since the version it had; this file is built into
 it for that (src/changelog.rs).
 
+## 0.4.6 — 27 November 2026
+
+Words that light as they're sung, when the lyrics say only when each starts.
+
+- **No more words lit whole at once.** Some of LRCLIB's lyrics timed by the word give each word only the moment it starts, not when it ends. Those were read as words taking no time at all, so each lit up in full the moment it began and the sweep snapped from word to word while the singer was still on it. Such a word now lasts until the next begins (the last, until its line ends), so the sweep moves through it as it's sung. This holds for any source timed that way, and for lyrics already kept on this PC, without looking them up again.
+
 ## 0.4.5 — 27 November 2026
 
 Lyrics that sweep smoothly from word to word.
