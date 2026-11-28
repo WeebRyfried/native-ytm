@@ -4,6 +4,14 @@ What changed in each version of Native YTM, newest first. After an update,
 the app shows what is new since the version it had; this file is built into
 it for that (src/changelog.rs).
 
+## 0.4.9 — 28 November 2026
+
+Less work while hidden behind another window, and full screen that fills the screen.
+
+- **Nothing drawn behind the window you're using.** With the window you're using wholly over the player (a maximised browser, say), or with the player on another virtual desktop, it stops drawing, as it does when minimised, and starts again within a quarter of a second once it shows. The music and everything else carry on. Only the window in front is looked at, not every window in between, so this is a simpler check than 0.4.7's, with nothing else of 0.4.7 coming back.
+- **Full screen from a maximised window.** Pressing full screen while the window was maximised hid the title bar but left the window its maximised size. It now fills the screen, and goes back to maximised when you leave.
+- **No light corners in full screen.** The window's rounded corners stayed rounded in full screen, and what was behind showed through at the corners. They are square there now.
+
 ## 0.4.8 — 28 November 2026
 
 Back to how 0.4.6 drew the window.
