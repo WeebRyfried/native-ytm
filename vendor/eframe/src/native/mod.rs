@@ -12,6 +12,10 @@ pub mod file_storage;
 
 pub(crate) mod winit_integration;
 
+/// Whether the window is wholly covered (native-ytm patch).
+#[cfg(all(feature = "glow", target_os = "windows"))]
+mod covered;
+
 #[cfg(feature = "glow")]
 mod glow_integration;
 

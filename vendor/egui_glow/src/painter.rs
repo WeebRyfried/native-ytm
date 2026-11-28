@@ -99,6 +99,11 @@ pub struct Painter {
     batch_vertices: Vec<Vertex>,
     batch_indices: Vec<u32>,
 
+    /// The frame as last painted, kept in a texture of its own, and whether
+    /// the driver can have one (native-ytm patch; see `paint_frame`).
+    canvas: Option<Canvas>,
+    canvas_possible: bool,
+
     textures: HashMap<egui::TextureId, glow::Texture>,
 
     next_native_tex_id: u64,
@@ -256,6 +261,11 @@ impl Painter {
             let element_array_buffer = gl.create_buffer()?;
 
             crate::check_for_gl_error_even_in_release!(&gl, "after Painter::new");
+            // native-ytm patch: copying the canvas to the window takes a
+            // framebuffer blit, OpenGL 3.0 or OpenGL ES 3.0.
+            // A window drawn with multisampling cannot take a blit from a
+            // texture that is not.
+            let canvas_possible = !is_webgl_1 && gl.version().major >= 3 && gl.get_parameter_i32(glow::SAMPLES) == 0;
 
             Ok(Self {
                 gl,
@@ -271,6 +281,10 @@ impl Painter {
                 element_array_buffer,
                 batch_vertices: Vec::new(),
                 batch_indices: Vec::new(),
+                canvas: None,
+                // Copying it to the window takes a framebuffer blit: OpenGL
+                // 3.0 or OpenGL ES 3.0.
+                canvas_possible,
                 textures: Default::default(),
                 next_native_tex_id: 1 << 32,
                 textures_to_destroy: Vec::new(),
@@ -515,6 +529,250 @@ impl Painter {
         }
     }
 
+    /// Paints a frame (native-ytm patch): into the painter's own canvas, a
+    /// texture the window's size, and from there copied to the window's
+    /// framebuffer. With `damage` (rectangles in pixels from the top left
+    /// corner), only those parts of the canvas are cleared and painted
+    /// again: the rest is the frame before, which nothing changed there.
+    /// Without a canvas (no framebuffer blits, or one could not be made),
+    /// the whole frame is painted to the window, as eframe would.
+    ///
+    /// The window's own back buffer cannot be painted in part: after a swap
+    /// its content is undefined (Intel's driver swaps two of them), so the
+    /// frame is kept here, and the copy of it is one plain pass.
+    pub fn paint_frame(
+        &mut self,
+        screen_size_px: [u32; 2],
+        pixels_per_point: f32,
+        clear_color: [f32; 4],
+        clipped_primitives: &[egui::ClippedPrimitive],
+        textures_delta: &mut egui::TexturesDelta,
+        damage: Option<&[Rect]>,
+    ) {
+        profiling::function_scope!();
+        self.assert_not_destroyed();
+
+        #[expect(clippy::iter_over_hash_type)] // Order doesn't matter here
+        for (id, image_deltas) in textures_delta.set.drain() {
+            for image_delta in image_deltas {
+                self.set_texture(id, &image_delta);
+            }
+        }
+
+        let callbacks = clipped_primitives.iter().any(|p| matches!(p.primitive, Primitive::Callback(_)));
+        let canvas = if callbacks { None } else { self.canvas_for(screen_size_px) };
+        match canvas {
+            None => {
+                clear(&self.gl, screen_size_px, clear_color);
+                self.paint_primitives(screen_size_px, pixels_per_point, clipped_primitives);
+            }
+            Some((framebuffer, fresh)) => {
+                let [width, height] = screen_size_px.map(|v| v as i32);
+                let whole = [Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width as f32, height as f32))];
+                let limits = match damage {
+                    Some(damage) if !fresh => damage,
+                    _ => &whole[..],
+                };
+                unsafe { self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer)) };
+                self.paint_within(screen_size_px, pixels_per_point, clear_color, clipped_primitives, limits);
+                unsafe {
+                    self.gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(framebuffer));
+                    self.gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
+                    self.gl.blit_framebuffer(0, 0, width, height, 0, 0, width, height, glow::COLOR_BUFFER_BIT, glow::NEAREST);
+                    self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                }
+                check_for_gl_error!(&self.gl, "paint_frame");
+            }
+        }
+
+        #[expect(clippy::iter_over_hash_type)] // Order doesn't matter here
+        for id in textures_delta.free.drain() {
+            self.free_texture(id);
+        }
+    }
+
+    /// No canvas: frames painted whole, straight to the window, as eframe
+    /// would (native-ytm dev, to compare).
+    pub fn disable_canvas(&mut self) {
+        self.canvas_possible = false;
+    }
+
+    /// Whether the canvas as painted, in part, is the frame as it would be
+    /// painted whole (native-ytm dev check): the frame painted whole into a
+    /// second texture and the two read back and compared. The pixels that
+    /// differ, where (left, top, right and bottom) and by how much at most;
+    /// none without a canvas.
+    pub fn check_canvas(
+        &mut self,
+        screen_size_px: [u32; 2],
+        pixels_per_point: f32,
+        clear_color: [f32; 4],
+        clipped_primitives: &[egui::ClippedPrimitive],
+    ) -> Option<(usize, [i32; 4], u8)> {
+        let canvas = self.canvas.as_ref()?;
+        if canvas.size != screen_size_px {
+            return None;
+        }
+        let canvas_fbo = canvas.framebuffer;
+        let [width, height] = screen_size_px.map(|v| v as i32);
+        let read = |gl: &glow::Context, fbo: glow::Framebuffer| {
+            let mut pixels = vec![0u8; (width * height * 4) as usize];
+            unsafe {
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(fbo));
+                gl.read_pixels(0, 0, width, height, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut pixels)));
+            }
+            pixels
+        };
+        unsafe {
+            let texture = self.gl.create_texture().ok()?;
+            let fbo = self.gl.create_framebuffer().ok()?;
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            self.gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, width, height, 0, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+            self.gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(texture), 0);
+            let whole = [Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width as f32, height as f32))];
+            self.paint_within(screen_size_px, pixels_per_point, clear_color, clipped_primitives, &whole);
+            let expected = read(&self.gl, fbo);
+            let actual = read(&self.gl, canvas_fbo);
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            self.gl.delete_framebuffer(fbo);
+            self.gl.delete_texture(texture);
+            let mut differ = 0;
+            let mut most = 0u8;
+            let mut bounds = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
+            for (i, (a, b)) in expected.chunks_exact(4).zip(actual.chunks_exact(4)).enumerate() {
+                if a[..3] != b[..3] {
+                    differ += 1;
+                    most = most.max((0..3).map(|c| a[c].abs_diff(b[c])).max().unwrap_or(0));
+                    let (x, y) = ((i as i32) % width, height - 1 - (i as i32) / width);
+                    bounds = [bounds[0].min(x), bounds[1].min(y), bounds[2].max(x), bounds[3].max(y)];
+                }
+            }
+            Some((differ, bounds, most))
+        }
+    }
+
+    /// The canvas for a frame of this size, made (or made again, at a new
+    /// size) when needed, and whether it is new, so holds nothing yet. None
+    /// when the driver cannot have one.
+    fn canvas_for(&mut self, [width, height]: [u32; 2]) -> Option<(glow::Framebuffer, bool)> {
+        if !self.canvas_possible || width == 0 || height == 0 {
+            return None;
+        }
+        if let Some(canvas) = &self.canvas {
+            if canvas.size == [width, height] {
+                return Some((canvas.framebuffer, false));
+            }
+        }
+        unsafe {
+            if let Some(old) = self.canvas.take() {
+                self.gl.delete_framebuffer(old.framebuffer);
+                self.gl.delete_texture(old.texture);
+            }
+            let (Ok(texture), Ok(framebuffer)) = (self.gl.create_texture(), self.gl.create_framebuffer()) else {
+                self.canvas_possible = false;
+                return None;
+            };
+            self.gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
+            self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
+            // (glTexImage2D rather than glTexStorage2D, which wants OpenGL 4.2.)
+            self.gl.tex_image_2d(glow::TEXTURE_2D, 0, glow::RGBA8 as i32, width as i32, height as i32, 0, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None));
+            self.gl.bind_texture(glow::TEXTURE_2D, None);
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, Some(framebuffer));
+            self.gl.framebuffer_texture_2d(glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(texture), 0);
+            let complete = self.gl.check_framebuffer_status(glow::FRAMEBUFFER) == glow::FRAMEBUFFER_COMPLETE;
+            self.gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            if !complete {
+                log::warn!("no canvas for frames: the framebuffer is not complete; painting to the window");
+                self.gl.delete_framebuffer(framebuffer);
+                self.gl.delete_texture(texture);
+                self.canvas_possible = false;
+                return None;
+            }
+            self.canvas = Some(Canvas { framebuffer, texture, size: [width, height] });
+            Some((framebuffer, true))
+        }
+    }
+
+    /// The frame painted within `limits` (rectangles in pixels from the top
+    /// left corner) of the framebuffer bound: each cleared, then every mesh
+    /// that reaches into it drawn there, in order.
+    fn paint_within(
+        &mut self,
+        screen_size_px: [u32; 2],
+        pixels_per_point: f32,
+        clear_color: [f32; 4],
+        clipped_primitives: &[egui::ClippedPrimitive],
+        limits: &[Rect],
+    ) {
+        unsafe { self.prepare_painting(screen_size_px, pixels_per_point) };
+        self.batch_vertices.clear();
+        self.batch_indices.clear();
+        for primitive in clipped_primitives {
+            if let Primitive::Mesh(mesh) = &primitive.primitive {
+                let base = self.batch_vertices.len() as u32;
+                self.batch_vertices.extend_from_slice(&mesh.vertices);
+                self.batch_indices.extend(mesh.indices.iter().map(|index| index + base));
+            }
+        }
+        if !self.batch_indices.is_empty() {
+            unsafe {
+                self.gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.vbo));
+                self.gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytemuck::cast_slice(&self.batch_vertices), glow::STREAM_DRAW);
+                self.gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(self.element_array_buffer));
+                self.gl.buffer_data_u8_slice(glow::ELEMENT_ARRAY_BUFFER, bytemuck::cast_slice(&self.batch_indices), glow::STREAM_DRAW);
+            }
+        }
+        let [width, height] = screen_size_px.map(|v| v as i32);
+        let mut bound = None;
+        for limit in limits {
+            // In whole blocks of 32 pixels of the canvas (its rows counted
+            // from the bottom), outward, within the frame: Intel's driver
+            // was seen to spoil a few pixels just past a part painted that
+            // ends within one of its blocks.
+            const BLOCK: i32 = 32;
+            let up = |v: i32| (v + BLOCK - 1).div_euclid(BLOCK) * BLOCK;
+            let down = |v: i32| v.div_euclid(BLOCK) * BLOCK;
+            let (from_bottom, to_top) = (down(height - limit.max.y.ceil() as i32), up(height - limit.min.y.floor() as i32));
+            let limit = [
+                down(limit.min.x.floor() as i32).clamp(0, width),
+                (height - to_top).clamp(0, height),
+                up(limit.max.x.ceil() as i32).clamp(0, width),
+                (height - from_bottom).clamp(0, height),
+            ];
+            if limit[2] <= limit[0] || limit[3] <= limit[1] {
+                continue;
+            }
+            unsafe {
+                scissor_px(&self.gl, height, limit);
+                self.gl.clear_color(clear_color[0], clear_color[1], clear_color[2], clear_color[3]);
+                self.gl.clear(glow::COLOR_BUFFER_BIT);
+            }
+            let mut first_index = 0;
+            let mut scissor = Some(limit);
+            for primitive in clipped_primitives {
+                let Primitive::Mesh(mesh) = &primitive.primitive else { continue };
+                let clip = clip_px(screen_size_px, pixels_per_point, primitive.clip_rect);
+                let within = [clip[0].max(limit[0]), clip[1].max(limit[1]), clip[2].min(limit[2]), clip[3].min(limit[3])];
+                if within[2] > within[0] && within[3] > within[1] && !mesh.indices.is_empty() {
+                    if scissor != Some(within) {
+                        unsafe { scissor_px(&self.gl, height, within) };
+                        scissor = Some(within);
+                    }
+                    self.paint_batched(mesh, first_index, &mut bound);
+                }
+                first_index += mesh.indices.len();
+            }
+        }
+        unsafe {
+            self.vao.unbind(&self.gl);
+            self.gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, None);
+            self.gl.disable(glow::SCISSOR_TEST);
+        }
+        check_for_gl_error!(&self.gl, "paint_within");
+    }
+
     /// Draws `mesh` from the frame's buffers, its indices starting at
     /// `first_index` there (native-ytm patch), binding its texture unless it
     /// is the one `bound` already.
@@ -744,6 +1002,10 @@ impl Painter {
             }
             self.gl.delete_buffer(self.vbo);
             self.gl.delete_buffer(self.element_array_buffer);
+            if let Some(canvas) = &self.canvas {
+                self.gl.delete_framebuffer(canvas.framebuffer);
+                self.gl.delete_texture(canvas.texture);
+            }
             for t in &self.textures_to_destroy {
                 self.gl.delete_texture(*t);
             }
@@ -797,6 +1059,29 @@ impl Drop for Painter {
     }
 }
 
+/// The frame as last painted (native-ytm patch): a texture and the
+/// framebuffer that paints into it.
+struct Canvas {
+    framebuffer: glow::Framebuffer,
+    texture: glow::Texture,
+    size: [u32; 2],
+}
+
+/// A clip rectangle in whole pixels from the top left corner, rounded as
+/// `set_clip_rect` rounds it: left, top, right, bottom.
+fn clip_px([width_px, height_px]: [u32; 2], pixels_per_point: f32, clip_rect: Rect) -> [i32; 4] {
+    let min_x = ((pixels_per_point * clip_rect.min.x).round() as i32).clamp(0, width_px as i32);
+    let min_y = ((pixels_per_point * clip_rect.min.y).round() as i32).clamp(0, height_px as i32);
+    let max_x = ((pixels_per_point * clip_rect.max.x).round() as i32).clamp(min_x, width_px as i32);
+    let max_y = ((pixels_per_point * clip_rect.max.y).round() as i32).clamp(min_y, height_px as i32);
+    [min_x, min_y, max_x, max_y]
+}
+
+/// The scissor set to a rectangle in pixels from the top left corner.
+unsafe fn scissor_px(gl: &glow::Context, height_px: i32, [left, top, right, bottom]: [i32; 4]) {
+    unsafe { gl.scissor(left, height_px - bottom, right - left, bottom - top) };
+}
+
 fn set_clip_rect(
     gl: &glow::Context,
     [width_px, height_px]: [u32; 2],
@@ -828,5 +1113,48 @@ fn set_clip_rect(
             clip_max_x - clip_min_x,
             clip_max_y - clip_min_y,
         );
+    }
+}
+
+/// The GPU time of frames' drawing, by timer queries, read back once the
+/// GPU has them done (native-ytm dev: eframe's `NATIVE_YTM_FRAME_STATS`).
+#[derive(Default)]
+pub struct GpuTimer {
+    pending: std::collections::VecDeque<glow::Query>,
+    spare: Vec<glow::Query>,
+    open: Option<glow::Query>,
+}
+
+impl GpuTimer {
+    /// The frame's drawing starts.
+    pub fn begin(&mut self, gl: &glow::Context) {
+        let query = match self.spare.pop() {
+            Some(query) => Some(query),
+            None => unsafe { gl.create_query().ok() },
+        };
+        if let Some(query) = query {
+            unsafe { gl.begin_query(glow::TIME_ELAPSED, query) };
+            self.open = Some(query);
+        }
+    }
+
+    /// The frame's drawing is done: the nanoseconds and the number of
+    /// earlier frames whose timings have come back since.
+    pub fn end(&mut self, gl: &glow::Context) -> (u64, u32) {
+        if let Some(query) = self.open.take() {
+            unsafe { gl.end_query(glow::TIME_ELAPSED) };
+            self.pending.push_back(query);
+        }
+        let (mut ns, mut frames) = (0, 0);
+        while let Some(&query) = self.pending.front() {
+            if unsafe { gl.get_query_parameter_u32(query, glow::QUERY_RESULT_AVAILABLE) } == 0 {
+                break;
+            }
+            self.pending.pop_front();
+            ns += unsafe { gl.get_query_parameter_u64(query, glow::QUERY_RESULT) };
+            frames += 1;
+            self.spare.push(query);
+        }
+        (ns, frames)
     }
 }

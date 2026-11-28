@@ -229,9 +229,12 @@ fn fnv(s: &str) -> u64 {
 /// pointer in small circles about that point every frame, as a hand on a
 /// mouse does; `NATIVE_YTM_WHEEL=x,y` rests it there and turns the wheel
 /// down three lines a second; `NATIVE_YTM_CLICK=x,y[,seconds]` clicks there
-/// once, ten seconds in unless told.
+/// once, ten seconds in unless told; `NATIVE_YTM_HOVER=x,y,x,y` rests it on
+/// the first point and the second in turn, two and a half seconds each, so
+/// what shows on hover (tooltips) comes and goes.
 enum Simulate {
     Wiggle(egui::Pos2),
+    Hover(egui::Pos2, egui::Pos2),
     Wheel(egui::Pos2, f64),
     /// Where, when, and how far along: 0 waiting, 1 pressed, 2 done.
     Click(egui::Pos2, f64, u8),
@@ -251,6 +254,14 @@ impl Simulate {
             let at = parts.next().flatten().unwrap_or(10.0);
             Some(Simulate::Click(egui::pos2(x as f32, y as f32), at, 0))
         };
+        let hover = || {
+            let value = std::env::var("NATIVE_YTM_HOVER").ok()?;
+            let v: Vec<f32> = value.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+            (v.len() == 4).then(|| Simulate::Hover(egui::pos2(v[0], v[1]), egui::pos2(v[2], v[3])))
+        };
+        if let Some(hover) = hover() {
+            return Some(hover);
+        }
         point("NATIVE_YTM_WIGGLE")
             .map(Simulate::Wiggle)
             .or_else(|| point("NATIVE_YTM_WHEEL").map(|p| Simulate::Wheel(p, 0.0)))
@@ -359,6 +370,11 @@ impl eframe::App for Window {
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
         let time = raw_input.time.unwrap_or(0.0);
         match &mut self.simulate {
+            Some(Simulate::Hover(a, b)) => {
+                let pos = if ((time / 2.5) as u64).is_multiple_of(2) { *a } else { *b };
+                raw_input.events.push(egui::Event::PointerMoved(pos));
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            }
             Some(Simulate::Wiggle(at)) => {
                 let t = time as f32;
                 let pos = *at + egui::vec2((t * 7.0).sin() * 30.0, (t * 5.0).cos() * 20.0);

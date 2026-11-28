@@ -79,9 +79,14 @@ struct GlowWinitRunning<'app> {
     /// Any not yet applied deltas for this app.
     pending_deltas: TexturesDelta,
 
-    /// The fingerprint of the frame last painted and presented (native-ytm
-    /// patch): a frame that would draw exactly the same is not drawn again.
-    last_painted: Option<u64>,
+    /// The frame last painted and presented, mesh by mesh (native-ytm
+    /// patch): a frame that would draw exactly the same is not drawn again,
+    /// and one that changes part of it is painted again there alone.
+    last_painted: Option<PaintedFrame>,
+    /// Frames painted in part since one was painted whole (native-ytm
+    /// patch): every sixtieth is painted whole all the same, so anything a
+    /// frame painted in part might miss lasts a second or so at most.
+    painted_in_part: u32,
 
     /// When the last frame began, and how long the screen shows a frame
     /// (with when that was last asked of it): frames come no faster than
@@ -94,6 +99,11 @@ struct GlowWinitRunning<'app> {
     /// The last frame drew what was already on screen: until one changes
     /// something, frames come at most 30 times a second.
     last_unchanged: bool,
+    /// What frames cost, when asked for (native-ytm dev; see `FrameStats`).
+    stats: Option<FrameStats>,
+    /// Whether the window was wholly covered by others when last looked,
+    /// and when (native-ytm patch; see `covered`).
+    covered: Option<(bool, Instant)>,
 }
 
 impl Drop for GlowWinitRunning<'_> {
@@ -122,11 +132,22 @@ impl GlowWinitRunning<'_> {
             .and_then(|monitor| monitor.refresh_rate_millihertz())
             .filter(|&mhz| mhz >= 24_000)
             .unwrap_or(60_000);
-        // A hair under the period, so a frame due on the screen's beat is
-        // never put off to the one after.
-        let period = Duration::from_secs_f64(1000.0 / f64::from(millihertz) * 0.97);
+        let period = Duration::from_secs_f64(1000.0 / f64::from(millihertz));
         self.frame_period = Some((period, Instant::now()));
         period
+    }
+
+    /// How far apart frames come (native-ytm patch): a whole number of the
+    /// screen's frames, the fewest that make no more than `most` a second.
+    /// On a 144 Hz screen, at most 60 a second is every third of its frames,
+    /// 48 a second, evenly: frames held to 60 a second there came two and
+    /// three of its frames apart in turn, unevenly, and more of them. At
+    /// 60 Hz, every one; at 120 Hz, every second. A hair under, so a frame
+    /// due on the screen's beat is never put off to the one after.
+    fn paced(screen: Duration, most: f64) -> Duration {
+        let screen = screen.max(Duration::from_millis(1));
+        let every = (1.0 / (screen.as_secs_f64() * most) - 0.01).ceil().max(1.0);
+        screen.mul_f64(every * 0.97)
     }
 
     /// When the next frame may come, if that is still to come: no sooner
@@ -134,10 +155,8 @@ impl GlowWinitRunning<'_> {
     /// nothing has been changing (native-ytm patch; the screen's rate as last
     /// looked up).
     fn next_frame_at(&self) -> Option<Instant> {
-        let mut period = self.frame_period.map_or(Duration::ZERO, |(period, _)| period).max(Duration::from_secs_f64(0.97 / 60.0));
-        if self.last_unchanged {
-            period = period.max(Duration::from_secs_f64(0.97 / 30.0));
-        }
+        let screen = self.frame_period.map_or(Duration::from_secs_f64(1.0 / 60.0), |(period, _)| period);
+        let period = Self::paced(screen, if self.last_unchanged { 30.0 } else { 60.0 });
         let next = self.last_frame? + period;
         (Instant::now() < next).then_some(next)
     }
@@ -286,12 +305,16 @@ impl<'app> GlowWinitApp<'app> {
             }))
         };
 
-        let painter = egui_glow::Painter::new(
+        let mut painter = egui_glow::Painter::new(
             gl,
             "",
             native_options.glow_options.shader_version,
             native_options.dithering,
         )?;
+        // native-ytm dev: frames painted whole, straight to the window, to compare.
+        if std::env::var_os("NATIVE_YTM_NO_PARTIAL").is_some() {
+            painter.disable_canvas();
+        }
 
         Ok((glutin_window_context, painter))
     }
@@ -454,10 +477,13 @@ impl<'app> GlowWinitApp<'app> {
             painter,
             pending_deltas: Default::default(),
             last_painted: None,
+            painted_in_part: 0,
             last_frame: None,
             frame_period: None,
             paint_now: false,
             last_unchanged: false,
+            stats: FrameStats::from_env(),
+            covered: None,
         }))
     }
 }
@@ -651,12 +677,10 @@ impl GlowWinitRunning<'_> {
         // 60. A frame asked for sooner is put off to the next one, its
         // input gathered meanwhile.
         if viewport_id == ViewportId::ROOT && !std::mem::take(&mut self.paint_now) {
-            let mut period = self.frame_period(viewport_id).max(Duration::from_secs_f64(0.97 / 60.0));
-            if self.last_unchanged {
-                // Nothing has been changing: a pointer moving over things
-                // that stay as they are. Look again 30 times a second.
-                period = period.max(Duration::from_secs_f64(0.97 / 30.0));
-            }
+            // Nothing has been changing (a pointer moving over things that
+            // stay as they are): looked at again 30 times a second.
+            let screen = self.frame_period(viewport_id);
+            let period = Self::paced(screen, if self.last_unchanged { 30.0 } else { 60.0 });
             if let Some(last) = self.last_frame {
                 let next = last + period;
                 if Instant::now() < next {
@@ -699,6 +723,44 @@ impl GlowWinitRunning<'_> {
                 return Ok(EventResult::Wait);
             };
             egui_winit::update_viewport_info(&mut viewport.info, &egui_ctx, window, false);
+
+            // native-ytm patch: a window wholly covered by others is not
+            // drawn, as a minimised one is not: nothing it draws is seen, and
+            // each frame presented still costs the GPU and the compositor as
+            // much as one seen (lyrics sweeping behind a browser, say). Looked
+            // at again at most every 150 ms, and while covered, every 150 ms.
+            #[cfg(target_os = "windows")]
+            // Not while it has the keyboard (an always-on-top window may
+            // cover it, and its shortcuts are handled as it is drawn).
+            if viewport_id == ViewportId::ROOT && viewport.info.minimized != Some(true) && viewport.info.focused != Some(true) {
+                static LOOK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                if *LOOK.get_or_init(|| std::env::var_os("NATIVE_YTM_NO_OCCLUSION").is_none()) {
+                    let now = Instant::now();
+                    let covered = match self.covered {
+                        Some((covered, at)) if now.duration_since(at) < Duration::from_millis(150) => covered,
+                        _ => {
+                            let covered = match window.window_handle().map(|h| h.as_raw()) {
+                                Ok(raw_window_handle::RawWindowHandle::Win32(handle)) => super::covered::covered(handle.hwnd.get()),
+                                _ => false,
+                            };
+                            self.covered = Some((covered, now));
+                            covered
+                        }
+                    };
+                    if viewport.info.occluded == Some(true) && !covered {
+                        // In sight again: drawn whole.
+                        self.last_painted = None;
+                    }
+                    viewport.info.occluded = Some(covered);
+                }
+            }
+
+            #[cfg(target_os = "windows")]
+            if viewport_id == ViewportId::ROOT && viewport.info.focused == Some(true) && viewport.info.occluded == Some(true) {
+                viewport.info.occluded = Some(false);
+                self.covered = None;
+                self.last_painted = None;
+            }
 
             let is_visible = viewport.info.visible().unwrap_or(true);
 
@@ -765,8 +827,14 @@ impl GlowWinitRunning<'_> {
                     .and_then(|viewport| viewport.window.as_deref()),
             );
 
+            // native-ytm patch: covered, it looks again in a while, to be
+            // drawn again soon after it is in sight.
+            let covered = self.covered.is_some_and(|(covered, _)| covered)
+                && self.glutin.borrow().viewports.get(&viewport_id).is_some_and(|v| v.info.minimized != Some(true));
             return Ok(if self.integration.should_close() {
                 EventResult::CloseRequested
+            } else if covered && viewport_id == ViewportId::ROOT {
+                EventResult::RepaintAt(window_id, Instant::now() + Duration::from_millis(150))
             } else {
                 EventResult::Wait
             });
@@ -782,8 +850,9 @@ impl GlowWinitRunning<'_> {
             .app
             .clear_color(&self.integration.egui_ctx.global_style().visuals);
 
-        let has_many_viewports = self.glutin.borrow().viewports.len() > 1;
-        let clear_before_update = !has_many_viewports; // HACK: for some reason, an early clear doesn't "take" on Mac with multiple viewports.
+        // native-ytm patch: no clear before the pass, for every pass, painted or
+        // not: the painter clears what it paints (see `paint_frame`).
+        let clear_before_update = false;
 
         if is_visible && clear_before_update {
             // clear before we call update, so users can paint between clear-color and egui windows:
@@ -833,9 +902,14 @@ impl GlowWinitRunning<'_> {
             painter,
             pending_deltas,
             last_painted,
+            painted_in_part,
             last_unchanged,
+            stats,
             ..
         } = self;
+        if let Some(stats) = stats.as_mut() {
+            stats.pass();
+        }
 
         let mut glutin = glutin.borrow_mut();
         let mut painter = painter.borrow_mut();
@@ -877,17 +951,23 @@ impl GlowWinitRunning<'_> {
             // and most draw what is already on screen. When this one would
             // draw exactly the last frame presented (the same meshes, no new
             // textures, nothing asked of the painter), leave the screen as it
-            // is: no drawing, no present, no GPU work.
-            let fingerprint = frame_fingerprint(&clipped_primitives, screen_size_in_pixels, pixels_per_point);
+            // is: no drawing, no present, no GPU work. Otherwise only the parts
+            // of the window where meshes changed are painted again (the
+            // painter keeps the frame), unless that is most of it.
             static SKIP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
             let skip = *SKIP.get_or_init(|| std::env::var_os("NATIVE_YTM_NO_FRAME_SKIP").is_none());
-            let unchanged = skip
-                && fingerprint.is_some()
-                && fingerprint == *last_painted
-                && pending_deltas.is_empty()
-                && viewport.actions_requested.is_empty();
+            let frame = PaintedFrame::of(&clipped_primitives, screen_size_in_pixels, pixels_per_point, clear_color);
+            let changes = match (&frame, last_painted.as_ref()) {
+                (Some(frame), Some(last)) if skip && pending_deltas.is_empty() && viewport.actions_requested.is_empty() => frame.changes_since(last),
+                _ => Changes::All,
+            };
+            let unchanged = matches!(changes, Changes::None);
             *last_unchanged = unchanged;
             if unchanged {
+                if let Some(stats) = stats.as_mut() {
+                    stats.skipped();
+                    stats.report();
+                }
                 integration.post_rendering(&window);
                 glutin.handle_viewport_output(event_loop, &integration.egui_ctx, &viewport_output);
                 integration.report_frame_time(frame_timer.total_time_sec());
@@ -898,7 +978,12 @@ impl GlowWinitRunning<'_> {
                 }
                 return Ok(EventResult::Wait);
             }
-            *last_painted = fingerprint;
+            *last_painted = frame;
+            let damage = match changes {
+                Changes::Parts(parts) if *painted_in_part < 60 => Some(parts),
+                Changes::Parts(_) | Changes::None | Changes::All => None,
+            };
+            *painted_in_part = if damage.is_some() { *painted_in_part + 1 } else { 0 };
 
             {
                 // We may need to switch contexts again, because of immediate viewports:
@@ -907,16 +992,34 @@ impl GlowWinitRunning<'_> {
                 frame_timer.resume();
             }
 
-            if !clear_before_update {
-                painter.clear(screen_size_in_pixels, clear_color);
+            if let Some(stats) = stats.as_mut() {
+                stats.begin_gpu(painter.gl());
             }
 
-            painter.paint_and_update_textures(
+            painter.paint_frame(
                 screen_size_in_pixels,
                 pixels_per_point,
+                clear_color,
                 &clipped_primitives,
                 pending_deltas,
+                damage.as_deref(),
             );
+
+            if let Some(stats) = stats.as_mut() {
+                stats.end_gpu(painter.gl());
+            }
+
+            // native-ytm dev: every tenth frame painted in part is checked
+            // against the same frame painted whole.
+            if damage.is_some() && std::env::var_os("NATIVE_YTM_DAMAGE_CHECK").is_some() {
+                static CHECKS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                let every = std::env::var("NATIVE_YTM_DAMAGE_CHECK").ok().and_then(|v| v.parse::<u32>().ok()).unwrap_or(10).max(1);
+                if CHECKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % every == 0
+                    && let Some((differ, bounds, most)) = painter.check_canvas(screen_size_in_pixels, pixels_per_point, clear_color, &clipped_primitives)
+                {
+                    log::warn!("damage check: {differ} pixels differ, by {most} at most, within {bounds:?}; parts {damage:?}");
+                }
+            }
 
             {
                 for action in viewport.actions_requested.drain(..) {
@@ -965,8 +1068,17 @@ impl GlowWinitRunning<'_> {
                     )
                 })?;
 
+                let swap = Instant::now();
                 gl_surface.swap_buffers(context)?;
+                if let Some(stats) = stats.as_mut() {
+                    stats.swapped(swap.elapsed());
+                }
                 frame_timer.resume();
+            }
+
+            if let Some(stats) = stats.as_mut() {
+                stats.painted(frame_timer.total_time_sec().into(), &clipped_primitives, screen_size_in_pixels, pixels_per_point, damage.as_deref());
+                stats.report();
             }
 
             // give it time to settle:
@@ -1908,39 +2020,293 @@ fn save_screenshot_and_exit(
     std::process::exit(0);
 }
 
-/// A fingerprint of what a frame draws: every mesh's clip, texture,
-/// vertices and indices, the screen's size and scale. `None` when the frame
-/// has a paint callback, whose drawing cannot be known (native-ytm patch).
-fn frame_fingerprint(
-    primitives: &[egui::ClippedPrimitive],
+/// A frame as painted, mesh by mesh (native-ytm patch): each mesh's
+/// fingerprint (its clip, texture, vertices and indices) and the part of
+/// the window it can reach (its vertices' bounds within its clip), with the
+/// window's size, scale and clear colour. A frame with a paint callback has
+/// none: what it draws cannot be known.
+pub(crate) struct PaintedFrame {
     screen: [u32; 2],
     pixels_per_point: f32,
-) -> Option<u64> {
-    use std::hash::{BuildHasher as _, Hasher as _};
-    let mut hasher = ahash::RandomState::with_seeds(1, 2, 3, 4).build_hasher();
-    hasher.write_u32(screen[0]);
-    hasher.write_u32(screen[1]);
-    hasher.write_u32(pixels_per_point.to_bits());
-    for primitive in primitives {
-        let clip = primitive.clip_rect;
-        for v in [clip.min.x, clip.min.y, clip.max.x, clip.max.y] {
-            hasher.write_u32(v.to_bits());
-        }
-        match &primitive.primitive {
-            egui::epaint::Primitive::Mesh(mesh) => {
-                match mesh.texture_id {
-                    egui::TextureId::Managed(id) => hasher.write_u64(id),
-                    egui::TextureId::User(id) => hasher.write_u64(id ^ (1 << 63)),
-                }
-                // The vertices and indices as they are in memory, in bulk:
-                // several times quicker than field by field.
-                hasher.write_usize(mesh.vertices.len());
-                hasher.write(bytemuck::cast_slice(&mesh.vertices));
-                hasher.write_usize(mesh.indices.len());
-                hasher.write(bytemuck::cast_slice(&mesh.indices));
+    clear: [f32; 4],
+    meshes: Vec<(u64, egui::Rect)>,
+}
+
+/// Where a frame differs from the last one painted.
+enum Changes {
+    None,
+    /// These parts of the window, in pixels from its top left corner.
+    Parts(Vec<egui::Rect>),
+    All,
+}
+
+impl PaintedFrame {
+    fn of(primitives: &[egui::ClippedPrimitive], screen: [u32; 2], pixels_per_point: f32, clear: [f32; 4]) -> Option<Self> {
+        use std::hash::{BuildHasher as _, Hasher as _};
+        let seeds = ahash::RandomState::with_seeds(1, 2, 3, 4);
+        let mut meshes = Vec::with_capacity(primitives.len());
+        for primitive in primitives {
+            let egui::epaint::Primitive::Mesh(mesh) = &primitive.primitive else {
+                return None;
+            };
+            let clip = primitive.clip_rect;
+            let mut hasher = seeds.build_hasher();
+            for v in [clip.min.x, clip.min.y, clip.max.x, clip.max.y] {
+                hasher.write_u32(v.to_bits());
             }
-            egui::epaint::Primitive::Callback(_) => return None,
+            match mesh.texture_id {
+                egui::TextureId::Managed(id) => hasher.write_u64(id),
+                egui::TextureId::User(id) => hasher.write_u64(id ^ (1 << 63)),
+            }
+            // The vertices and indices as they are in memory, in bulk:
+            // several times quicker than field by field.
+            hasher.write_usize(mesh.vertices.len());
+            hasher.write(bytemuck::cast_slice(&mesh.vertices));
+            hasher.write_usize(mesh.indices.len());
+            hasher.write(bytemuck::cast_slice(&mesh.indices));
+            let reach = if mesh.indices.is_empty() {
+                egui::Rect::NOTHING
+            } else {
+                let mut bounds = egui::Rect::NOTHING;
+                for vertex in &mesh.vertices {
+                    bounds.extend_with(vertex.pos);
+                }
+                bounds.intersect(clip)
+            };
+            meshes.push((hasher.finish(), reach));
+        }
+        Some(Self { screen, pixels_per_point, clear, meshes })
+    }
+
+    /// Where this frame differs from `before`: where a mesh that changed was
+    /// and is. Meshes are compared in place; when some came or went, those
+    /// between the first and the last that differ.
+    fn changes_since(&self, before: &Self) -> Changes {
+        if self.screen != before.screen || self.pixels_per_point != before.pixels_per_point || self.clear != before.clear {
+            return Changes::All;
+        }
+        let (old, new) = (&before.meshes, &self.meshes);
+        let mut parts: Vec<egui::Rect> = Vec::new();
+        if old.len() == new.len() {
+            for (a, b) in old.iter().zip(new) {
+                if a.0 != b.0 {
+                    parts.extend([a.1, b.1]);
+                }
+            }
+        } else {
+            let common = old.len().min(new.len());
+            let prefix = old.iter().zip(new).take_while(|(a, b)| a.0 == b.0).count();
+            let suffix = old.iter().rev().zip(new.iter().rev()).take(common - prefix).take_while(|(a, b)| a.0 == b.0).count();
+            parts.extend(old[prefix..old.len() - suffix].iter().map(|m| m.1));
+            parts.extend(new[prefix..new.len() - suffix].iter().map(|m| m.1));
+        }
+        // In whole pixels, a pixel further out, within the window.
+        let ppp = self.pixels_per_point;
+        let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(self.screen[0] as f32, self.screen[1] as f32));
+        let mut rects: Vec<egui::Rect> = parts
+            .into_iter()
+            .filter(|r| r.is_positive())
+            .map(|r| {
+                egui::Rect::from_min_max(
+                    egui::pos2((r.min.x * ppp).floor() - 1.0, (r.min.y * ppp).floor() - 1.0),
+                    egui::pos2((r.max.x * ppp).ceil() + 1.0, (r.max.y * ppp).ceil() + 1.0),
+                )
+                .intersect(window)
+            })
+            .filter(|r| r.is_positive())
+            .collect();
+        if rects.is_empty() {
+            return Changes::None;
+        }
+        merge_parts(&mut rects, 4);
+        // Painting most of the window in parts is no cheaper than all of it.
+        let area: f32 = rects.iter().map(|r| r.area()).sum();
+        if area > window.area() * 0.6 {
+            Changes::All
+        } else {
+            Changes::Parts(rects)
         }
     }
-    Some(hasher.finish())
+}
+
+/// Rectangles that overlap or nearly touch made one, and then the pairs
+/// that cost least to join joined until there are no more than `most`.
+fn merge_parts(rects: &mut Vec<egui::Rect>, most: usize) {
+    'again: loop {
+        for i in 0..rects.len() {
+            for j in i + 1..rects.len() {
+                if rects[i].expand(8.0).intersects(rects[j]) {
+                    rects[i] = rects[i].union(rects[j]);
+                    rects.swap_remove(j);
+                    continue 'again;
+                }
+            }
+        }
+        break;
+    }
+    while rects.len() > most {
+        let mut best = (0, 1, f32::INFINITY);
+        for i in 0..rects.len() {
+            for j in i + 1..rects.len() {
+                let cost = rects[i].union(rects[j]).area() - rects[i].area() - rects[j].area();
+                if cost < best.2 {
+                    best = (i, j, cost);
+                }
+            }
+        }
+        rects[best.0] = rects[best.0].union(rects[best.1]);
+        rects.swap_remove(best.1);
+    }
+}
+
+/// What frames cost, for comparing (native-ytm dev): with
+/// `NATIVE_YTM_FRAME_STATS=FILE`, a line every five seconds of how many egui
+/// passes ran, how many were painted and presented and how many skipped as
+/// unchanged, the CPU time of a painted frame (the pass, tessellating and
+/// handing it to the driver; not the wait for the screen), the GPU time of
+/// its drawing (timer queries, read back a few frames later), and how much
+/// it covers: the area of its triangles over the window's, the clear
+/// counted as one, so 3.0 is three layers of the whole window on average.
+pub(crate) struct FrameStats {
+    file: std::fs::File,
+    since: Instant,
+    passes: u32,
+    painted: u32,
+    skipped: u32,
+    cpu: f64,
+    gpu_ns: u64,
+    gpu_frames: u32,
+    cover: f64,
+    drawn: f64,
+    swap: f64,
+    meshes: u64,
+    vertices: u64,
+    timer: egui_glow::painter::GpuTimer,
+    described: bool,
+}
+
+impl FrameStats {
+    pub(crate) fn from_env() -> Option<Self> {
+        let path = std::env::var_os("NATIVE_YTM_FRAME_STATS")?;
+        let file = std::fs::OpenOptions::new().create(true).append(true).open(path).ok()?;
+        Some(Self {
+            file,
+            since: Instant::now(),
+            passes: 0,
+            painted: 0,
+            skipped: 0,
+            cpu: 0.0,
+            gpu_ns: 0,
+            gpu_frames: 0,
+            cover: 0.0,
+            drawn: 0.0,
+            swap: 0.0,
+            meshes: 0,
+            vertices: 0,
+            timer: Default::default(),
+            described: false,
+        })
+    }
+
+    fn pass(&mut self) {
+        self.passes += 1;
+    }
+
+    fn swapped(&mut self, took: Duration) {
+        self.swap += took.as_secs_f64();
+    }
+
+    fn skipped(&mut self) {
+        self.skipped += 1;
+    }
+
+    /// A frame about to be drawn: its GPU timing starts.
+    fn begin_gpu(&mut self, gl: &glow::Context) {
+        if !self.described {
+            use glow::HasContext as _;
+            use std::io::Write as _;
+            self.described = true;
+            let mut extensions: Vec<&String> = gl.supported_extensions().iter().collect();
+            extensions.sort();
+            let _ = writeln!(self.file, "extensions: {}", extensions.iter().map(|e| e.as_str()).collect::<Vec<_>>().join(" "));
+        }
+        self.timer.begin(gl);
+    }
+
+    fn end_gpu(&mut self, gl: &glow::Context) {
+        let (ns, frames) = self.timer.end(gl);
+        self.gpu_ns += ns;
+        self.gpu_frames += frames;
+    }
+
+    fn painted(&mut self, cpu: f64, primitives: &[egui::ClippedPrimitive], screen: [u32; 2], pixels_per_point: f32, damage: Option<&[egui::Rect]>) {
+        self.painted += 1;
+        let window = (screen[0] as f64 * screen[1] as f64).max(1.0);
+        self.drawn += damage.map_or(1.0, |parts| parts.iter().map(|r| f64::from(r.area())).sum::<f64>() / window);
+        self.cpu += cpu;
+        let area = (screen[0] as f64 * screen[1] as f64).max(1.0);
+        let ppp = f64::from(pixels_per_point);
+        let mut covered = area;
+        for primitive in primitives {
+            let egui::epaint::Primitive::Mesh(mesh) = &primitive.primitive else { continue };
+            self.meshes += 1;
+            self.vertices += mesh.vertices.len() as u64;
+            let clip = primitive.clip_rect;
+            for tri in mesh.indices.chunks_exact(3) {
+                let [a, b, c] = [tri[0], tri[1], tri[2]].map(|i| mesh.vertices[i as usize].pos);
+                let doubled = ((b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y)).abs() as f64;
+                if doubled == 0.0 {
+                    continue;
+                }
+                // Clipped: the share of the triangle's bounds inside the clip.
+                let bounds = egui::Rect::from_min_max(a.min(b).min(c), a.max(b).max(c));
+                let inside = bounds.intersect(clip);
+                let share = if inside.is_positive() {
+                    (inside.area() as f64 / bounds.area().max(1e-6) as f64).min(1.0)
+                } else {
+                    0.0
+                };
+                covered += doubled / 2.0 * share * ppp * ppp;
+            }
+        }
+        self.cover += covered / area;
+    }
+
+    /// Every five seconds, a line.
+    fn report(&mut self) {
+        use std::io::Write as _;
+        let secs = self.since.elapsed().as_secs_f64();
+        if secs < 5.0 {
+            return;
+        }
+        let painted = f64::from(self.painted.max(1));
+        let _ = writeln!(
+            self.file,
+            "{:.1}s passes/s {:.1} painted/s {:.1} skipped/s {:.1} cpu_ms {:.3} gpu_ms {:.3} gpu_ms_per_s {:.2} cover {:.2} drawn {:.2} swap_ms {:.3} meshes {:.0} vertices {:.0}",
+            secs,
+            f64::from(self.passes) / secs,
+            f64::from(self.painted) / secs,
+            f64::from(self.skipped) / secs,
+            self.cpu / painted * 1000.0,
+            self.gpu_ns as f64 / f64::from(self.gpu_frames.max(1)) / 1e6,
+            self.gpu_ns as f64 / 1e6 / secs,
+            self.cover / painted,
+            self.drawn / painted,
+            self.swap / painted * 1000.0,
+            self.meshes as f64 / painted,
+            self.vertices as f64 / painted,
+        );
+        self.since = Instant::now();
+        self.passes = 0;
+        self.painted = 0;
+        self.skipped = 0;
+        self.cpu = 0.0;
+        self.gpu_ns = 0;
+        self.gpu_frames = 0;
+        self.cover = 0.0;
+        self.drawn = 0.0;
+        self.swap = 0.0;
+        self.meshes = 0;
+        self.vertices = 0;
+    }
 }
