@@ -4,6 +4,12 @@ What changed in each version of Native YTM, newest first. After an update,
 the app shows what is new since the version it had; this file is built into
 it for that (src/changelog.rs).
 
+## 0.4.8 — 28 November 2026
+
+Back to how 0.4.6 drew the window.
+
+- **0.4.7's drawing changes are undone.** Painting only what changed, the new frame pacing and skipping a covered window brought glitches on some laptops without using less of the graphics card, so the window is drawn as it was in 0.4.6 again.
+
 ## 0.4.7 — 28 November 2026
 
 Less work for the graphics card, above all while lyrics sweep.
