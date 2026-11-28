@@ -239,6 +239,26 @@ pub fn set_main_window(hwnd: isize) {
     MAIN_WINDOW.store(hwnd, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// The main window's corners rounded (as Windows 11 draws a window) or
+/// square (in full screen, where rounded ones let the screen show through).
+#[cfg(windows)]
+pub fn round_main_window_corners(round: bool) {
+    use windows_sys::Win32::Graphics::Dwm::{DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND, DwmSetWindowAttribute};
+    let hwnd = MAIN_WINDOW.load(std::sync::atomic::Ordering::Relaxed);
+    if hwnd == 0 {
+        return;
+    }
+    let corners = if round { DWMWCP_ROUND } else { DWMWCP_DONOTROUND };
+    // SAFETY: the window is the app's own and the value lives through the
+    // call; an older Windows returns an error and draws as before.
+    unsafe {
+        DwmSetWindowAttribute(hwnd as windows_sys::Win32::Foundation::HWND, DWMWA_WINDOW_CORNER_PREFERENCE as u32, (&raw const corners).cast(), 4);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn round_main_window_corners(_round: bool) {}
+
 /// The main window's title bar in `caption`, after a change of theme.
 pub fn restyle_main_window(caption: egui::Color32) {
     let hwnd = MAIN_WINDOW.load(std::sync::atomic::Ordering::Relaxed);

@@ -316,6 +316,10 @@ pub struct App {
     /// before, to go back to.
     pub fullscreen: bool,
     full_view_before: bool,
+    /// Whether the window was maximised before full screen, to go back to:
+    /// a maximised window is restored first, or Windows keeps it to the
+    /// maximised size and it never fills the screen.
+    maximized_before: bool,
     /// When the mouse last moved (or a key went down), in egui's time.
     pub active_at: f64,
     /// Songs in the person's own folders.
@@ -562,6 +566,7 @@ impl App {
             full_tab: SideTab::UpNext,
             fullscreen: false,
             full_view_before: false,
+            maximized_before: false,
             active_at: 0.0,
             local,
             local_hits: None,
@@ -2895,6 +2900,10 @@ impl App {
         self.fullscreen = false;
         self.full_view = self.full_view_before;
         self.ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+        if std::mem::take(&mut self.maximized_before) {
+            self.ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+        }
+        crate::platform::round_main_window_corners(true);
     }
 }
 
@@ -3757,6 +3766,12 @@ impl App {
                     self.full_view_before = self.full_view;
                     self.full_view = true;
                     self.active_at = self.ctx.input(|i| i.time);
+                    self.maximized_before = self.ctx.input(|i| i.viewport().maximized == Some(true));
+                    if self.maximized_before {
+                        self.ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+                    }
+                    // Square corners: rounded, the screen showed through them.
+                    crate::platform::round_main_window_corners(false);
                     self.ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
                     if self.full_tab == SideTab::Lyrics {
                         self.request_lyrics();

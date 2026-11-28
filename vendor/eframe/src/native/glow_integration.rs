@@ -700,6 +700,17 @@ impl GlowWinitRunning<'_> {
             };
             egui_winit::update_viewport_info(&mut viewport.info, &egui_ctx, window, false);
 
+            // native-ytm patch: hidden behind the foreground window (or on
+            // another virtual desktop), it is treated as occluded, as a
+            // minimised one is: the app's logic runs, nothing is drawn.
+            // Windows sends nothing for this (winit's `Occluded` is not sent
+            // there), so it is looked at each pass; see `hidden_behind`.
+            #[cfg(target_os = "windows")]
+            if viewport_id == ViewportId::ROOT {
+                viewport.info.occluded =
+                    Some(viewport.info.focused != Some(true) && hidden_behind(window));
+            }
+
             let is_visible = viewport.info.visible().unwrap_or(true);
 
             let Some(egui_winit) = viewport.egui_winit.as_mut() else {
@@ -765,8 +776,17 @@ impl GlowWinitRunning<'_> {
                     .and_then(|viewport| viewport.window.as_deref()),
             );
 
+            // native-ytm patch: hidden behind another window, it looks again
+            // four times a second, to be drawn soon after it is in sight
+            // (Windows does not ask a window to paint when it is uncovered).
+            let hidden = viewport_id == ViewportId::ROOT
+                && self.glutin.borrow().viewports.get(&viewport_id).is_some_and(|v| {
+                    v.info.occluded == Some(true) && v.info.minimized != Some(true)
+                });
             return Ok(if self.integration.should_close() {
                 EventResult::CloseRequested
+            } else if hidden {
+                EventResult::RepaintAt(window_id, Instant::now() + Duration::from_millis(250))
             } else {
                 EventResult::Wait
             });
@@ -1943,4 +1963,81 @@ fn frame_fingerprint(
         }
     }
     Some(hasher.finish())
+}
+
+/// Whether `window` is out of sight behind the foreground window, or on
+/// another virtual desktop (native-ytm patch).
+///
+/// Only the foreground window is weighed, not every window above: the one
+/// that covers the player is nearly always the one in use (a maximised
+/// browser, a game). It must be above this one, wholly over it, shown, and
+/// opaque as far as Windows says (not layered, not click-through). Anything
+/// less and the window is drawn as usual.
+#[cfg(target_os = "windows")]
+#[expect(unsafe_code)]
+fn hidden_behind(window: &winit::window::Window) -> bool {
+    use windows_sys::Win32::Foundation::{HWND, RECT};
+    use windows_sys::Win32::Graphics::Dwm::{
+        DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GW_HWNDPREV, GWL_EXSTYLE, GetForegroundWindow, GetWindow, GetWindowLongW, IsIconic,
+        IsWindowVisible, WS_EX_LAYERED, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+    };
+
+    let Ok(raw_window_handle::RawWindowHandle::Win32(handle)) =
+        window.window_handle().map(|h| h.as_raw())
+    else {
+        return false;
+    };
+    let own = handle.hwnd.get() as HWND;
+
+    // SAFETY: plain queries of window handles; a handle gone stale meanwhile
+    // makes them fail, which reads as "not hidden".
+    unsafe {
+        let attribute = |hwnd: HWND, attribute: i32, out: *mut core::ffi::c_void, size: usize| {
+            DwmGetWindowAttribute(hwnd, attribute as _, out, size as u32) >= 0
+        };
+        let cloaked = |hwnd: HWND| {
+            let mut cloaked = 0u32;
+            attribute(hwnd, DWMWA_CLOAKED, (&raw mut cloaked).cast(), size_of::<u32>()) && cloaked != 0
+        };
+        let bounds = |hwnd: HWND| {
+            let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            attribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, (&raw mut r).cast(), size_of::<RECT>()).then_some(r)
+        };
+
+        if cloaked(own) {
+            return true;
+        }
+        let front = GetForegroundWindow();
+        if front.is_null() || front == own || IsWindowVisible(front) == 0 || IsIconic(front) != 0 || cloaked(front) {
+            return false;
+        }
+        let ex = GetWindowLongW(front, GWL_EXSTYLE) as u32;
+        let own_ex = GetWindowLongW(own, GWL_EXSTYLE) as u32;
+        if ex & (WS_EX_LAYERED | WS_EX_TRANSPARENT) != 0
+            || (own_ex & WS_EX_TOPMOST != 0 && ex & WS_EX_TOPMOST == 0)
+        {
+            return false;
+        }
+        // Above this one? (Clicking the desktop makes it the foreground
+        // window, yet it stays below everything.)
+        let mut above = GetWindow(own, GW_HWNDPREV);
+        let mut looked = 0;
+        while !above.is_null() && above != front {
+            looked += 1;
+            if looked > 2000 {
+                return false;
+            }
+            above = GetWindow(above, GW_HWNDPREV);
+        }
+        if above.is_null() {
+            return false;
+        }
+        let (Some(a), Some(b)) = (bounds(front), bounds(own)) else {
+            return false;
+        };
+        a.left <= b.left && a.top <= b.top && a.right >= b.right && a.bottom >= b.bottom
+    }
 }
