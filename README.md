@@ -313,25 +313,12 @@ the signed-in player request, then the playback address it names.
 **Frames.** egui runs a frame for every pointer movement. The vendored
 eframe (`vendor/eframe`, search for "native-ytm patch") puts off a frame
 asked for before the screen could show the last, and neither draws nor
-presents a frame identical to the one on screen; it holds frames to a whole
-number of the screen's own, no more than 60 a second (every third at 144 Hz,
-48 evenly; 30 a second while they come out unchanged), and asks for a frame
-put off by pointer movement for when it may come, rather than having Windows
-send a paint for every movement. It keeps each frame mesh by mesh (a
-fingerprint and the part of the window each reaches), so the next is
-painted again only where meshes changed: while lyrics sweep, the line being
-sung and the seek bar rather than the whole window. The vendored egui_glow
-(`vendor/egui_glow`) paints into a texture of its own the window's size,
-only within those parts (rounded out to blocks of 32 pixels: Intel's driver
-was seen to spoil a few pixels past a part that ends within one), and copies it to the window in one plain pass (the
-window's own back buffer cannot be painted in part: after a swap it holds
-nothing to keep, Intel's driver swapping two of them, and the driver ignores
-`GL_WIN_swap_hint`); every sixtieth frame is painted whole all the same. A
-window wholly covered by others (`vendor/eframe/src/native/covered.rs`,
-worked out as Chromium does) is not drawn at all, as a minimised one is not,
-and looks again every 150 ms. egui_glow also sends a frame to the GPU in one
-vertex buffer and one index buffer, rather than two made afresh for every
-mesh. Animations the app
+presents a frame identical to the one on screen; it holds frames to 60 a
+second (30 while they come out unchanged), and asks for a frame put off by
+pointer movement for when it may come, rather than having Windows send a
+paint for every movement. The vendored egui_glow
+(`vendor/egui_glow`) sends a frame to the GPU in one vertex buffer and one
+index buffer, rather than two made afresh for every mesh. Animations the app
 drives are held to 60 frames a second (`theme::repaint_in` makes up for egui
 shortening every delay by a frame); the line of lyrics being sung is one mesh,
 its glyphs cut and coloured where the singing has got to, drawn about a pixel
@@ -356,14 +343,7 @@ them, for animations);
 the end), `NATIVE_YTM_MUTE`;
 `NATIVE_YTM_NO_DISCORD`; `NATIVE_YTM_PROFILE=DIR` runs a separate copy with
 its own data; `NATIVE_YTM_WIGGLE=x,y`, `NATIVE_YTM_WHEEL=x,y` and
-`NATIVE_YTM_CLICK=x,y[,seconds]` and `NATIVE_YTM_HOVER=x,y,x,y` (resting on each in turn) make up pointer input; `NATIVE_YTM_NO_FRAME_SKIP` draws identical frames anyway;
-`NATIVE_YTM_NO_PARTIAL` paints every frame whole, straight to the window, and
-`NATIVE_YTM_NO_OCCLUSION` draws a covered window anyway, to compare;
-`NATIVE_YTM_DAMAGE_CHECK[=N]` paints every Nth frame painted in part whole as
-well and logs any pixel that differs; `NATIVE_YTM_FRAME_STATS=FILE` writes
-what frames cost every five seconds (egui passes, frames painted and
-skipped, the CPU and GPU time of one, by GPU timer queries, how many layers
-of the window it covers and how much of it was painted);
+`NATIVE_YTM_CLICK=x,y[,seconds]` make up pointer input; `NATIVE_YTM_NO_FRAME_SKIP` draws identical frames anyway;
 `NATIVE_YTM_OFFLINE` makes the app believe it is offline.
 `ytm-probe` is a console tool for when YouTube changes something: `dump`
 prints what the parsers make of live pages, `play` resolves and plays a
