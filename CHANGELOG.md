@@ -4,6 +4,14 @@ What changed in each version of Native YTM, newest first. After an update,
 the app shows what is new since the version it had; this file is built into
 it for that (src/changelog.rs).
 
+## 0.4.7 — 28 November 2026
+
+Less work for the graphics card, above all while lyrics sweep.
+
+- **Only what changed is painted again.** While lyrics sweep word by word, each frame used to paint the whole window again; now it paints the line being sung and the seek bar, and copies the rest over as it was. Measured on a desktop with Intel graphics: about 15–25% less GPU time a frame there, and about a third less CPU (from about 12% of a core to 8–9% with the lyrics open). On integrated graphics, where filling the window is what costs, the saving should be bigger.
+- **Evener frames on fast screens.** On a 144 Hz screen frames now come every third of the screen's, 48 a second, evenly, rather than two or three apart in turn: smoother, and a fifth fewer for the app and for Windows to put on screen. At 60 Hz nothing changes.
+- **Nothing drawn while the window is hidden behind others.** With another window wholly over it (a maximised browser, say), the app stops drawing, as it does when minimised, and starts again within a fraction of a second once it shows: there, from about 2% of the GPU and 12% of a core to none and under 1%. A window you are using is always drawn.
+
 ## 0.4.6 — 27 November 2026
 
 Words that light as they're sung, when the lyrics say only when each starts.
